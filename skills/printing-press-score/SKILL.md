@@ -42,7 +42,7 @@ if [ -z "$PRESS_BASE" ]; then
   PRESS_BASE="workspace"
 fi
 PRESS_SCOPE="$PRESS_BASE-$(printf '%s' "$REPO_ROOT" | shasum -a 256 | cut -c1-8)"
-PRESS_HOME="$HOME/.printing-press"
+PRESS_HOME="$HOME/printing-press"
 PRESS_RUNSTATE="$PRESS_HOME/.runstate/$PRESS_SCOPE"
 PRESS_CURRENT="$PRESS_RUNSTATE/current"
 PRESS_LIBRARY="$PRESS_HOME/library"

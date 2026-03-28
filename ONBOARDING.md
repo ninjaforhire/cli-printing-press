@@ -58,7 +58,7 @@ cli-printing-press/
 
 Data flows through the system like this: a spec file (OpenAPI, GraphQL SDL, or internal YAML) gets parsed into an `APISpec` struct. The profiler analyzes that struct to detect domain signals and recommend features. The generator takes both the spec and the profile, selects the right templates, and renders a full Go project to disk.
 
-The pipeline module adds a higher-level orchestration layer on top. When you run `printing-press print Discord`, it creates a 9-phase managed run under `~/.printing-press/.runstate/<scope>/runs/<run-id>/` with seed documents and `state.json` for resumability. The normal skill flow does not require all 9 phases; it uses the faster direct loop unless you explicitly ask for resumable phase plans.
+The pipeline module adds a higher-level orchestration layer on top. When you run `printing-press print Discord`, it creates a 9-phase managed run under `~/printing-press/.runstate/<scope>/runs/<run-id>/` with seed documents and `state.json` for resumability. The normal skill flow does not require all 9 phases; it uses the faster direct loop unless you explicitly ask for resumable phase plans.
 
 This project has no external service dependencies. It's a pure Go binary that reads spec files and writes generated code.
 
@@ -124,7 +124,7 @@ internal/generator/generator.go (New + Generate)
   renders 30+ .tmpl files to output dir
   |
   v
-Generated CLI project published at ~/.printing-press/library/<name>-pp-cli/
+Generated CLI project published at ~/printing-press/library/<name>-pp-cli/
   cmd/<name>-pp-cli/main.go
   cmd/<name>-mcp/main.go
   internal/cli/   (per-resource commands)
@@ -143,9 +143,9 @@ Use this only when you explicitly want on-disk phase seeds and resumable state:
 
 1. `internal/cli/root.go` (`newPrintCmd`) calls `pipeline.Init()` with the API name
 2. `pipeline.Init()` calls `DiscoverSpec()` which looks up the API in `catalog/` entries
-3. A managed run is created under `~/.printing-press/.runstate/<scope>/runs/<run-id>/`
+3. A managed run is created under `~/printing-press/.runstate/<scope>/runs/<run-id>/`
 4. Seeds are written into `pipeline/`, research artifacts into `research/`, and scorecard/dogfood evidence into `proofs/`
-5. `state.json` tracks progress across sessions, and completed runs archive to `~/.printing-press/manuscripts/<api>/<run-id>/`
+5. `state.json` tracks progress across sessions, and completed runs archive to `~/printing-press/manuscripts/<api>/<run-id>/`
 
 ### Flow 4: Docs-to-Spec (`--docs`)
 

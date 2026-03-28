@@ -44,7 +44,7 @@ Run `go test ./...` before considering your work done.
 
 Generated CLIs must pass 7 gates: go mod tidy, go vet, go build, binary build, --help, version, doctor.
 
-## `~/.printing-press/` Layout
+## `~/printing-press/` Layout
 
 Generated artifacts live under the user's home directory, not in this repo.
 

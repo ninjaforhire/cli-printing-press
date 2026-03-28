@@ -282,10 +282,10 @@ func newGenerateCmd() *cobra.Command {
 
 	cmd.Flags().StringSliceVar(&specFiles, "spec", nil, "Path or URL to API spec (can be repeated)")
 	cmd.Flags().StringVar(&cliName, "name", "", "CLI name (required when using multiple specs)")
-	cmd.Flags().StringVar(&outputDir, "output", "", "Output directory (default: ~/.printing-press/library/<name>-pp-cli)")
+	cmd.Flags().StringVar(&outputDir, "output", "", "Output directory (default: ~/printing-press/library/<name>-pp-cli)")
 	cmd.Flags().BoolVar(&validate, "validate", true, "Run quality gates on the generated project")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Refresh cached remote spec before generating")
-	cmd.Flags().BoolVar(&force, "force", false, "Overwrite the base output directory (e.g. ~/.printing-press/library/notion-pp-cli) instead of auto-incrementing")
+	cmd.Flags().BoolVar(&force, "force", false, "Overwrite the base output directory (e.g. ~/printing-press/library/notion-pp-cli) instead of auto-incrementing")
 	cmd.Flags().BoolVar(&lenient, "lenient", false, "Skip validation errors from broken $refs in OpenAPI specs")
 	cmd.Flags().StringVar(&docsURL, "docs", "", "API documentation URL to generate spec from")
 	cmd.Flags().BoolVar(&polish, "polish", false, "Run LLM polish pass on generated CLI (requires claude or codex CLI)")
@@ -509,7 +509,7 @@ func newPrintCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&outputDir, "output", "", "Working directory (default: ~/.printing-press/.runstate/<scope>/runs/<run-id>/working/<api-name>-pp-cli)")
+	cmd.Flags().StringVar(&outputDir, "output", "", "Working directory (default: ~/printing-press/.runstate/<scope>/runs/<run-id>/working/<api-name>-pp-cli)")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing pipeline")
 	cmd.Flags().BoolVar(&resume, "resume", false, "Resume from existing checkpoint")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")

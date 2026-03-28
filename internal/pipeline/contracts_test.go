@@ -61,7 +61,7 @@ func TestSkillSetupBlocksMatchWorkspaceContract(t *testing.T) {
 			assert.Contains(t, block, `REPO_ROOT="$(git rev-parse --show-toplevel)"`)
 			assert.Contains(t, block, `PRESS_BASE="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/-/g; s/^-+//; s/-+$//')"`)
 			assert.Contains(t, block, `PRESS_SCOPE="$PRESS_BASE-$(printf '%s' "$REPO_ROOT" | shasum -a 256 | cut -c1-8)"`)
-			assert.Contains(t, block, `PRESS_HOME="$HOME/.printing-press"`)
+			assert.Contains(t, block, `PRESS_HOME="$HOME/printing-press"`)
 			assert.Contains(t, block, `PRESS_RUNSTATE="$PRESS_HOME/.runstate/$PRESS_SCOPE"`)
 			assert.Contains(t, block, `PRESS_LIBRARY="$PRESS_HOME/library"`)
 			assert.NotContains(t, full, "~/cli-printing-press")
@@ -97,9 +97,9 @@ func TestPrintingPressSkillExamplesUseCurrentCLINaming(t *testing.T) {
 func TestREADMEOutputContract(t *testing.T) {
 	readme := readContractFile(t, filepath.Join("..", "..", "README.md"))
 
-	assert.Contains(t, readme, "~/.printing-press/.runstate/<scope>/runs/<run-id>/working/<api>-pp-cli")
-	assert.Contains(t, readme, "~/.printing-press/library/<api>-pp-cli")
-	assert.Contains(t, readme, "~/.printing-press/manuscripts/<api>/<run-id>/")
+	assert.Contains(t, readme, "~/printing-press/.runstate/<scope>/runs/<run-id>/working/<api>-pp-cli")
+	assert.Contains(t, readme, "~/printing-press/library/<api>-pp-cli")
+	assert.Contains(t, readme, "~/printing-press/manuscripts/<api>/<run-id>/")
 	assert.Contains(t, readme, "`research/`, `proofs/`, and `pipeline/`")
 	assert.NotContains(t, readme, "cd ~/cli-printing-press")
 }
@@ -107,9 +107,9 @@ func TestREADMEOutputContract(t *testing.T) {
 func TestGenerateHelpMentionsPublishedLibraryDefault(t *testing.T) {
 	root := readContractFile(t, filepath.Join("..", "..", "internal", "cli", "root.go"))
 
-	assert.Contains(t, root, "Output directory (default: ~/.printing-press/library/<name>-pp-cli)")
-	assert.Contains(t, root, "Overwrite the base output directory (e.g. ~/.printing-press/library/notion-pp-cli)")
-	assert.NotContains(t, root, "~/.printing-press/workspaces/<scope>/library")
+	assert.Contains(t, root, "Output directory (default: ~/printing-press/library/<name>-pp-cli)")
+	assert.Contains(t, root, "Overwrite the base output directory (e.g. ~/printing-press/library/notion-pp-cli)")
+	assert.NotContains(t, root, "~/printing-press/workspaces/<scope>/library")
 }
 
 func TestOnboardingReflectsCurrentPipelinePhaseCount(t *testing.T) {
@@ -117,9 +117,9 @@ func TestOnboardingReflectsCurrentPipelinePhaseCount(t *testing.T) {
 
 	assert.Contains(t, onboarding, "9-phase pipeline")
 	assert.Contains(t, onboarding, "agent-readiness")
-	assert.Contains(t, onboarding, "~/.printing-press/.runstate/<scope>/runs/<run-id>/")
-	assert.Contains(t, onboarding, "~/.printing-press/library/<name>-pp-cli/")
-	assert.Contains(t, onboarding, "~/.printing-press/manuscripts/<api>/<run-id>/")
+	assert.Contains(t, onboarding, "~/printing-press/.runstate/<scope>/runs/<run-id>/")
+	assert.Contains(t, onboarding, "~/printing-press/library/<name>-pp-cli/")
+	assert.Contains(t, onboarding, "~/printing-press/manuscripts/<api>/<run-id>/")
 	assert.NotContains(t, onboarding, "8-phase pipeline")
 }
 

@@ -24,7 +24,7 @@ Generate the best useful CLI for an API without burning an hour on phase theater
 /printing-press Discord codex
 /printing-press --spec ./openapi.yaml
 /printing-press emboss ./discord-pp-cli
-/printing-press emboss ~/.printing-press/library/notion-pp-cli
+/printing-press emboss ~/printing-press/library/notion-pp-cli
 ```
 
 ## What Changed In v2
@@ -71,7 +71,7 @@ If Codex fails 3 times in a row, stop delegating and finish locally.
 If the arguments start with `emboss`, this is a second-pass improvement cycle for an existing generated CLI.
 
 ```bash
-/printing-press emboss ~/.printing-press/library/notion-pp-cli
+/printing-press emboss ~/printing-press/library/notion-pp-cli
 ```
 
 Use the built-in audit command:
@@ -116,7 +116,7 @@ if [ -z "$PRESS_BASE" ]; then
 fi
 
 PRESS_SCOPE="$PRESS_BASE-$(printf '%s' "$REPO_ROOT" | shasum -a 256 | cut -c1-8)"
-PRESS_HOME="$HOME/.printing-press"
+PRESS_HOME="$HOME/printing-press"
 PRESS_RUNSTATE="$PRESS_HOME/.runstate/$PRESS_SCOPE"
 PRESS_LIBRARY="$PRESS_HOME/library"
 PRESS_MANUSCRIPTS="$PRESS_HOME/manuscripts"

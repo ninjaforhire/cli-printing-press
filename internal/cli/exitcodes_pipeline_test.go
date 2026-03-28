@@ -27,7 +27,7 @@ func TestPrintCmd_AlreadyExists_ExitCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
-	t.Setenv("PRINTING_PRESS_HOME", filepath.Join(tmp, ".printing-press"))
+	t.Setenv("PRINTING_PRESS_HOME", filepath.Join(tmp, "printing-press"))
 	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
 	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
 
@@ -91,7 +91,7 @@ func TestPipelineInitDiscoverSpec_ErrorSubstring(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
-	t.Setenv("PRINTING_PRESS_HOME", filepath.Join(tmp, ".printing-press"))
+	t.Setenv("PRINTING_PRESS_HOME", filepath.Join(tmp, "printing-press"))
 	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
 	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
 

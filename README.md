@@ -261,9 +261,9 @@ Each run produces two binaries (`<api>-pp-cli` + `<api>-pp-mcp`), 8 analysis doc
 
 By default, active and published output are separated:
 
-- Active managed runs work in `~/.printing-press/.runstate/<scope>/runs/<run-id>/working/<api>-pp-cli`
-- Published CLIs go to `~/.printing-press/library/<api>-pp-cli`
-- Archived manuscripts go to `~/.printing-press/manuscripts/<api>/<run-id>/`
+- Active managed runs work in `~/printing-press/.runstate/<scope>/runs/<run-id>/working/<api>-pp-cli`
+- Published CLIs go to `~/printing-press/library/<api>-pp-cli`
+- Archived manuscripts go to `~/printing-press/manuscripts/<api>/<run-id>/`
 - Manuscripts are split into `research/`, `proofs/`, and `pipeline/`
 
 `<scope>` is derived from the current git checkout path, so parallel worktrees do not stomp on each other. If you pass `--output`, that overrides the generated CLI location for that command.

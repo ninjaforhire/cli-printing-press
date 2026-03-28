@@ -17,9 +17,9 @@ func PressHome() string {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".printing-press")
+		return filepath.Join(".", "printing-press")
 	}
-	return filepath.Join(home, ".printing-press")
+	return filepath.Join(home, "printing-press")
 }
 
 func WorkspaceScope() string {

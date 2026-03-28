@@ -12,9 +12,9 @@ origin: direct user request and design decisions from 2026-03-28 architecture di
 
 Rework printing-press storage so active runs no longer depend on globally shared mutable directories. The new model separates:
 
-- **mutable run state** in `~/.printing-press/.runstate/`
-- **published CLIs** in `~/.printing-press/library/`
-- **archived manuscripts** in `~/.printing-press/manuscripts/`
+- **mutable run state** in `~/printing-press/.runstate/`
+- **published CLIs** in `~/printing-press/library/`
+- **archived manuscripts** in `~/printing-press/manuscripts/`
 
 The goal is to keep the repo location irrelevant, preserve worktree isolation, and stop resume/discovery logic from treating published artifacts as live working state.
 
@@ -30,7 +30,7 @@ Flattening everything into global `library/` and `manuscripts/` fixes repo pollu
 The cleaner architecture is:
 
 ```text
-~/.printing-press/
+~/printing-press/
   .runstate/
     <scope>/
       current/
@@ -62,7 +62,7 @@ This makes `.runstate` the source of truth for active work. `library/` and `manu
 
 - R1. The press must work from any clone path, subdirectory, or git worktree.
 - R2. Mutable pipeline state must be isolated per checkout scope and per run.
-- R3. Published CLIs must live in a single global `~/.printing-press/library/` namespace with deduped directory claims.
+- R3. Published CLIs must live in a single global `~/printing-press/library/` namespace with deduped directory claims.
 - R4. Research, proofs, and pipeline records for a finished run must be publishable to a global manuscript archive without becoming the live resume source.
 - R5. Resume, score, and skill discovery must resolve the current run from `.runstate`, not by scanning global `library/` or `manuscripts/`.
 - R6. Every run must have durable metadata linking scope, run ID, git root, API name, spec source, working dir, and published outputs.
@@ -196,7 +196,7 @@ The archive is intended for inspection, historical comparison, and later export.
 
 `printing-press generate` is a direct artifact-producing command, not a multi-phase managed run. Its default output should remain publish-oriented:
 
-- default path: `~/.printing-press/library/<api>-pp-cli[-N]/`
+- default path: `~/printing-press/library/<api>-pp-cli[-N]/`
 - explicit `--output` still wins
 
 The `.runstate` layout is primarily for managed `print` runs and the supporting skills that need safe mutable state.

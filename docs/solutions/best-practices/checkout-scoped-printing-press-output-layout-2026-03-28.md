@@ -48,7 +48,7 @@ The press used to assume one clone path and one shared mutable output namespace.
 Use a checkout-scoped runstate derived from the current git root for active work, then publish finished output into global archive locations:
 
 ```text
-~/.printing-press/
+~/printing-press/
   .runstate/<scope>/
     current/
       <api>.json
@@ -77,7 +77,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 PRESS_BASE="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/-/g; s/^-+//; s/-+$//')"
 [ -n "$PRESS_BASE" ] || PRESS_BASE="workspace"
 PRESS_SCOPE="$PRESS_BASE-$(printf '%s' "$REPO_ROOT" | shasum -a 256 | cut -c1-8)"
-PRESS_HOME="$HOME/.printing-press"
+PRESS_HOME="$HOME/printing-press"
 PRESS_RUNSTATE="$PRESS_HOME/.runstate/$PRESS_SCOPE"
 ```
 
