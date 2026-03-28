@@ -8,7 +8,7 @@ Just making a CLI is not hard. Making a CLI that understands the power user is e
 /printing-press Linear
 ```
 
-One command. 12 phases. ~1 hour. Produces a Go CLI + MCP server + 8 analysis documents. REST or GraphQL. Matches every competitor feature, then adds the data layer they don't have.
+One command. 13 phases. ~1 hour. Produces a Go CLI + MCP server + 8 analysis documents. REST or GraphQL. Matches every competitor feature, then adds the data layer they don't have.
 
 ### Get it
 
@@ -127,6 +127,7 @@ Phase 2     Generate                  (1-2 min)    Go CLI + MCP server from spec
 Phase 3     Non-Obvious Insight Review(5-8 min)    Two-tier scoring + competitor feature matrix
 Phase 4     GOAT Build                (20-30 min)  7 priorities: data layer, table stakes, workflows, names, tests, distribution
 Phase 4.7   Proof of Behavior         (30 sec)     Verify data actually flows (no hallucinations)
+Phase 4.9   Agent Readiness           (auto)       CLI agent readiness reviewer loop (max 2 passes)
 Phase 5     Ship Readiness Assessment (2-3 min)    Three-benchmark gate: architecture + quality + features
 Phase 5.5   Live API Testing          (optional)   Read-only tests + data pipeline smoke test
 Phase 5.7   Ship Loop                 (auto)       Fix issues and re-score until PASS
