@@ -143,6 +143,9 @@ func newPublishPackageCmd() *cobra.Command {
 			if category == "" {
 				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--category is required")}
 			}
+			if strings.Contains(category, "/") || strings.Contains(category, "\\") || strings.Contains(category, "..") {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--category must be a simple slug (no path separators or '..')")}
+			}
 			if target == "" {
 				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--target is required")}
 			}
@@ -173,6 +176,14 @@ func newPublishPackageCmd() *cobra.Command {
 
 			// Build staging structure: target/library/<category>/<cli-name>/
 			stagingCLIDir := filepath.Join(target, "library", category, cliName)
+
+			// Verify the resolved path is actually under target (defense in depth)
+			absTarget, _ := filepath.Abs(target)
+			absStaging, _ := filepath.Abs(stagingCLIDir)
+			if !strings.HasPrefix(absStaging, absTarget+string(filepath.Separator)) {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("resolved staging path %s escapes target directory %s", absStaging, absTarget)}
+			}
+
 			if err := os.MkdirAll(filepath.Dir(stagingCLIDir), 0o755); err != nil {
 				return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("creating staging dir: %w", err)}
 			}
@@ -288,7 +299,10 @@ func runValidation(dir string) ValidateResult {
 	if cliName == "" {
 		cliName = filepath.Base(dir)
 	}
-	binaryPath := findBuiltBinary(dir, cliName)
+	binaryPath, binaryCreated := findBuiltBinary(dir, cliName)
+	if binaryCreated {
+		defer os.Remove(binaryPath) // Clean up to avoid staging compiled artifacts
+	}
 	if binaryPath == "" {
 		result.Checks = append(result.Checks, CheckResult{Name: "--help", Passed: false, Error: "built binary not found"})
 		allPassed = false
@@ -424,7 +438,10 @@ func checkGoModTidy(dir string) CheckResult {
 	return CheckResult{Name: "go mod tidy", Passed: true}
 }
 
-func findBuiltBinary(dir, cliName string) string {
+// findBuiltBinary locates or builds the CLI binary. Returns the path and
+// whether the binary was created by this function (and should be cleaned up
+// after use to avoid staging compiled artifacts).
+func findBuiltBinary(dir, cliName string) (path string, created bool) {
 	// Check existing candidate paths first
 	candidates := []string{
 		filepath.Join(dir, cliName),
@@ -433,7 +450,7 @@ func findBuiltBinary(dir, cliName string) string {
 
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && !info.IsDir() {
-			return c
+			return c, false
 		}
 	}
 
@@ -444,7 +461,7 @@ func findBuiltBinary(dir, cliName string) string {
 	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", outPath, "./cmd/"+cliName)
 	buildCmd.Dir = dir
 	if err := buildCmd.Run(); err == nil {
-		return outPath
+		return outPath, true
 	}
 
 	// Last resort: try building from root
@@ -453,10 +470,10 @@ func findBuiltBinary(dir, cliName string) string {
 	buildCmd2 := exec.CommandContext(ctx2, "go", "build", "-o", outPath, ".")
 	buildCmd2.Dir = dir
 	if err := buildCmd2.Run(); err == nil {
-		return outPath
+		return outPath, true
 	}
 
-	return ""
+	return "", false
 }
 
 func findMostRecentRun(msAPIDir string) (string, error) {

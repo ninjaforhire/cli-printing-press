@@ -209,6 +209,41 @@ func TestPublishPackageTargetExists(t *testing.T) {
 	assert.Contains(t, err.Error(), "already exists")
 }
 
+func TestPublishPackageCategoryPathTraversal(t *testing.T) {
+	home := setLibraryTestEnv(t)
+	cliDir := filepath.Join(home, "library", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(cliDir, 0o755))
+
+	writeTestManifest(t, cliDir, pipeline.CLIManifest{
+		SchemaVersion: 1,
+		APIName:       "test",
+		CLIName:       "test-pp-cli",
+	})
+
+	tests := []struct {
+		name     string
+		category string
+		wantErr  string
+	}{
+		{"dotdot traversal", "../../../escape", "simple slug"},
+		{"forward slash", "foo/bar", "simple slug"},
+		{"backslash", "foo\\bar", "simple slug"},
+		{"dotdot only", "..", "simple slug"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "staging")
+			cmd := newPublishCmd()
+			cmd.SetArgs([]string{"package", "--dir", cliDir, "--category", tt.category, "--target", target, "--json"})
+
+			err := cmd.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestFindMostRecentRun(t *testing.T) {
 	dir := t.TempDir()
 
