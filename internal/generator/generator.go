@@ -15,6 +15,7 @@ import (
 	"github.com/mvanhorn/cli-printing-press/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/internal/profiler"
 	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/internal/websniff"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -23,12 +24,13 @@ import (
 var templateFS embed.FS
 
 type Generator struct {
-	Spec      *spec.APISpec
-	OutputDir string
-	VisionSet VisionTemplateSet
-	profile   *profiler.APIProfile
-	funcs     template.FuncMap
-	templates map[string]*template.Template
+	Spec       *spec.APISpec
+	OutputDir  string
+	VisionSet  VisionTemplateSet
+	FixtureSet *websniff.FixtureSet
+	profile    *profiler.APIProfile
+	funcs      template.FuncMap
+	templates  map[string]*template.Template
 }
 
 func New(s *spec.APISpec, outputDir string) *Generator {
@@ -120,6 +122,12 @@ func (g *Generator) Generate() error {
 	for tmplName, outPath := range singleFiles {
 		if err := g.renderTemplate(tmplName, outPath, g.Spec); err != nil {
 			return fmt.Errorf("rendering %s: %w", tmplName, err)
+		}
+	}
+
+	if g.FixtureSet != nil {
+		if err := g.renderTemplate("captured_test.go.tmpl", filepath.Join("internal", "client", "client_captured_test.go"), g.FixtureSet); err != nil {
+			return fmt.Errorf("rendering captured fixture tests: %w", err)
 		}
 	}
 

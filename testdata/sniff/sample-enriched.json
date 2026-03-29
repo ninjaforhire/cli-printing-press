@@ -1,0 +1,42 @@
+{
+  "target_url": "https://hn.algolia.com",
+  "captured_at": "2026-03-28T16:00:00Z",
+  "interaction_rounds": 2,
+  "entries": [
+    {
+      "method": "POST",
+      "url": "https://uj5wyc0l7x-dsn.algolia.net/1/indexes/Item_dev/query?x-algolia-api-key=28f0e1ec37a5e792e6845e67da5f20dd&x-algolia-application-id=UJ5WYC0L7X",
+      "request_headers": {
+        "Content-Type": "application/json"
+      },
+      "request_body": "{\"query\": \"kubernetes\", \"page\": 0, \"hitsPerPage\": 3}",
+      "response_status": 200,
+      "response_content_type": "application/json",
+      "response_body": "{\"hits\": [{\"objectID\": \"21711748\", \"title\": \"Troubleshooting K8s\", \"url\": \"https://example.com\", \"author\": \"test\", \"points\": 240, \"num_comments\": 53, \"created_at\": \"2019-12-05T12:22:28Z\", \"created_at_i\": 1575548548}, {\"objectID\": \"21711749\", \"title\": \"K8s Best Practices\", \"url\": \"https://example2.com\", \"author\": \"test2\", \"points\": 180, \"num_comments\": 30, \"created_at\": \"2020-01-10T08:00:00Z\", \"created_at_i\": 1578643200}], \"nbHits\": 4804, \"page\": 0, \"nbPages\": 334, \"hitsPerPage\": 3, \"processingTimeMS\": 16, \"query\": \"kubernetes\"}",
+      "classification": "api",
+      "is_noise": false
+    },
+    {
+      "method": "GET",
+      "url": "https://www.google-analytics.com/collect?v=1&tid=UA-12345",
+      "request_headers": {},
+      "request_body": "",
+      "response_status": 200,
+      "response_content_type": "image/gif",
+      "response_body": "",
+      "classification": "noise",
+      "is_noise": true
+    },
+    {
+      "method": "GET",
+      "url": "https://hn.algolia.com/assets/app-abc123.js",
+      "request_headers": {},
+      "request_body": "",
+      "response_status": 200,
+      "response_content_type": "application/javascript",
+      "response_body": "",
+      "classification": "noise",
+      "is_noise": true
+    }
+  ]
+}

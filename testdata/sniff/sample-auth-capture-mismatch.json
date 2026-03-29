@@ -1,0 +1,29 @@
+{
+  "target_url": "https://other.example.com",
+  "captured_at": "2026-03-28T20:00:00Z",
+  "interaction_rounds": 1,
+  "auth": {
+    "headers": {
+      "Authorization": "Bearer test-token-123"
+    },
+    "cookies": [],
+    "type": "bearer",
+    "bound_domain": "other.example.com",
+    "expires_at": "2026-03-28T21:00:00Z"
+  },
+  "entries": [
+    {
+      "method": "GET",
+      "url": "https://other.example.com/v1/me",
+      "request_headers": {
+        "Authorization": "Bearer test-token-123"
+      },
+      "request_body": "",
+      "response_status": 200,
+      "response_content_type": "application/json",
+      "response_body": "{\"ok\":true}",
+      "classification": "api",
+      "is_noise": false
+    }
+  ]
+}

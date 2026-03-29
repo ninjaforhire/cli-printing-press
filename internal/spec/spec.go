@@ -21,7 +21,7 @@ type APISpec struct {
 }
 
 type AuthConfig struct {
-	Type             string   `yaml:"type"` // api_key, oauth2, bearer_token, none
+	Type             string   `yaml:"type"` // api_key, oauth2, bearer_token, cookie, none
 	Header           string   `yaml:"header"`
 	Format           string   `yaml:"format"`
 	EnvVars          []string `yaml:"env_vars"`

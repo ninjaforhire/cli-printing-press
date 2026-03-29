@@ -1,0 +1,30 @@
+{
+  "target_url": "https://api.spotify.com",
+  "captured_at": "2026-03-28T20:00:00Z",
+  "interaction_rounds": 1,
+  "auth": {
+    "headers": {
+      "Authorization": "Bearer test-token-123"
+    },
+    "cookies": [],
+    "type": "bearer",
+    "bound_domain": "api.spotify.com",
+    "expires_at": "2026-03-28T21:00:00Z"
+  },
+  "entries": [
+    {
+      "method": "GET",
+      "url": "https://api.spotify.com/v1/me/playlists",
+      "request_headers": {
+        "Authorization": "Bearer test-token-123",
+        "Content-Type": "application/json"
+      },
+      "request_body": "",
+      "response_status": 200,
+      "response_content_type": "application/json",
+      "response_body": "{\"items\":[{\"id\":\"abc\",\"name\":\"My Playlist\"}],\"total\":1}",
+      "classification": "api",
+      "is_noise": false
+    }
+  ]
+}
