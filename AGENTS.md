@@ -16,13 +16,30 @@ go test ./...
 - `internal/openapi/` - OpenAPI 3.0+ parser
 - `internal/generator/` - Template engine + quality gates
 - `internal/catalog/` - Catalog schema validator
-- `catalog/` - API catalog entries (YAML)
+- `catalog/` - API catalog entries (YAML) + Go embed package (`catalog.FS`). Adding a YAML file here requires rebuilding the binary
 - `skills/` - Claude Code skill definitions
 - `testdata/` - Test fixtures (internal + OpenAPI specs)
 
 ## Commit Style
 
 Conventional commits: `feat(scope):`, `fix(scope):`, `docs:`, `refactor:`
+
+**Commits drive releases.** release-please reads conventional commit prefixes to determine version bumps:
+- `fix:` → patch bump (0.4.0 → 0.4.1)
+- `feat:` → minor bump (0.4.0 → 0.5.0)
+- `feat!:` or `BREAKING CHANGE:` footer → major bump (0.4.0 → 1.0.0)
+- `docs:`, `chore:`, `refactor:`, `test:` → included in next release but don't trigger a bump on their own
+
+## Versioning
+
+**Never manually edit version numbers.** Three files carry the version and release-please keeps them in sync:
+- `.claude-plugin/plugin.json` → `version`
+- `.claude-plugin/marketplace.json` → `plugins[0].version`
+- `internal/cli/root.go` → `var version` (annotated with `x-release-please-version`)
+
+Merges to main accumulate into a release PR. When the release PR merges, release-please bumps all three files, creates a git tag, and goreleaser builds cross-platform binaries.
+
+`TestVersionConsistencyAcrossFiles` in `internal/cli/release_test.go` will fail if versions drift.
 
 ## Adding Catalog Entries
 
