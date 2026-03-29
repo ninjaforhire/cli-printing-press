@@ -236,10 +236,10 @@ If reset, run `git checkout -- . && git clean -fd`.
 
 ## Step 7: Check for Existing PR
 
-Before creating a branch, check whether an open PR already exists for this CLI:
+Before creating a branch, check whether you have an open PR for this CLI. The `--author @me` filter ensures we only match PRs owned by the current user — if someone else published the same CLI name, we won't stomp their PR.
 
 ```bash
-gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --json number,title,url
+gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --author @me --json number,title,url
 ```
 
 Parse the result:
@@ -247,7 +247,7 @@ Parse the result:
 - If the list is empty or the command fails (network, auth), set `EXISTING_PR_NUMBER=""` — proceed as if no PR exists
 
 If an existing open PR was found, inform the user:
-> "Found open PR #N for `<cli-name>`. Will update it with the new version."
+> "Found your open PR #N for `<cli-name>`. Will update it with the new version."
 
 This determines the flow in Step 8:
 - **Existing open PR:** Overwrite the branch automatically, force-push, update the PR description

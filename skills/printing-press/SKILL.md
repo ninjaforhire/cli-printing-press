@@ -886,10 +886,10 @@ Skip this phase entirely if the shipcheck verdict from Phase 4 was `hold`. Only 
 
 ### Check for existing PR
 
-Run a lightweight check for an existing open publish PR:
+Run a lightweight check for your own open publish PR. The `--author @me` filter avoids matching someone else's PR for the same CLI name.
 
 ```bash
-gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --json number,url --jq '.[0]' 2>/dev/null
+gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --author @me --json number,url --jq '.[0]' 2>/dev/null
 ```
 
 If this fails (gh not authenticated, network error, etc.), continue without PR context — the publish skill will handle auth in its own Step 1.
