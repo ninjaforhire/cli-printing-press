@@ -126,6 +126,77 @@ func TestValidateEntry(t *testing.T) {
 	}
 }
 
+func TestAllPublicCategoriesAreValid(t *testing.T) {
+	publicCategories := []string{
+		"developer-tools", "monitoring", "cloud", "project-management",
+		"productivity", "social-and-messaging", "sales-and-crm", "marketing",
+		"payments", "auth", "commerce", "ai", "devices", "other",
+	}
+	base := Entry{
+		Name:        "test-api",
+		DisplayName: "Test API",
+		Description: "A valid catalog entry",
+		SpecURL:     "https://example.com/openapi.yaml",
+		SpecFormat:  "yaml",
+		Tier:        "official",
+	}
+	for _, cat := range publicCategories {
+		t.Run(cat, func(t *testing.T) {
+			entry := base
+			entry.Category = cat
+			assert.NoError(t, entry.Validate())
+		})
+	}
+}
+
+func TestExampleCategoryStillValid(t *testing.T) {
+	entry := Entry{
+		Name:        "test-api",
+		DisplayName: "Test API",
+		Description: "A valid catalog entry",
+		Category:    "example",
+		SpecURL:     "https://example.com/openapi.yaml",
+		SpecFormat:  "yaml",
+		Tier:        "official",
+	}
+	assert.NoError(t, entry.Validate())
+}
+
+func TestOldCategoriesRejected(t *testing.T) {
+	base := Entry{
+		Name:        "test-api",
+		DisplayName: "Test API",
+		Description: "A valid catalog entry",
+		SpecURL:     "https://example.com/openapi.yaml",
+		SpecFormat:  "yaml",
+		Tier:        "official",
+	}
+	for _, cat := range []string{"email", "crm", "communication"} {
+		t.Run(cat, func(t *testing.T) {
+			entry := base
+			entry.Category = cat
+			err := entry.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "category must be one of")
+		})
+	}
+}
+
+func TestCategoryErrorMessageExcludesExample(t *testing.T) {
+	entry := Entry{
+		Name:        "test-api",
+		DisplayName: "Test API",
+		Description: "A valid catalog entry",
+		Category:    "invalid-cat",
+		SpecURL:     "https://example.com/openapi.yaml",
+		SpecFormat:  "yaml",
+		Tier:        "official",
+	}
+	err := entry.Validate()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "example")
+}
+
 func TestParseDir(t *testing.T) {
 	entries, err := ParseDir("../../testdata/catalog")
 	require.NoError(t, err)

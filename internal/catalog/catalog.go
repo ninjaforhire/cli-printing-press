@@ -15,14 +15,21 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 var validCategories = map[string]struct{}{
-	"auth":               {},
-	"payments":           {},
-	"email":              {},
-	"developer-tools":    {},
-	"project-management": {},
-	"communication":      {},
-	"crm":                {},
-	"example":            {},
+	"developer-tools":      {},
+	"monitoring":           {},
+	"cloud":                {},
+	"project-management":   {},
+	"productivity":         {},
+	"social-and-messaging": {},
+	"sales-and-crm":       {},
+	"marketing":            {},
+	"payments":             {},
+	"auth":                 {},
+	"commerce":             {},
+	"ai":                   {},
+	"devices":              {},
+	"other":                {},
+	"example":              {},
 }
 
 var validSpecFormats = map[string]struct{}{
@@ -135,7 +142,7 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("category is required")
 	}
 	if _, ok := validCategories[e.Category]; !ok {
-		return fmt.Errorf("category must be one of: auth, payments, email, developer-tools, project-management, communication, crm, example")
+		return fmt.Errorf("category must be one of: developer-tools, monitoring, cloud, project-management, productivity, social-and-messaging, sales-and-crm, marketing, payments, auth, commerce, ai, devices, other")
 	}
 	if e.SpecURL == "" {
 		return fmt.Errorf("spec_url is required")

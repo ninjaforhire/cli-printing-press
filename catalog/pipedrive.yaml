@@ -1,7 +1,7 @@
 name: pipedrive
 display_name: Pipedrive
 description: CRM for sales teams - deals, contacts, pipelines, activities, and organizations
-category: crm
+category: sales-and-crm
 spec_url: https://developers.pipedrive.com/docs/api/v1/openapi.yaml
 spec_format: yaml
 openapi_version: "3.0"

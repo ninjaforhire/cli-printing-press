@@ -1,7 +1,7 @@
 name: sentry
 display_name: Sentry
 description: Error tracking and performance monitoring - projects, issues, events, releases
-category: developer-tools
+category: monitoring
 spec_url: https://raw.githubusercontent.com/getsentry/sentry-api-schema/main/openapi-derefed.json
 spec_format: json
 openapi_version: "3.0"

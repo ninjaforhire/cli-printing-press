@@ -1,7 +1,7 @@
 name: discord
 display_name: Discord
 description: Chat and community platform API
-category: communication
+category: social-and-messaging
 spec_url: https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json
 spec_format: json
 openapi_version: "3.1"
