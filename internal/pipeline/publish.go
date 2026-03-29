@@ -7,6 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/mvanhorn/cli-printing-press/catalog"
+	catalogpkg "github.com/mvanhorn/cli-printing-press/internal/catalog"
+	"github.com/mvanhorn/cli-printing-press/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/internal/version"
 )
 
 type RunManifest struct {
@@ -98,6 +103,11 @@ func PublishWorkingCLI(state *PipelineState, targetDir string) (string, error) {
 	}
 
 	state.PublishedDir = finalDir
+
+	if err := writeCLIManifestForPublish(state, finalDir); err != nil {
+		return "", err
+	}
+
 	if err := state.Save(); err != nil {
 		return "", err
 	}
@@ -147,6 +157,38 @@ func ArchiveRunArtifacts(state *PipelineState) (string, error) {
 		return "", err
 	}
 	return archiveDir, nil
+}
+
+func writeCLIManifestForPublish(state *PipelineState, dir string) error {
+	m := CLIManifest{
+		SchemaVersion:        1,
+		GeneratedAt:          time.Now().UTC(),
+		PrintingPressVersion: version.Version,
+		APIName:              state.APIName,
+		CLIName:              naming.CLI(state.APIName),
+		SpecURL:              state.SpecURL,
+		SpecPath:             state.SpecPath,
+		RunID:                state.RunID,
+	}
+
+	// Detect spec format and compute checksum from the spec file in the
+	// working directory. spec.json only exists when specFlag is --spec;
+	// for --docs runs it won't be present and these fields stay empty.
+	specPath := filepath.Join(state.EffectiveWorkingDir(), "spec.json")
+	if data, err := os.ReadFile(specPath); err == nil {
+		m.SpecFormat = detectSpecFormat(data)
+		checksum, err := specChecksum(specPath)
+		if err == nil {
+			m.SpecChecksum = checksum
+		}
+	}
+
+	// Look up catalog entry by API name; empty string if not found.
+	if entry, err := catalogpkg.LookupFS(catalog.FS, state.APIName); err == nil {
+		m.CatalogEntry = entry.Name
+	}
+
+	return WriteCLIManifest(dir, m)
 }
 
 func CopyDir(src, dst string) error {

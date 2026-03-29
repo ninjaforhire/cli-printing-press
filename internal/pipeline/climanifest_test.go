@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mvanhorn/cli-printing-press/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +121,97 @@ func TestSpecChecksumNonexistentFile(t *testing.T) {
 	checksum, err := specChecksum("/nonexistent/file.json")
 	require.NoError(t, err)
 	assert.Empty(t, checksum)
+}
+
+func TestPublishWorkingCLIWritesManifest(t *testing.T) {
+	home := setPressTestEnv(t)
+
+	// Create a working directory with a minimal CLI structure and spec
+	workingDir := filepath.Join(home, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "main.go"),
+		[]byte("package main\nfunc main() {}"),
+		0o644,
+	))
+
+	specContent := []byte(`{"openapi": "3.0.0", "info": {"title": "Test"}}`)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "spec.json"),
+		specContent,
+		0o644,
+	))
+
+	// Create a PipelineState pointing to the working directory
+	state := NewState("test-api", workingDir)
+	state.SpecURL = "https://example.com/spec.json"
+	state.SpecPath = "/tmp/test-spec.json"
+
+	// Ensure state directory exists so Save() works
+	require.NoError(t, os.MkdirAll(filepath.Dir(state.StatePath()), 0o755))
+	require.NoError(t, state.Save())
+
+	// Publish to a new directory
+	publishDir := filepath.Join(home, "library", "test-pp-cli")
+	finalDir, err := PublishWorkingCLI(state, publishDir)
+	require.NoError(t, err)
+	assert.Equal(t, publishDir, finalDir)
+
+	// Verify .printing-press.json exists in published directory
+	manifestPath := filepath.Join(finalDir, CLIManifestFilename)
+	data, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	assert.Equal(t, 1, got.SchemaVersion)
+	assert.Equal(t, "test-api", got.APIName)
+	assert.Equal(t, "test-api-pp-cli", got.CLIName)
+	assert.Equal(t, version.Version, got.PrintingPressVersion)
+	assert.Equal(t, "https://example.com/spec.json", got.SpecURL)
+	assert.Equal(t, "/tmp/test-spec.json", got.SpecPath)
+	assert.Equal(t, "openapi3", got.SpecFormat)
+	assert.NotEmpty(t, got.RunID)
+	assert.False(t, got.GeneratedAt.IsZero())
+
+	// Verify checksum matches independently computed value
+	h := sha256.Sum256(specContent)
+	expectedChecksum := "sha256:" + hex.EncodeToString(h[:])
+	assert.Equal(t, expectedChecksum, got.SpecChecksum)
+}
+
+func TestPublishWorkingCLIManifestWithoutSpec(t *testing.T) {
+	home := setPressTestEnv(t)
+
+	// Working directory without spec.json
+	workingDir := filepath.Join(home, "working", "no-spec-pp-cli")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "main.go"),
+		[]byte("package main\nfunc main() {}"),
+		0o644,
+	))
+
+	state := NewState("no-spec", workingDir)
+	require.NoError(t, os.MkdirAll(filepath.Dir(state.StatePath()), 0o755))
+	require.NoError(t, state.Save())
+
+	publishDir := filepath.Join(home, "library", "no-spec-pp-cli")
+	finalDir, err := PublishWorkingCLI(state, publishDir)
+	require.NoError(t, err)
+
+	// Manifest should still be written with empty spec fields
+	data, err := os.ReadFile(filepath.Join(finalDir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	assert.Equal(t, 1, got.SchemaVersion)
+	assert.Equal(t, "no-spec", got.APIName)
+	assert.Empty(t, got.SpecChecksum)
+	assert.Empty(t, got.SpecFormat)
 }
 
 func TestDetectSpecFormat(t *testing.T) {
