@@ -10,9 +10,12 @@ import (
 // conventionalCommitPattern validates the format used in PR titles and
 // commit messages. This pattern is mirrored by the PR title GitHub Action
 // (.github/workflows/pr-title.yml) — keep them in sync.
+//
+// Scopes: cli, skills, ci (required on all types).
+// Breaking changes: ! after scope.
 var conventionalCommitPattern = regexp.MustCompile(
 	`^(feat|fix|docs|chore|refactor|test|ci|perf|build|style|revert)` +
-		`(\([a-z][a-z0-9-]*\))?` +
+		`\((cli|skills|ci)\)` +
 		`!?` +
 		`: .+`)
 
@@ -22,12 +25,12 @@ func TestConventionalCommitPatternAcceptsValid(t *testing.T) {
 		"fix(skills): remove repo checkout requirement",
 		"feat(ci): add release-please",
 		"feat(cli)!: rename catalog command to registry",
-		"docs: update versioning guidance",
-		"chore: bump dependencies",
-		"refactor: extract helper function",
-		"test: add coverage for edge case",
+		"docs(cli): update version flag examples",
+		"chore(ci): bump dependencies",
+		"refactor(cli): extract helper function",
+		"test(cli): add coverage for edge case",
 		"fix(cli)!: breaking change with bang",
-		"ci: update workflow",
+		"ci(ci): update workflow",
 	}
 
 	for _, msg := range valid {
@@ -45,6 +48,10 @@ func TestConventionalCommitPatternRejectsInvalid(t *testing.T) {
 		"FEAT(cli): wrong case",
 		"feat:missing space",
 		"feat(): empty scope",
+		"feat: missing scope",
+		"docs: missing scope",
+		"feat(random): invalid scope",
+		"fix(anything): invalid scope",
 	}
 
 	for _, msg := range invalid {

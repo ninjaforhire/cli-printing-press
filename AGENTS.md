@@ -22,17 +22,17 @@ go test ./...
 
 ## Commit Style
 
-**Format:** `type(scope): description` — scope is required for `feat` and `fix`.
+**Format:** `type(scope): description` — scope is always required.
 
 **Scopes** (these appear in changelogs and release notes):
 
 | Scope | Covers | Example |
 |-------|--------|---------|
-| `cli` | Go binary, commands, flags, embedded catalog | `feat(cli): add catalog subcommands` |
+| `cli` | Go binary, commands, flags, embedded catalog, docs | `feat(cli): add catalog subcommands` |
 | `skills` | Skill definitions (SKILL.md), references, setup contract | `fix(skills): remove repo checkout requirement` |
 | `ci` | Workflows, release config, goreleaser | `feat(ci): add release-please` |
 
-`docs:`, `chore:`, `refactor:`, `test:` do not require a scope.
+Every commit and PR title must include one of these scopes. The `PR Title` action enforces this.
 
 **Breaking changes** use `!` after the scope: `feat(cli)!: rename catalog command to registry`. This triggers a major version bump.
 
