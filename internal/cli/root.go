@@ -117,7 +117,12 @@ func newGenerateCmd() *cobra.Command {
 					return &ExitError{Code: ExitSpecError, Err: fmt.Errorf("parsing generated spec: %w", err)}
 				}
 				if specSource != "" {
-					parsed.SpecSource = specSource
+					switch specSource {
+					case "official", "community", "sniffed", "docs":
+						parsed.SpecSource = specSource
+					default:
+						return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--spec-source must be one of: official, community, sniffed, docs (got %q)", specSource)}
+					}
 				} else {
 					parsed.SpecSource = "docs"
 				}
@@ -219,7 +224,12 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			if specSource != "" {
-				apiSpec.SpecSource = specSource
+				switch specSource {
+				case "official", "community", "sniffed", "docs":
+					apiSpec.SpecSource = specSource
+				default:
+					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--spec-source must be one of: official, community, sniffed, docs (got %q)", specSource)}
+				}
 			}
 
 			explicitOutput := outputDir != ""
