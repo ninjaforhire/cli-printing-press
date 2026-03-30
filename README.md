@@ -35,7 +35,7 @@ Most generators wrap endpoints and stop. Printing Press generates CLIs that **un
 
 **Compound commands no wrapper can do.** Once data lives in SQLite, commands like `stale`, `health`, `bottleneck`, and `reconcile` become possible — they join across resources and analyze history. A stateless API wrapper literally cannot do this.
 
-**Agent-native by default.** Auto-JSON when piped. `--compact` drops to high-gravity fields only (60-80% fewer tokens). Typed exit codes (`0`/`2`/`3`/`4`/`5`/`7`) let agents self-correct without parsing error text. `--dry-run` for safe exploration. Every flag exists because an AI agent will call it thousands of times a day.
+**Smart output, zero flags.** Run a command in your terminal — you get a formatted table. Pipe it to Claude Code, Codex, or a script — you get JSON. No `--json` needed, no `--human` needed. The CLI detects `isTerminal()` and picks the right format automatically. When you do want control: `--compact` drops to high-gravity fields (60-80% fewer tokens), `--csv` for spreadsheets, `--select` for specific fields. Typed exit codes (`0`/`2`/`3`/`4`/`5`/`7`) let agents self-correct without parsing error text. `--dry-run` for safe exploration.
 
 **Dual interface from one spec.** Every API gets a Cobra CLI (`<api>-pp-cli`) and an MCP server (`<api>-pp-mcp`). Same client, same store, same auth. Shell agents use the CLI. IDE agents use MCP. Zero code duplication.
 
