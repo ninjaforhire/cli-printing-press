@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -45,7 +46,6 @@ func RewriteModulePath(dir, oldPath, newPath string) error {
 	// config paths, and other runtime literals that contain the CLI name.
 	replacements := []struct{ old, new string }{
 		{oldPath + "/internal/", newPath + "/internal/"}, // Go imports, goreleaser ldflags
-		{oldPath + "/cmd/", newPath + "/cmd/"},           // go install paths in README
 	}
 
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
@@ -69,6 +69,8 @@ func RewriteModulePath(dir, oldPath, newPath string) error {
 		for _, r := range replacements {
 			result = strings.ReplaceAll(result, r.old, r.new)
 		}
+		result = rewriteModuleInstallPaths(result, oldPath, newPath)
+		result = rewriteGitHubRepoURLs(result, oldPath, newPath)
 		if result == string(content) {
 			return nil // no changes needed
 		}
@@ -84,4 +86,31 @@ func hasRewriteExtension(path string) bool {
 		}
 	}
 	return false
+}
+
+func rewriteModuleInstallPaths(content, oldPath, newPath string) string {
+	pattern := regexp.MustCompile(`(?:github\.com/[^/\s"]+/)?` + regexp.QuoteMeta(oldPath) + `/cmd/`)
+	return pattern.ReplaceAllString(content, newPath+"/cmd/")
+}
+
+func rewriteGitHubRepoURLs(content, oldPath, newPath string) string {
+	newRepoURL, ok := githubRepoURL(newPath)
+	if !ok {
+		return content
+	}
+
+	releasesPattern := regexp.MustCompile(`https://github\.com/[^/\s"]+/` + regexp.QuoteMeta(oldPath) + `/releases\b`)
+	content = releasesPattern.ReplaceAllString(content, newRepoURL+"/releases")
+
+	repoPattern := regexp.MustCompile(`https://github\.com/[^/\s"]+/` + regexp.QuoteMeta(oldPath) + `\b`)
+	return repoPattern.ReplaceAllString(content, newRepoURL)
+}
+
+func githubRepoURL(modulePath string) (string, bool) {
+	parts := strings.Split(modulePath, "/")
+	if len(parts) < 3 || parts[0] != "github.com" {
+		return "", false
+	}
+
+	return "https://" + strings.Join(parts[:3], "/"), true
 }

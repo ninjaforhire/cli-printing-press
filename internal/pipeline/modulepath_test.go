@@ -137,7 +137,7 @@ builds:
 		gomod := "module notion-pp-cli\n\ngo 1.23\n"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644))
 
-		readme := "# notion-pp-cli\n\n## Install\n\n```\ngo install notion-pp-cli/cmd/notion-pp-cli@latest\n```\n\n```bash\nnotion-pp-cli doctor\nnotion-pp-cli users list\n```\n"
+		readme := "# notion-pp-cli\n\n## Install\n\n```\ngo install github.com/testowner/notion-pp-cli/cmd/notion-pp-cli@latest\n```\n\n### Binary\n\nDownload from [Releases](https://github.com/testowner/notion-pp-cli/releases).\n\n```bash\nnotion-pp-cli doctor\nnotion-pp-cli users list\n```\n"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme), 0o644))
 
 		err := RewriteModulePath(dir, "notion-pp-cli", "github.com/acme/library/notion-pp-cli")
@@ -149,11 +149,33 @@ builds:
 
 		// go install path should be rewritten
 		assert.Contains(t, content, "go install github.com/acme/library/notion-pp-cli/cmd/notion-pp-cli@latest")
+		assert.Contains(t, content, "https://github.com/acme/library/releases")
 
 		// Bare CLI name in usage examples must NOT be rewritten
 		assert.Contains(t, content, "notion-pp-cli doctor")
 		assert.Contains(t, content, "notion-pp-cli users list")
 		assert.Contains(t, content, "# notion-pp-cli")
+	})
+
+	t.Run("rewrites goreleaser homepage to published repo", func(t *testing.T) {
+		dir := t.TempDir()
+
+		gomod := "module notion-pp-cli\n\ngo 1.23\n"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644))
+
+		goreleaser := `version: 2
+brews:
+  - homepage: "https://github.com/testowner/notion-pp-cli"
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".goreleaser.yaml"), []byte(goreleaser), 0o644))
+
+		err := RewriteModulePath(dir, "notion-pp-cli", "github.com/acme/library/notion-pp-cli")
+		require.NoError(t, err)
+
+		updatedGR, err := os.ReadFile(filepath.Join(dir, ".goreleaser.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(updatedGR), `homepage: "https://github.com/acme/library"`)
+		assert.NotContains(t, string(updatedGR), `homepage: "https://github.com/testowner/notion-pp-cli"`)
 	})
 
 	t.Run("noop when paths are equal", func(t *testing.T) {
