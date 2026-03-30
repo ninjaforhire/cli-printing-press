@@ -24,6 +24,8 @@ func TestNormalizePath(t *testing.T) {
 		{name: "long hash", path: "/blobs/abc123def456abc123def456abc123def456", want: "/blobs/{hash}"},
 		{name: "strip query string", path: "/users?page=1&limit=10", want: "/users"},
 		{name: "mixed params", path: "/v1/users/:id/posts/{post_id}", want: "/v1/users/{id}/posts/{id}"},
+		{name: "extra slashes", path: "///v1///users///", want: "/v1/users"},
+		{name: "double slashes", path: "/v1//users", want: "/v1/users"},
 		{name: "empty path", path: "", want: "/"},
 		{name: "root", path: "/", want: "/"},
 	}

@@ -24,7 +24,6 @@ const (
 	maxSearchResults        = 25
 	maxPackagesToProcess    = 10
 	maxBulkDownloadPackages = 128
-	minWeeklyDownloads      = 100
 )
 
 // NPMOptions configures the NPM source.

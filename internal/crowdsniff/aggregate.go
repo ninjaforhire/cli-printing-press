@@ -99,8 +99,9 @@ func NormalizePath(path string) string {
 		path = path[:idx]
 	}
 
-	segments := strings.Split(path, "/")
-	for i, segment := range segments {
+	parts := strings.Split(path, "/")
+	segments := make([]string, 0, len(parts))
+	for _, segment := range parts {
 		if segment == "" {
 			continue
 		}
@@ -108,24 +109,25 @@ func NormalizePath(path string) string {
 		// Step 1: Unify parameter syntax → {id}
 		switch {
 		case colonParamPattern.MatchString(segment):
-			segments[i] = "{id}"
+			segment = "{id}"
 		case bracketParamPattern.MatchString(segment):
-			segments[i] = "{id}"
+			segment = "{id}"
 		case angleParamPattern.MatchString(segment):
-			segments[i] = "{id}"
+			segment = "{id}"
 		case dollarParamPattern.MatchString(segment):
-			segments[i] = "{id}"
+			segment = "{id}"
 		// Step 2: Replace concrete values
 		case numericPattern.MatchString(segment):
-			segments[i] = "{id}"
+			segment = "{id}"
 		case uuidSegmentPattern.MatchString(segment):
-			segments[i] = "{uuid}"
+			segment = "{uuid}"
 		case hashSegmentPattern.MatchString(segment):
-			segments[i] = "{hash}"
+			segment = "{hash}"
 		}
+		segments = append(segments, segment)
 	}
 
-	normalized := strings.Join(segments, "/")
+	normalized := "/" + strings.Join(segments, "/")
 	if normalized == "" {
 		return "/"
 	}
