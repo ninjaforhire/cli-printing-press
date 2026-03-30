@@ -78,9 +78,9 @@ type Entry struct {
 	SandboxEndpoint   string     `yaml:"sandbox_endpoint,omitempty"`
 	// SpecSource describes how the spec was obtained. Empty defaults to "official".
 	// Values: official, community, sniffed, docs.
-	SpecSource    string `yaml:"spec_source,omitempty"`
+	SpecSource string `yaml:"spec_source,omitempty"`
 	// AuthRequired indicates whether the API needs authentication. Empty means unknown.
-	AuthRequired  *bool  `yaml:"auth_required,omitempty"`
+	AuthRequired *bool `yaml:"auth_required,omitempty"`
 	// ClientPattern describes the HTTP client pattern needed. Empty defaults to "rest".
 	// Values: rest, proxy-envelope, graphql.
 	ClientPattern string `yaml:"client_pattern,omitempty"`
