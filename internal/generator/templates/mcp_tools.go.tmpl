@@ -14,10 +14,10 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/{{.Owner}}/{{.Name}}-pp-cli/internal/client"
-	"github.com/{{.Owner}}/{{.Name}}-pp-cli/internal/config"
+	"{{modulePath}}/internal/client"
+	"{{modulePath}}/internal/config"
 {{- if .VisionSet.Store}}
-	"github.com/{{.Owner}}/{{.Name}}-pp-cli/internal/store"
+	"{{modulePath}}/internal/store"
 {{- end}}
 )
 

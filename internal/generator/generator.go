@@ -84,6 +84,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"safeTypeName":       safeTypeName,
 		"exampleLine":        g.exampleLine,
 		"currentYear":        func() string { return strconv.Itoa(time.Now().Year()) },
+		"modulePath":         func() string { return naming.CLI(s.Name) },
 	}
 	return g
 }

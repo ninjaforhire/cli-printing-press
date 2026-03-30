@@ -187,7 +187,12 @@ func TestGenerateWithOwnerField(t *testing.T) {
 
 	gomod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
 	require.NoError(t, err)
-	assert.Contains(t, string(gomod), "github.com/testowner/")
+	// Module path uses bare CLI name (no github.com/owner prefix)
+	assert.Contains(t, string(gomod), "module owned-pp-cli")
+	// Owner is still used for copyright
+	mainGo, err := os.ReadFile(filepath.Join(outputDir, "cmd", "owned-pp-cli", "main.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(mainGo), "testowner")
 }
 
 func TestGenerateWithEmptyOwner(t *testing.T) {
@@ -228,7 +233,10 @@ func TestGenerateWithEmptyOwner(t *testing.T) {
 
 	gomod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
 	require.NoError(t, err)
-	assert.Contains(t, string(gomod), "github.com/")
+	// Module path uses bare CLI name regardless of Owner
+	assert.Contains(t, string(gomod), "module unowned-pp-cli")
+	// Module line should not have a github.com prefix
+	assert.NotContains(t, string(gomod), "module github.com/")
 }
 
 // --- Unit 7: Feature Verification Tests ---

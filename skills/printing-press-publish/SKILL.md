@@ -71,6 +71,22 @@ PUBLISH_REPO_DIR="$PRESS_HOME/.publish-repo"
 PUBLISH_CONFIG="$PRESS_HOME/.publish-config.json"
 ```
 
+### Publish config
+
+`$PUBLISH_CONFIG` stores persistent publish settings as JSON. On first publish, create it with defaults. The user can edit it to change the library repo or module path base.
+
+```json
+{
+  "repo_url": "https://github.com/mvanhorn/printing-press-library",
+  "access": "push",
+  "protocol": "ssh",
+  "clone_path": "~/printing-press/.publish-repo",
+  "module_path_base": "github.com/mvanhorn/printing-press-library/library"
+}
+```
+
+The `module_path_base` field sets the Go module path prefix for published CLIs. During packaging, the full module path is constructed as `<module_path_base>/<category>/<cli-name>`. If the user wants CLIs published to a different repo or path, they edit this field.
+
 ## Step 1: Prerequisites
 
 Verify `gh` is authenticated:
@@ -149,6 +165,14 @@ Save the `help_output` field from the result — it's used in the PR description
 
 ## Step 5: Package
 
+Read `$PUBLISH_CONFIG` to get `module_path_base`. Construct the full module path:
+
+```
+MODULE_PATH="<module_path_base>/<category>/<cli-name>"
+```
+
+For example: `github.com/mvanhorn/printing-press-library/library/productivity/notion-pp-cli`
+
 Create a temporary staging directory and run:
 
 ```bash
@@ -156,10 +180,11 @@ printing-press publish package \
   --dir <cli-dir> \
   --category <category> \
   --target <staging-dir> \
+  --module-path "$MODULE_PATH" \
   --json
 ```
 
-Parse the JSON result. Note the `staged_dir`, `manuscripts_included`, and `run_id`.
+Parse the JSON result. Note the `staged_dir`, `module_path`, `manuscripts_included`, and `run_id`. The `module_path` field confirms the Go module path that was set in the packaged CLI's `go.mod` and import paths.
 
 ## Step 6: Managed Clone
 
@@ -190,7 +215,8 @@ If `$PUBLISH_REPO_DIR` does not exist:
      "repo_url": "https://github.com/mvanhorn/printing-press-library",
      "access": "push",
      "protocol": "ssh",
-     "clone_path": "~/printing-press/.publish-repo"
+     "clone_path": "~/printing-press/.publish-repo",
+     "module_path_base": "github.com/mvanhorn/printing-press-library/library"
    }
    ```
    Write to `$PUBLISH_CONFIG`.

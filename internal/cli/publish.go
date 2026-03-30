@@ -62,6 +62,7 @@ type PackageResult struct {
 	CLIName             string `json:"cli_name"`
 	APIName             string `json:"api_name"`
 	Category            string `json:"category"`
+	ModulePath          string `json:"module_path,omitempty"`
 	ManuscriptsIncluded bool   `json:"manuscripts_included"`
 	RunID               string `json:"run_id,omitempty"`
 }
@@ -131,6 +132,7 @@ func newPublishPackageCmd() *cobra.Command {
 	var dir string
 	var category string
 	var target string
+	var modulePath string
 	var asJSON bool
 
 	cmd := &cobra.Command{
@@ -205,12 +207,22 @@ func newPublishPackageCmd() *cobra.Command {
 				return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("copying CLI: %w", err)}
 			}
 
+			// Rewrite go.mod module path if --module-path is set
+			if modulePath != "" {
+				oldModPath := cliName // generated CLIs use bare CLI name as module path
+				if err := pipeline.RewriteModulePath(stagingCLIDir, oldModPath, modulePath); err != nil {
+					cleanupTarget()
+					return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("rewriting module path: %w", err)}
+				}
+			}
+
 			// Resolve and copy manuscripts
 			result := PackageResult{
-				StagedDir: stagingCLIDir,
-				CLIName:   cliName,
-				APIName:   vResult.APIName,
-				Category:  category,
+				StagedDir:  stagingCLIDir,
+				CLIName:    cliName,
+				APIName:    vResult.APIName,
+				Category:   category,
+				ModulePath: modulePath,
 			}
 
 			apiName := vResult.APIName
@@ -254,6 +266,7 @@ func newPublishPackageCmd() *cobra.Command {
 	cmd.Flags().StringVar(&dir, "dir", "", "CLI directory to package (required)")
 	cmd.Flags().StringVar(&category, "category", "", "Category for the CLI (required)")
 	cmd.Flags().StringVar(&target, "target", "", "Staging directory to create (required)")
+	cmd.Flags().StringVar(&modulePath, "module-path", "", "Go module path to set (e.g., github.com/org/repo/library/category/cli-name)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
 
 	return cmd
