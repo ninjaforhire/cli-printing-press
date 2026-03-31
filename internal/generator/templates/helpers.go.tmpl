@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+{{- if and .Auth.Type (ne .Auth.Type "none")}}
+	"regexp"
+{{- end}}
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -95,6 +98,41 @@ func apiErr(err error) error      { return &cliError{code: 5, err: err} }
 func configErr(err error) error   { return &cliError{code: 10, err: err} }
 func rateLimitErr(err error) error { return &cliError{code: 7, err: err} }
 
+{{- if and .Auth.Type (ne .Auth.Type "none")}}
+// looksLikeAuthError checks if an error message body contains auth-related keywords.
+func looksLikeAuthError(msg string) bool {
+	lower := strings.ToLower(msg)
+	patterns := []string{
+		`\bkey\b`,
+		`\btoken\b`,
+		`\bunauthorized\b`,
+		`\bapi_key\b`,
+		`missing.{0,20}key`,
+		`required.{0,20}key`,
+		`\bforbidden\b`,
+		`\bauthenticat`,
+		`\bcredential`,
+	}
+	for _, p := range patterns {
+		if matched, _ := regexp.MatchString(p, lower); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeErrorBody truncates and strips credential-shaped strings from error output.
+func sanitizeErrorBody(msg string) string {
+	if len(msg) > 200 {
+		msg = msg[:200] + "..."
+	}
+	// Strip credential-shaped patterns
+	credPatterns := regexp.MustCompile(`(?i)(sk-[a-zA-Z0-9]{8,}|sk_live_[a-zA-Z0-9]+|Bearer\s+[a-zA-Z0-9._\-]+|key=[a-zA-Z0-9._\-]+)`)
+	msg = credPatterns.ReplaceAllString(msg, "[REDACTED]")
+	return msg
+}
+{{- end}}
+
 // classifyAPIError maps API errors to structured exit codes with actionable hints.
 func classifyAPIError(err error) error {
 	msg := err.Error()
@@ -103,30 +141,76 @@ func classifyAPIError(err error) error {
 		// 409 Conflict = resource already exists. For agents retrying creates, this is success.
 		fmt.Fprintln(os.Stderr, "already exists (no-op)")
 		return nil
+{{- if and .Auth.Type (ne .Auth.Type "none")}}
+	case strings.Contains(msg, "HTTP 400") && looksLikeAuthError(msg):
+		return authErr(fmt.Errorf("%w\nhint: the API rejected the request — this usually means auth is missing or invalid."+
+{{- if .Auth.EnvVars}}
+			"\n      Set your API key: export {{index .Auth.EnvVars 0}}=<your-key>"+
+{{- end}}
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status."+
+			"\n      Response: "+sanitizeErrorBody(msg), err))
+{{- end}}
 	case strings.Contains(msg, "HTTP 401"):
 {{- if eq .Auth.Type "oauth2"}}
-		return authErr(fmt.Errorf("%w\nhint: your token may have expired. Re-run '{{.Name}}-pp-cli auth login' to re-authenticate", err))
+		return authErr(fmt.Errorf("%w\nhint: your token may have expired. Re-run '{{.Name}}-pp-cli auth login' to re-authenticate"+
+{{- if .Auth.EnvVars}}
+			"\n      or: export {{index .Auth.EnvVars 0}}=<your-token>"+
+{{- end}}
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- else if eq .Auth.Type "bearer_token"}}
 		return authErr(fmt.Errorf("%w\nhint: check your token. Set it with: {{.Name}}-pp-cli auth set-token <token>"+
 {{- if .Auth.EnvVars}}
-			"\n      or: export {{index .Auth.EnvVars 0}}=your-token"+
+			"\n      or: export {{index .Auth.EnvVars 0}}=<your-token>"+
 {{- end}}
-			"\n      verify setup: {{.Name}}-pp-cli doctor", err))
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- else if eq .Auth.Type "api_key"}}
 		return authErr(fmt.Errorf("%w\nhint: check your API key."+
 {{- if .Auth.EnvVars}}
-			" Set it with: export {{index .Auth.EnvVars 0}}=your-key"+
+			" Set it with: export {{index .Auth.EnvVars 0}}=<your-key>"+
 {{- end}}
-			"\n      verify setup: {{.Name}}-pp-cli doctor", err))
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- else}}
-		return authErr(fmt.Errorf("%w\nhint: check your API credentials. Run '{{.Name}}-pp-cli doctor' to verify auth", err))
+		return authErr(fmt.Errorf("%w\nhint: check your API credentials."+
+{{- if .Auth.EnvVars}}
+			" Set it with: export {{index .Auth.EnvVars 0}}=<your-key>"+
+{{- end}}
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- end}}
 	case strings.Contains(msg, "HTTP 403"):
 {{- if eq .Auth.Type "oauth2"}}
-		return authErr(fmt.Errorf("%w\nhint: permission denied. Your token may lack required scopes. Re-run '{{.Name}}-pp-cli auth login' to re-authorize", err))
+		return authErr(fmt.Errorf("%w\nhint: permission denied. Your token may lack required scopes. Re-run '{{.Name}}-pp-cli auth login' to re-authorize"+
+{{- if .Auth.EnvVars}}
+			"\n      or: export {{index .Auth.EnvVars 0}}=<your-token>"+
+{{- end}}
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- else}}
 		return authErr(fmt.Errorf("%w\nhint: permission denied. Your credentials are valid but lack access to this resource."+
-			"\n      Check that your API key has the required permissions", err))
+			"\n      Check that your API key has the required permissions."+
+{{- if .Auth.EnvVars}}
+			"\n      Set it with: export {{index .Auth.EnvVars 0}}=<your-key>"+
+{{- end}}
+{{- if .Auth.KeyURL}}
+			"\n      Get a key at: {{.Auth.KeyURL}}"+
+{{- end}}
+			"\n      Run '{{.Name}}-pp-cli doctor' to check auth status.", err))
 {{- end}}
 	case strings.Contains(msg, "HTTP 404"):
 		return notFoundErr(fmt.Errorf("%w\nhint: resource not found. Run the 'list' command to see available items", err))

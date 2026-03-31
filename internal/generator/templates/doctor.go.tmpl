@@ -34,15 +34,25 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			// Check auth
+{{- if or (eq .Auth.Type "") (eq .Auth.Type "none")}}
+			report["auth"] = "not required"
+{{- else}}
 			if cfg != nil {
 				header := cfg.AuthHeader()
 				if header == "" {
 					report["auth"] = "not configured"
+{{- if .Auth.EnvVars}}
+					report["auth_hint"] = "export {{index .Auth.EnvVars 0}}=<your-key>"
+{{- end}}
+{{- if .Auth.KeyURL}}
+					report["auth_key_url"] = "{{.Auth.KeyURL}}"
+{{- end}}
 				} else {
 					report["auth"] = "configured"
 					report["auth_source"] = cfg.AuthSource
 				}
 			}
+{{- end}}
 
 			// Check auth environment variables
 			{{- if .Auth.EnvVars}}
@@ -164,6 +174,17 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					fmt.Fprintf(w, "  %s: %v\n", key, v)
 				}
 			}
+			// Print auth setup hints (indented under Auth line)
+{{- if .Auth.EnvVars}}
+			if hint, ok := report["auth_hint"]; ok {
+				fmt.Fprintf(w, "  hint: %v\n", hint)
+			}
+{{- end}}
+{{- if .Auth.KeyURL}}
+			if keyURL, ok := report["auth_key_url"]; ok {
+				fmt.Fprintf(w, "  Get a key at: %v\n", keyURL)
+			}
+{{- end}}
 			return nil
 		},
 	}

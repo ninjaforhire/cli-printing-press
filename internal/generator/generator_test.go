@@ -830,6 +830,345 @@ func TestGeneratedOutput_PromotedCommandNotForBuiltins(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "promoted_users.go"))
 }
 
+// --- Unit 3: Auth Error Handling Tests ---
+
+func TestGeneratedHelpers_AuthErrorWithEnvVarsAndKeyURL(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "steamauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.steampowered.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "key",
+			In:      "query",
+			EnvVars: []string{"STEAM_API_KEY"},
+			KeyURL:  "https://steamcommunity.com/dev/apikey",
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/steamauth-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"users": {
+				Description: "Manage users",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/users", Description: "List users"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "steamauth-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	content := string(helpersGo)
+
+	// 400 auth branch should be emitted
+	assert.Contains(t, content, `HTTP 400`)
+	assert.Contains(t, content, "looksLikeAuthError")
+	// Env var should appear in error hints
+	assert.Contains(t, content, "STEAM_API_KEY")
+	// Key URL should appear in error hints
+	assert.Contains(t, content, "https://steamcommunity.com/dev/apikey")
+	// Doctor command hint
+	assert.Contains(t, content, "steamauth-pp-cli doctor")
+	// Sanitization helpers should be present
+	assert.Contains(t, content, "sanitizeErrorBody")
+}
+
+func TestGeneratedHelpers_AuthErrorWithEnvVarsNoKeyURL(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "nourlauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"NOURL_API_KEY"},
+			// KeyURL intentionally empty
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/nourlauth-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "nourlauth-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	content := string(helpersGo)
+
+	// Env var should appear
+	assert.Contains(t, content, "NOURL_API_KEY")
+	// Key URL should NOT appear
+	assert.NotContains(t, content, "Get a key at:")
+}
+
+func TestGeneratedHelpers_BearerTokenAuth(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "bearerauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "bearer_token",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"BEARER_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/bearerauth-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "bearerauth-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	content := string(helpersGo)
+
+	// Bearer token hint should mention token setup
+	assert.Contains(t, content, "check your token")
+	assert.Contains(t, content, "BEARER_TOKEN")
+	// 400 auth branch should be present (bearer_token is auth)
+	assert.Contains(t, content, "looksLikeAuthError")
+}
+
+func TestGeneratedHelpers_NoAuth_No400Branch(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "noauthapi",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "",
+			EnvVars: nil,
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/noauthapi-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "noauthapi-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	content := string(helpersGo)
+
+	// Should NOT have 400 auth branch
+	assert.NotContains(t, content, "looksLikeAuthError")
+	assert.NotContains(t, content, "sanitizeErrorBody")
+	// Should NOT import regexp
+	assert.NotContains(t, content, `"regexp"`)
+	// classifyAPIError should still exist
+	assert.Contains(t, content, "classifyAPIError")
+}
+
+func TestGeneratedHelpers_AuthWithKeyURL_Compiles(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "compileauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.steampowered.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "key",
+			In:      "query",
+			EnvVars: []string{"STEAM_API_KEY"},
+			KeyURL:  "https://steamcommunity.com/dev/apikey",
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/compileauth-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"users": {
+				Description: "Manage users",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/users", Description: "List users"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "compileauth-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	// Must compile
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
+}
+
+// --- Unit 4: Doctor Auth Hint Tests ---
+
+func TestGeneratedDoctor_AuthHintsWithKeyURL(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "steamdoc",
+		Version: "0.1.0",
+		BaseURL: "https://api.steampowered.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "key",
+			In:      "query",
+			EnvVars: []string{"STEAM_API_KEY"},
+			KeyURL:  "https://steamcommunity.com/dev/apikey",
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/steamdoc-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"users": {
+				Description: "Manage users",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/users", Description: "List users"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "steamdoc-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	doctorGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "doctor.go"))
+	require.NoError(t, err)
+	content := string(doctorGo)
+
+	// Should contain the env var hint
+	assert.Contains(t, content, `export STEAM_API_KEY=<your-key>`)
+	// Should contain the key URL
+	assert.Contains(t, content, `https://steamcommunity.com/dev/apikey`)
+}
+
+func TestGeneratedDoctor_AuthHintsWithoutKeyURL(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "nourldoc",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"NOURL_API_KEY"},
+			// KeyURL intentionally empty
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/nourldoc-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "nourldoc-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	doctorGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "doctor.go"))
+	require.NoError(t, err)
+	content := string(doctorGo)
+
+	// Should contain the env var hint
+	assert.Contains(t, content, `export NOURL_API_KEY=<your-key>`)
+	// Should NOT contain any key URL line
+	assert.NotContains(t, content, "auth_key_url")
+}
+
+func TestGeneratedDoctor_NoAuthShowsNotRequired(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "noauthdoc",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "",
+			EnvVars: nil,
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/noauthdoc-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "noauthdoc-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	doctorGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "doctor.go"))
+	require.NoError(t, err)
+	content := string(doctorGo)
+
+	// Auth report should show "not required" — not "not configured"
+	assert.Contains(t, content, `report["auth"] = "not required"`)
+	// The auth section should NOT set report["auth"] to "not configured"
+	assert.NotContains(t, content, `report["auth"] = "not configured"`)
+}
+
 func TestGeneratedHelpers_DeadCodeRemoved(t *testing.T) {
 	t.Parallel()
 
