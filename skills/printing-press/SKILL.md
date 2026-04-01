@@ -489,7 +489,51 @@ Suggested shape:
 3. ...
 ```
 
-**MANDATORY: Before proceeding to Phase 1.5 (Absorb Gate), you MUST evaluate Phase 1.7 (Sniff Gate) and Phase 1.8 (Crowd Sniff Gate) below.** If no spec source has been resolved yet (no `--spec`, no `--har`, no catalog spec URL), the sniff gate decision matrix MUST be evaluated. Do not skip to Phase 1.5.
+**MANDATORY: Before proceeding to Phase 1.5 (Absorb Gate), you MUST evaluate Phase 1.6 (Pre-Sniff Auth Intelligence), Phase 1.7 (Sniff Gate), and Phase 1.8 (Crowd Sniff Gate) below.** If no spec source has been resolved yet (no `--spec`, no `--har`, no catalog spec URL), the sniff gate decision matrix MUST be evaluated. Do not skip to Phase 1.5.
+
+## Phase 1.6: Pre-Sniff Auth Intelligence
+
+After Phase 1 research completes, analyze findings to proactively assess what auth context the user could provide. This step uses research intelligence to ask the right question before sniffing starts, rather than waiting for the user to volunteer "I logged in."
+
+**Skip this step if:** The briefing (Orientation & Briefing section) already captured auth context (`AUTH_CONTEXT` is set from the user selecting "I have an API key or I'm logged in").
+
+**Classify the API's auth profile from research findings:**
+
+| Signal from research | Auth profile | What to ask |
+|---------------------|-------------|-------------|
+| Community wrappers use API keys (e.g., `STRIPE_SECRET_KEY`), MCP source shows `Authorization: Bearer` headers, spec has `security` section | **API key auth** | "Do you have an API key for `<API>`?" |
+| Site has user accounts, research found auth-only features (order history, saved items, rewards, account settings), login pages exist | **Browser session auth** | "This API has authenticated endpoints ([list specific features from research, e.g., order history, saved addresses, rewards]). Are you logged in to `<site>` in your browser? The sniff will find more endpoints if you are." |
+| Endpoints accessible without auth, no login-gated features found, community wrappers describe API as "no auth required" | **No auth needed** | Skip this step silently |
+| Both API key AND browser session features found | **Dual auth** | Ask about both: API key for smoke testing, browser session for sniff |
+
+**Name the specific features the user would unlock.** Do not say "auth would help." Say "This API has order history, saved addresses, and rewards that require a logged-in session."
+
+**Where signals come from:**
+- Phase 1 brief's "Data profile" and "Top Workflows" sections
+- Phase 1.5a MCP source code analysis (auth patterns, token formats)
+- Community wrapper README "auth" or "authentication" sections
+- The API Key Gate's token detection (Phase 0.5) — if it already found a key, don't re-ask
+
+**For API key auth:** Present via `AskUserQuestion`:
+> "Do you have an API key for `<API>`? It will be used for read-only live smoke testing in Phase 5."
+>
+> 1. **Yes** — user provides the key or confirms it's in the environment
+> 2. **No, continue without it** — skip live smoke testing
+
+If the user provides a key, set it in `AUTH_CONTEXT` so the API Key Gate (Phase 0.5) does not re-ask.
+
+**For browser session auth:** Present via `AskUserQuestion`:
+> "`<API>` has authenticated endpoints ([list features]). Are you logged in to `<site>` in your browser? The sniff will discover more endpoints if you are."
+>
+> 1. **Yes, I'm logged in** — I'll use your session during sniff
+> 2. **No, but I can log in** — I'll help you log in before sniffing
+> 3. **No, skip authenticated endpoints** — sniff only public endpoints
+
+Set `AUTH_SESSION_AVAILABLE=true` if the user selects option 1 or 2. The Sniff Gate (Phase 1.7) will use this flag.
+
+**For dual auth:** Ask about both in sequence — API key first (simple env var check), then browser session.
+
+---
 
 ## Phase 1.7: Sniff Gate
 
@@ -510,7 +554,8 @@ Do NOT spend time debugging tool integration issues. The sniff is optional enric
 | Yes | No — spec appears complete | Any | Skip silently |
 | No | Community docs exist (e.g., Public-ESPN-API) | No | **MUST offer sniff OR --docs** — present both options so the user decides |
 | No | No docs found either | No | **MUST offer sniff as primary discovery** |
-| No | N/A | Yes (login required) | Skip — fall back to `--docs` |
+| No | N/A | Yes (login) + `AUTH_SESSION_AVAILABLE=true` | **Offer authenticated sniff** — the user confirmed a session in Phase 1.6 |
+| No | N/A | Yes (login) + `AUTH_SESSION_AVAILABLE=false` | Skip — fall back to `--docs` |
 
 **Gap detection heuristic:** If Phase 1 research found documentation, competitor tools, or community projects that reference significantly more endpoints or features than the resolved spec covers, that's a gap signal. Example: "The Zuplo OpenAPI spec has 42 endpoints, but the Public-ESPN-API docs describe 370+."
 
@@ -526,14 +571,17 @@ Present to the user via `AskUserQuestion`:
 
 ### Sniff as primary (no spec found)
 
-Present to the user via `AskUserQuestion`:
+Present to the user via `AskUserQuestion`. **If `AUTH_SESSION_AVAILABLE=true`**, include an authenticated sniff option:
 
-> "No OpenAPI spec found for `<API>`. Want me to sniff `<likely-url>` to discover the API from live traffic? I'll check for browser-use or agent-browser and install if needed."
+> "No OpenAPI spec found for `<API>`. Want me to sniff `<likely-url>` to discover the API from live traffic?"
 >
 > Options:
-> 1. **Yes — sniff the live site** (browse `<url>`, capture API calls, generate a spec. Installs capture tools if needed.)
-> 2. **No — use docs instead** (attempt `--docs` generation from documentation pages)
-> 3. **No — I'll provide a spec or HAR** (user will supply input manually)
+> 1. **Yes — authenticated sniff** (use your browser session to discover both public and authenticated endpoints. Recommended since you confirmed a session.) *(Only show when `AUTH_SESSION_AVAILABLE=true`)*
+> 2. **Yes — sniff the live site** (browse `<url>` anonymously, capture API calls, generate a spec. Installs capture tools if needed.)
+> 3. **No — use docs instead** (attempt `--docs` generation from documentation pages)
+> 4. **No — I'll provide a spec or HAR** (user will supply input manually)
+
+When `AUTH_SESSION_AVAILABLE=false`, show only options 2-4 (the existing 3-option prompt).
 
 ### If user approves sniff
 
@@ -688,7 +736,82 @@ After upgrade, re-check the version. If the upgrade resolves the issue, proceed 
 
 **Do NOT upgrade automatically.** Always ask permission first — upgrading packages can have side effects on the user's environment.
 
-If the tool passes the version check, proceed to Step 2a (browser-use) or Step 2b (agent-browser).
+If the tool passes the version check, proceed to Step 1d (if authenticated sniff) or Step 2a/2b (if anonymous sniff).
+
+#### Step 1d: Session Transfer (authenticated sniff only)
+
+This step only runs when the user chose "authenticated sniff" (from Phase 1.7's sniff-as-primary or sniff-as-enrichment prompts, or when `AUTH_SESSION_AVAILABLE=true` and the user confirmed).
+
+**Situation detection:**
+```bash
+CHROME_RUNNING=false
+if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+  CHROME_RUNNING=true
+fi
+```
+
+**When Chrome IS running**, prefer agent-browser (attaches to live browser without closing it):
+
+Present via `AskUserQuestion`:
+> "Chrome is running. I can attach to it and grab your session."
+>
+> 1. **Grab session from your Chrome** (Recommended) — "Connects to your running Chrome and saves its cookies. Takes ~10 seconds."
+> 2. **Log in within a new browser window** — "I'll open a visible browser. You log in, then I sniff. ~1 minute."
+> 3. **I'll export a HAR file** — "You browse the site in DevTools, export the HAR."
+
+For option 1 (agent-browser auto-connect):
+```bash
+agent-browser --auto-connect state save "$DISCOVERY_DIR/session-state.json" 2>&1
+```
+If this succeeds, use the state file for the sniff session:
+```bash
+agent-browser --state "$DISCOVERY_DIR/session-state.json" open <url>
+```
+If auto-connect fails (no debug port), explain: "Chrome doesn't have remote debugging enabled. Quit Chrome and relaunch with `--remote-debugging-port=9222`, or pick option 2."
+
+For option 1 with browser-use (if agent-browser not available):
+```bash
+browser-use open <url> --connect
+```
+
+**When Chrome is NOT running**, prefer browser-use (loads real Chrome profile with all cookies):
+
+Present via `AskUserQuestion`:
+> "Chrome isn't running. I can load your Chrome profile directly — all your saved logins will be available."
+>
+> 1. **Use your Chrome profile** (Recommended, requires browser-use) — "Loads your real Chrome profile. Zero setup."
+> 2. **Log in within a new browser window** — "I'll open a visible browser. You log in, then I sniff."
+> 3. **I'll export a HAR file**
+
+For option 1 (browser-use profile reuse):
+```bash
+browser-use open <url> --profile "Default"
+```
+If browser-use is not available, fall back to agent-browser headed login.
+
+If Chrome profile lock error occurs (Chrome is actually running): "Chrome's profile is locked. Quit Chrome first, or switch to option 2."
+
+**When both tools are available**, recommend the situationally better one:
+- Chrome running: prefer agent-browser `--auto-connect`
+- Chrome not running: prefer browser-use `--profile "Default"`
+
+**For headed login (option 2 with either tool):**
+```bash
+# agent-browser
+agent-browser --headed --session-name "<api>-auth" open <login-url>
+# or browser-use
+browser-use open <login-url> --headed --session "<api>-auth"
+```
+Instruct the user: "A browser window is open. Please log in to `<site>`. Let me know when you're done."
+After login, save state:
+```bash
+agent-browser state save "$DISCOVERY_DIR/session-state.json"
+```
+Close the headed browser and restart headless with the saved state.
+
+**For HAR export (option 3):** Guide the user through DevTools > Network > Save all as HAR. Then use `--har` path.
+
+**After successful session transfer**, proceed to Steps 2a/2b capture flow with the authenticated session loaded. The session state file is stored at `$DISCOVERY_DIR/session-state.json`.
 
 #### Step 2a: browser-use CLI capture (preferred)
 
@@ -841,6 +964,8 @@ The report must contain these sections:
    - Aim for one sample per unique shape, not one per endpoint
 
 6. **Rate Limiting Events** — Any 429 responses encountered, delays applied, and effective sniff rate achieved (e.g., "Sniffed 7 endpoints at ~1.5 req/s effective rate, one 429 at request #4").
+
+7. **Authentication Context** — Whether the sniff used an authenticated session. If yes: transfer method used (auto-connect / profile / headed login / HAR), which endpoints were only reachable with auth (e.g., "order history, saved addresses, rewards required login"), and confirmation that session state was excluded from manuscript archiving. If no: "No authenticated session used."
 
 ### If user declines sniff
 
@@ -1654,6 +1779,9 @@ cp -r "$RESEARCH_DIR" "$PRESS_MANUSCRIPTS/<api>/$RUN_ID/research" 2>/dev/null ||
 cp -r "$PROOFS_DIR" "$PRESS_MANUSCRIPTS/<api>/$RUN_ID/proofs" 2>/dev/null || true
 
 # Archive discovery artifacts (sniff captures, URL lists, sniff report).
+# Remove session state before archiving — contains authentication cookies/tokens.
+rm -f "$DISCOVERY_DIR/session-state.json"
+
 # Strip response bodies from HAR before archiving to control size.
 if [ -d "$DISCOVERY_DIR" ]; then
   for har in "$DISCOVERY_DIR"/sniff-capture.har "$DISCOVERY_DIR"/sniff-capture.json; do
