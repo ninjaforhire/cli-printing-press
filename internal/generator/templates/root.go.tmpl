@@ -40,7 +40,7 @@ func Execute() error {
 
 	rootCmd := &cobra.Command{
 		Use:           "{{.Name}}-pp-cli",
-		Short:         "{{oneline .Description}}",
+		Short:         "Manage {{.Name}} resources via the {{.Name}} API",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,

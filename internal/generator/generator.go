@@ -103,7 +103,8 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 
 // HelperFlags controls which helper functions are emitted in helpers.go.
 type HelperFlags struct {
-	HasDelete bool // spec has DELETE endpoints → emit classifyDeleteError
+	HasDelete     bool // spec has DELETE endpoints → emit classifyDeleteError
+	HasPathParams bool // spec has path parameters → emit replacePathParam
 }
 
 // computeHelperFlags scans the spec's resources to determine which helpers are needed.
@@ -111,14 +112,24 @@ func computeHelperFlags(s *spec.APISpec) HelperFlags {
 	var flags HelperFlags
 	for _, r := range s.Resources {
 		for _, e := range r.Endpoints {
-			if e.Method == "DELETE" {
+			if strings.EqualFold(e.Method, "DELETE") {
 				flags.HasDelete = true
+			}
+			for _, p := range e.Params {
+				if p.Positional {
+					flags.HasPathParams = true
+				}
 			}
 		}
 		for _, sub := range r.SubResources {
 			for _, e := range sub.Endpoints {
-				if e.Method == "DELETE" {
+				if strings.EqualFold(e.Method, "DELETE") {
 					flags.HasDelete = true
+				}
+				for _, p := range e.Params {
+					if p.Positional {
+						flags.HasPathParams = true
+					}
 				}
 			}
 		}

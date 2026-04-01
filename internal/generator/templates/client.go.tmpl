@@ -199,13 +199,13 @@ func (c *Client) RateLimit() float64 {
 
 func (c *Client) Get(path string, params map[string]string) (json.RawMessage, error) {
 	// Check cache for GET requests
-	if !c.NoCache && c.cacheDir != "" {
+	if !c.NoCache && !c.DryRun && c.cacheDir != "" {
 		if cached, ok := c.readCache(path, params); ok {
 			return cached, nil
 		}
 	}
 	result, _, err := c.do("GET", path, params, nil)
-	if err == nil && !c.NoCache && c.cacheDir != "" {
+	if err == nil && !c.NoCache && !c.DryRun && c.cacheDir != "" {
 		c.writeCache(path, params, result)
 	}
 	return result, err
