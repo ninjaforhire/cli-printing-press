@@ -1,3 +1,9 @@
+output:
+  - summary
+  - success
+  - failure
+  - execution
+
 post-checkout:
   commands:
     build:
