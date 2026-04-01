@@ -1437,6 +1437,20 @@ via the Stripe API"). Open `$PRESS_LIBRARY/<api>-pp-cli/internal/cli/root.go`, f
 `Short:` field on the root cobra command, and rewrite it as a concise, user-facing description
 of the CLI's purpose. Use the product thesis from the Phase 1 brief to inform the rewrite.
 
+**REQUIRED: Preserve README sections.** The generated README contains 5 standard sections
+that the scorecard checks for: Quick Start, Agent Usage, Health Check, Troubleshooting, and
+Cookbook. When rewriting the README for this API during Phase 3, **preserve all 5 sections**.
+You may add additional sections that help users of this specific API (e.g., "Rate Limits",
+"Pagination", "Authentication Setup"), but never remove the standard ones.
+
+**REQUIRED: Compensate for missing auth.** Check if the generated `config.go` has auth
+env var support (look for `os.Getenv` calls for API key variables). If not, check the
+Phase 1 research brief for auth requirements. If the brief identifies an API key, token,
+or auth method that the spec didn't declare, add the appropriate env var support to
+`config.go`. Use the pattern: add `APIKey`/`APIKeySource` fields to the Config struct,
+and `os.Getenv("<API>_API_KEY")` in the Load function. The research brief is the
+authoritative source when the spec is silent on auth.
+
 Then:
 - note skipped complex body fields
 - fix only blocking generation failures here
@@ -1636,6 +1650,7 @@ Priority 3 (polish):
 - skipped complex request bodies that block important commands
 - naming cleanup for ugly operationId-derived commands
 - tests for non-trivial store/workflow logic
+- enrich terse flag descriptions: review generated command flags. If any description is under 5 words or is generic spec-derived text (e.g., "access key", "The player"), improve it using the research brief. For example, change "access key" to "Steam API key (get one at steamcommunity.com/dev/apikey)". Focus on auth keys, IDs, and filter parameters.
 
 ### Agent Build Checklist (per command)
 
