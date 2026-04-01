@@ -400,8 +400,15 @@ func checkDeadFlags(dir string) DeadCodeResult {
 
 	result := DeadCodeResult{Total: len(fields)}
 	for _, field := range sortedKeys(fields) {
+		// Search for both `flags.<field>` (used in Execute) and `f.<field>` or
+		// any other struct accessor (used in method receivers like newClient).
 		needle := "flags." + field
+		receiverNeedle := "." + field
 		if containsAny(otherSources, needle) {
+			continue
+		}
+		// Check for method-receiver access patterns (e.g., f.noCache, f.timeout)
+		if containsAny(otherSources, receiverNeedle) {
 			continue
 		}
 		result.Dead++
@@ -428,10 +435,17 @@ func checkDeadFunctions(dir string) DeadCodeResult {
 		names[match[1]] = struct{}{}
 	}
 
+	// Include helpers.go in the search but strip function definition lines
+	// so that a function's own `func name(` line doesn't count as a call.
+	// This catches intra-file calls like bold() calling colorEnabled().
+	defLineRe := regexp.MustCompile(`(?m)^func\s+[A-Za-z_]\w*\s*\(.*$`)
+	helpersUsageOnly := defLineRe.ReplaceAllString(string(data), "")
+
 	files := listGoFiles(filepath.Join(dir, "internal", "cli"))
 	var otherSources []string
 	for _, file := range files {
 		if filepath.Base(file) == "helpers.go" {
+			otherSources = append(otherSources, helpersUsageOnly)
 			continue
 		}
 		content, err := os.ReadFile(file)
