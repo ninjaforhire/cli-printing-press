@@ -19,13 +19,22 @@ func TestRunDogfood(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "internal", "cli", "root.go"), `package cli
 type rootFlags struct {
 	jsonOutput bool
-	csvOutput bool
+	csvOutput  bool
 	stdinInput bool
+	noCache    bool
+	deadOnly   bool
 }
 func initFlags(flags *rootFlags) {
 	_ = &flags.jsonOutput
 	_ = &flags.csvOutput
 	_ = &flags.stdinInput
+	_ = &flags.noCache
+	_ = &flags.deadOnly
+}
+func configure(flags *rootFlags) {
+	if flags.noCache {
+		disableCache()
+	}
 }
 `)
 	writeTestFile(t, filepath.Join(dir, "internal", "cli", "helpers.go"), `package cli
@@ -101,9 +110,9 @@ func authHeader(token string) string {
 	assert.Equal(t, 50, report.PathCheck.Pct)
 	assert.Equal(t, []string{"/bogus"}, report.PathCheck.Invalid)
 	assert.False(t, report.AuthCheck.Match)
-	assert.Equal(t, 3, report.DeadFlags.Total)
-	assert.Equal(t, 2, report.DeadFlags.Dead)
-	assert.Equal(t, []string{"csvOutput", "stdinInput"}, report.DeadFlags.Items)
+	assert.Equal(t, 5, report.DeadFlags.Total)
+	assert.Equal(t, 3, report.DeadFlags.Dead)
+	assert.Equal(t, []string{"csvOutput", "deadOnly", "stdinInput"}, report.DeadFlags.Items)
 	assert.Equal(t, 2, report.DeadFuncs.Total)
 	assert.Equal(t, 1, report.DeadFuncs.Dead)
 	assert.Equal(t, []string{"deadHelper"}, report.DeadFuncs.Items)

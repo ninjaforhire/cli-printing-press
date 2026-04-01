@@ -107,7 +107,7 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 	}
 
 	// 5. Discover commands
-	commands := discoverCommands(cfg.Dir)
+	commands := discoverCommands(cfg.Dir, binaryPath)
 
 	// 5.5. Infer positional args from --help output
 	for i := range commands {
@@ -247,8 +247,88 @@ func findCLICommandDir(dir string) (string, error) {
 	return "", fmt.Errorf("cannot find CLI cmd entry point in %s", dir)
 }
 
-// discoverCommands parses root.go to find all registered commands.
-func discoverCommands(dir string) []discoveredCommand {
+// discoverCommands finds all registered commands. It first tries to parse the
+// binary's --help output for ground-truth command names. If that fails (binary
+// missing, crash, timeout), it falls back to regex extraction from root.go with
+// camelToKebab name derivation.
+func discoverCommands(dir string, binaryPath string) []discoveredCommand {
+	// Primary path: parse ground-truth names from binary --help output.
+	if binaryPath != "" {
+		if cmds := discoverCommandsFromHelp(binaryPath); len(cmds) > 0 {
+			return cmds
+		}
+	}
+
+	// Fallback: regex extraction from root.go with camelToKebab derivation.
+	return discoverCommandsFromSource(dir)
+}
+
+// discoverCommandsFromHelp runs `<binary> --help` and parses the Available
+// Commands section to extract ground-truth command names.
+func discoverCommandsFromHelp(binaryPath string) []discoveredCommand {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	helpCmd := exec.CommandContext(ctx, binaryPath, "--help")
+	out, err := helpCmd.CombinedOutput()
+	if err != nil {
+		return nil
+	}
+
+	return parseHelpCommands(string(out))
+}
+
+// parseHelpCommands extracts command names from cobra-style --help output.
+// Each line in the "Available Commands:" section has format:
+//
+//	<command-name>  <description>
+func parseHelpCommands(helpOutput string) []discoveredCommand {
+	lines := strings.Split(helpOutput, "\n")
+	inAvailable := false
+	var commands []discoveredCommand
+	seen := map[string]bool{}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "Available Commands:") {
+			inAvailable = true
+			continue
+		}
+
+		// An empty line or a new section header ends the Available Commands block.
+		if inAvailable && (trimmed == "" || (len(trimmed) > 0 && trimmed[len(trimmed)-1] == ':' && !strings.Contains(trimmed, " "))) {
+			break
+		}
+
+		if !inAvailable {
+			continue
+		}
+
+		// Extract the first non-space word as the command name.
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		// Skip utility commands
+		switch name {
+		case "version", "completion", "help":
+			continue
+		}
+		commands = append(commands, discoveredCommand{Name: name})
+	}
+	return commands
+}
+
+// discoverCommandsFromSource parses root.go to find all registered commands
+// via regex extraction and camelToKebab name derivation.
+func discoverCommandsFromSource(dir string) []discoveredCommand {
 	rootPath := filepath.Join(dir, "internal", "cli", "root.go")
 	data, err := os.ReadFile(rootPath)
 	if err != nil {

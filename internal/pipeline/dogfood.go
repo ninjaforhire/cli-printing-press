@@ -379,10 +379,16 @@ func checkDeadFlags(dir string) DeadCodeResult {
 		fields[match[1]] = struct{}{}
 	}
 
+	// Build a version of root.go with declaration lines removed so only
+	// reads (e.g. `if flags.agent {`, `c.NoCache = f.noCache`) remain.
+	declLineRe := regexp.MustCompile(`(?m)^.*&flags\..*$`)
+	rootUsageOnly := declLineRe.ReplaceAllString(string(rootData), "")
+
 	files := listGoFiles(filepath.Join(dir, "internal", "cli"))
 	var otherSources []string
 	for _, file := range files {
 		if filepath.Base(file) == "root.go" {
+			otherSources = append(otherSources, rootUsageOnly)
 			continue
 		}
 		data, err := os.ReadFile(file)
