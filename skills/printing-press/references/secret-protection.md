@@ -28,7 +28,15 @@ if [ -n "$API_KEY_VALUE" ]; then
       [ -d "$dir" ] || continue
       find "$dir" -type f -print0 | while IFS= read -r -d '' f; do
         if grep -qF "$API_KEY_VALUE" "$f" 2>/dev/null; then
-          awk -v old="$API_KEY_VALUE" -v new="$REDACT_TO" '{gsub(old, new)}1' "$f" > "${f}.redacted" && mv "${f}.redacted" "$f"
+          # Use python for truly literal replacement — awk's gsub and perl's
+          # s/// both interpret regex metacharacters (+, ., /) in the key,
+          # which breaks on JWT tokens and base64-encoded secrets.
+          REDACT_OLD="$API_KEY_VALUE" REDACT_NEW="$REDACT_TO" python3 -c "
+import sys, os
+old, new, path = os.environ['REDACT_OLD'], os.environ['REDACT_NEW'], sys.argv[1]
+with open(path) as f: content = f.read()
+with open(path, 'w') as f: f.write(content.replace(old, new))
+" "$f"
         fi
       done
     done
