@@ -325,18 +325,24 @@ cp -r <staging-dir>/library/* "$PUBLISH_REPO_DIR/library/"
 
 ### Update registry.json
 
-Read `$PUBLISH_REPO_DIR/registry.json`, add or update the entry for this CLI:
+The registry file has this structure:
 
 ```json
 {
-  "cli_name": "<cli-name>",
-  "api_name": "<api-name>",
-  "category": "<category>",
-  "description": "<from manifest or empty>",
-  "printing_press_version": "<from manifest>",
-  "published_date": "<today YYYY-MM-DD>"
+  "schema_version": 1,
+  "entries": [
+    {
+      "name": "<cli-name>",
+      "category": "<category>",
+      "api": "<api-display-name>",
+      "description": "<from manifest or README>",
+      "path": "library/<category>/<cli-name>"
+    }
+  ]
 }
 ```
+
+Read `$PUBLISH_REPO_DIR/registry.json`, parse the `entries` array (not the top-level object), add or update the entry for this CLI. Match on `name` field. Preserve `schema_version` and any other top-level fields.
 
 Write back with `jq` or via the Write tool.
 
