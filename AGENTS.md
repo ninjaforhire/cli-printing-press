@@ -1,5 +1,18 @@
 # CLI Printing Press - Development Conventions
 
+## Machine vs Printed CLI — What Are You Optimizing?
+
+This repo contains **the machine** (generator, templates, binary, skills) that produces **printed CLIs**. When fixing bugs or adding features, always ask: is this a machine change or a printed CLI change?
+
+- **Machine changes** (generator, templates, parser, skills) affect every future CLI. They must be generalized — think about how the fix applies across different APIs, spec formats, and auth patterns, not just the CLI you're looking at right now.
+- **Printed CLI changes** (code in `~/printing-press/library/<cli>/`) fix one specific CLI. These are fine for targeted improvements but don't compound.
+
+**Default to machine changes.** If a problem shows up in a printed CLI, the first question is: should the generator have gotten this right? If yes, fix the machine so every future CLI benefits. Only fix the printed CLI directly when the issue is genuinely specific to that one API.
+
+**Never change the machine for one CLI's edge case** unless explicitly told to. If a fix only helps Pagliacci but would be wrong for Stripe, it doesn't belong in the generator. Add a conditional with a clear guard, or leave it as a printed-CLI-level fix.
+
+**When iterating on a printed CLI to discover issues**, note which problems are systemic (retro findings) vs specific. The retro → plan → implement loop exists to feed discoveries from individual CLIs back into the machine.
+
 ## Build, Test & Lint
 
 ```bash
