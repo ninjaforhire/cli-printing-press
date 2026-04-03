@@ -187,6 +187,21 @@ profile by name when the installed backend supports it.`,
 				composed = strings.ReplaceAll(composed, "{"+name+"}", cookieMap[name])
 			}
 
+			// Validate the composed auth before saving — catch stale/expired sessions
+			fmt.Fprintf(w, "Validating session...")
+			if err := validateComposedAuth(composed); err != nil {
+				loginURL := "https://" + strings.TrimPrefix(domain, ".")
+				fmt.Fprintf(w, " %s\n", red("expired"))
+				fmt.Fprintln(w, "")
+				fmt.Fprintln(w, "Found cookies but the session has expired.")
+				fmt.Fprintln(w, "Log in again at:")
+				fmt.Fprintf(w, "\n  %s\n\n", loginURL)
+				fmt.Fprintln(w, "Then run this command again:")
+				fmt.Fprintf(w, "\n  {{.Name}}-pp-cli auth login --chrome\n")
+				return authErr(fmt.Errorf("session expired for %s", domain))
+			}
+			fmt.Fprintf(w, " %s\n", green("valid"))
+
 			cfg, err := config.Load(flags.configPath)
 			if err != nil {
 				return configErr(err)
@@ -663,6 +678,34 @@ func extractViaCookieScoop(domain, profileDir string) (string, error) {
 	result = strings.TrimPrefix(result, "Cookie: ")
 	return result, nil
 }
+
+{{- if eq .Auth.Type "composed"}}
+// validateComposedAuth makes a lightweight test request to verify the session is still active.
+func validateComposedAuth(authHeader string) error {
+	// Use the API base URL + a lightweight endpoint to test auth.
+	// The Version endpoint requires auth headers on Pagliacci-style APIs,
+	// so a 401 means the session is expired.
+	testURL := "{{.BaseURL}}/Version"
+	req, err := http.NewRequest("GET", testURL, nil)
+	if err != nil {
+		return nil // can't validate, assume OK
+	}
+	req.Header.Set("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}", authHeader)
+	req.Header.Set("User-Agent", "{{.Name}}-pp-cli/{{.Version}}")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil // network error, assume OK — don't block auth on connectivity
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+{{- end}}
 
 // --- Live browser cookie extraction (session cookies fallback) ---
 
