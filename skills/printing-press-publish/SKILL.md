@@ -374,18 +374,34 @@ git checkout -B feat/<cli-name>
 
 **If `EXISTING_PR_NUMBER` is empty** (no open PR):
 
-Check for an existing branch:
+Check for stale branches and competing PRs:
 
 ```bash
-git branch --list "feat/<cli-name>"
-git ls-remote --heads origin "feat/<cli-name>"
+# Check local and remote branches
+LOCAL_BRANCH=$(git branch --list "feat/<cli-name>" | head -1)
+REMOTE_BRANCH=$(git ls-remote --heads origin "feat/<cli-name>" 2>/dev/null | head -1)
+
+# If a remote branch exists, check who owns it
+if [ -n "$REMOTE_BRANCH" ]; then
+  # Check for ANY open PR on this branch (not just ours)
+  OTHER_PR=$(gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --json number,author --jq '.[0]' 2>/dev/null)
+fi
 ```
 
-If a branch exists (from a previously closed or merged PR), ask via AskUserQuestion:
-- "Overwrite existing branch"
+**If another user's open PR exists on this branch** (`OTHER_PR` is non-empty and author is not `@me`):
+> "Someone else has an open PR for `<cli-name>` (PR #N by @author). Creating a timestamped branch to avoid conflicts."
+
+Auto-create a timestamped branch: `feat/<cli-name>-YYYYMMDD`. Do NOT offer to overwrite — that would stomp their work.
+
+**If the branch exists but no competing PR** (stale branch from a previously closed/merged PR):
+
+Ask via AskUserQuestion:
+> "Found a stale branch `feat/<cli-name>` (likely from a previous publish). Overwrite it?"
+
+- "Overwrite existing branch" — reuse the branch name
 - "Create timestamped variant (feat/<cli-name>-YYYYMMDD)"
 
-Create the branch:
+**If no branch exists:** Create normally.
 
 ```bash
 # New branch:
