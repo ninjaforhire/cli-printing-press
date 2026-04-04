@@ -111,7 +111,8 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 			// "steam-web" → "Steam Web", "notion" → "Notion"
 			return cases.Title(language.English).String(strings.ReplaceAll(s, "-", " "))
 		},
-		"envName": func(s string) string { return strings.ToUpper(strings.ReplaceAll(s, "-", "_")) },
+		"envName":  func(s string) string { return strings.ToUpper(strings.ReplaceAll(s, "-", "_")) },
+		"safeName": safeSQLName,
 		"goLiteral": func(v any) string {
 			switch val := v.(type) {
 			case string:
@@ -586,12 +587,16 @@ func (g *Generator) Generate() error {
 	// Generate promoted top-level commands (user-friendly aliases for nested API commands)
 	// promotedCommands was computed earlier (before resource rendering) for Hidden flag
 	for _, pc := range promotedCommands {
+		// Look up the full resource to pass sibling endpoints/sub-resources
+		resource := g.Spec.Resources[pc.ResourceName]
 		promotedData := struct {
 			PromotedName string
 			ResourceName string
 			EndpointName string
 			Endpoint     spec.Endpoint
 			HasStore     bool
+			Resource     spec.Resource
+			FuncPrefix   string
 			*spec.APISpec
 		}{
 			PromotedName: pc.PromotedName,
@@ -599,6 +604,8 @@ func (g *Generator) Generate() error {
 			EndpointName: pc.EndpointName,
 			Endpoint:     pc.Endpoint,
 			HasStore:     g.VisionSet.Store,
+			Resource:     resource,
+			FuncPrefix:   pc.ResourceName,
 			APISpec:      g.Spec,
 		}
 		promotedPath := filepath.Join("internal", "cli", "promoted_"+pc.PromotedName+".go")
@@ -806,7 +813,7 @@ func camelToJSON(s string) string {
 func columnNames(cols []ColumnDef) string {
 	names := make([]string, 0, len(cols))
 	for _, col := range cols {
-		names = append(names, col.Name)
+		names = append(names, safeSQLName(col.Name))
 	}
 	return strings.Join(names, ", ")
 }
@@ -828,7 +835,8 @@ func updateSet(cols []ColumnDef) string {
 		if col.PrimaryKey {
 			continue
 		}
-		updates = append(updates, fmt.Sprintf("%s = excluded.%s", col.Name, col.Name))
+		safe := safeSQLName(col.Name)
+		updates = append(updates, fmt.Sprintf("%s = excluded.%s", safe, safe))
 	}
 	return strings.Join(updates, ", ")
 }

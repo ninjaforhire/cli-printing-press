@@ -138,5 +138,15 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&flagAll, "all", false, "Fetch all pages")
 {{- end}}
 
+	// Wire sibling endpoints and sub-resources as subcommands
+{{- range $eName, $endpoint := .Resource.Endpoints}}
+{{- if ne $eName $.EndpointName}}
+	cmd.AddCommand(new{{camel $.FuncPrefix}}{{camel $eName}}Cmd(flags))
+{{- end}}
+{{- end}}
+{{- range $subName, $sub := .Resource.SubResources}}
+	cmd.AddCommand(new{{camel $.FuncPrefix}}{{camel $subName}}Cmd(flags))
+{{- end}}
+
 	return cmd
 }

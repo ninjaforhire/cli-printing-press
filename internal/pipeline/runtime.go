@@ -472,16 +472,18 @@ func syntheticArgValue(name string) string {
 // classifyCommandKind determines if a command is read, write, local, or data-layer.
 func classifyCommandKind(cmd *discoveredCommand, spec *openAPISpec) {
 	name := cmd.Name
-	// Data layer commands
+	// Data layer commands — read from local SQLite, not the API
 	switch name {
-	case "sync", "search", "sql", "health", "trends", "patterns", "analytics", "export", "import":
+	case "sync", "search", "sql", "health", "trends", "patterns", "analytics",
+		"export", "import", "stale", "no-show", "today", "busy", "diff",
+		"noshow", "velocity", "popular":
 		cmd.Kind = "data-layer"
 		return
-	case "doctor", "auth":
+	case "doctor", "auth", "api", "completion":
 		cmd.Kind = "local"
 		return
 	case "tail":
-		cmd.Kind = "read"
+		cmd.Kind = "data-layer"
 		return
 	}
 

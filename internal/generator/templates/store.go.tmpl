@@ -78,37 +78,37 @@ func (s *Store) migrate() error {
 		)`,
 {{- range .Tables}}
 {{- if ne .Name "sync_state"}}
-		`CREATE TABLE IF NOT EXISTS {{.Name}} (
+		`CREATE TABLE IF NOT EXISTS {{safeName .Name}} (
 {{- range $i, $col := .Columns}}
 {{- if $i}},{{end}}
-			{{$col.Name}} {{$col.Type}}{{if $col.PrimaryKey}} PRIMARY KEY{{end}}{{if $col.NotNull}} NOT NULL{{end}}
+			{{safeName $col.Name}} {{$col.Type}}{{if $col.PrimaryKey}} PRIMARY KEY{{end}}{{if $col.NotNull}} NOT NULL{{end}}
 {{- end}}
 		)`,
 {{- range .Indexes}}
-		`CREATE {{if .Unique}}UNIQUE {{end}}INDEX IF NOT EXISTS {{.Name}} ON {{.TableName}}({{.Columns}})`,
+		`CREATE {{if .Unique}}UNIQUE {{end}}INDEX IF NOT EXISTS {{.Name}} ON {{safeName .TableName}}({{safeName .Columns}})`,
 {{- end}}
 {{- if .FTS5}}
 		`CREATE VIRTUAL TABLE IF NOT EXISTS {{.Name}}_fts USING fts5(
 {{- range $i, $field := .FTS5Fields}}
 {{- if $i}},{{end}}
-			{{$field}}
+			{{safeName $field}}
 {{- end}},
-			content='{{.Name}}',
+			content='{{safeName .Name}}',
 			content_rowid='rowid'
 		)`,
-		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_ai AFTER INSERT ON {{.Name}} BEGIN
+		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_ai AFTER INSERT ON {{safeName .Name}} BEGIN
 			INSERT INTO {{.Name}}_fts(rowid, {{join .FTS5Fields ", "}})
-			VALUES (new.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}new.{{$field}}{{- end}});
+			VALUES (new.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}new.{{safeName $field}}{{- end}});
 		END`,
-		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_ad AFTER DELETE ON {{.Name}} BEGIN
+		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_ad AFTER DELETE ON {{safeName .Name}} BEGIN
 			INSERT INTO {{.Name}}_fts({{.Name}}_fts, rowid, {{join .FTS5Fields ", "}})
-			VALUES ('delete', old.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}old.{{$field}}{{- end}});
+			VALUES ('delete', old.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}old.{{safeName $field}}{{- end}});
 		END`,
-		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_au AFTER UPDATE ON {{.Name}} BEGIN
+		`CREATE TRIGGER IF NOT EXISTS {{.Name}}_au AFTER UPDATE ON {{safeName .Name}} BEGIN
 			INSERT INTO {{.Name}}_fts({{.Name}}_fts, rowid, {{join .FTS5Fields ", "}})
-			VALUES ('delete', old.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}old.{{$field}}{{- end}});
+			VALUES ('delete', old.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}old.{{safeName $field}}{{- end}});
 			INSERT INTO {{.Name}}_fts(rowid, {{join .FTS5Fields ", "}})
-			VALUES (new.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}new.{{$field}}{{- end}});
+			VALUES (new.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}new.{{safeName $field}}{{- end}});
 		END`,
 {{- end}}
 {{- end}}
@@ -284,7 +284,7 @@ func (s *Store) Upsert{{pascal .Name}}(data json.RawMessage) error {
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO {{.Name}} ({{columnNames .Columns}})
+		`INSERT INTO {{safeName .Name}} ({{columnNames .Columns}})
 		 VALUES ({{columnPlaceholders .Columns}})
 		 ON CONFLICT(id) DO UPDATE SET {{updateSet .Columns}}`,
 		id,
@@ -346,7 +346,7 @@ func (s *Store) Search{{pascal .Name}}(query string, limit int) ([]json.RawMessa
 		limit = 50
 	}
 	rows, err := s.db.Query(
-		`SELECT t.data FROM {{.Name}} t
+		`SELECT t.data FROM {{safeName .Name}} t
 		 JOIN {{.Name}}_fts ON {{.Name}}_fts.rowid = t.rowid
 		 WHERE {{.Name}}_fts MATCH ?
 		 ORDER BY rank LIMIT ?`,

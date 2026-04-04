@@ -311,6 +311,34 @@ func buildSubResourceTable(name string, r spec.Resource, parentTable string) Tab
 	return table
 }
 
+// sqlReservedWords is the set of SQL keywords that must be quoted when used
+// as table or column names. Covers SQLite reserved words plus common SQL
+// keywords that appear as API resource or field names.
+var sqlReservedWords = map[string]bool{
+	"check": true, "default": true, "from": true, "to": true,
+	"order": true, "group": true, "select": true, "where": true,
+	"table": true, "column": true, "index": true, "key": true,
+	"values": true, "references": true, "create": true, "drop": true,
+	"insert": true, "update": true, "delete": true, "set": true,
+	"join": true, "on": true, "in": true, "not": true, "null": true,
+	"primary": true, "foreign": true, "unique": true, "like": true,
+	"between": true, "exists": true, "having": true, "limit": true,
+	"offset": true, "union": true, "except": true, "case": true,
+	"when": true, "then": true, "else": true, "end": true,
+	"as": true, "is": true, "by": true, "and": true, "or": true,
+	"transaction": true, "begin": true, "commit": true, "rollback": true,
+	"trigger": true, "view": true, "replace": true, "match": true,
+}
+
+// safeSQLName returns the identifier double-quoted if it's a SQL reserved word.
+// Safe to use as a template function for table and column names in SQL DDL.
+func safeSQLName(name string) string {
+	if sqlReservedWords[strings.ToLower(name)] {
+		return `"` + name + `"`
+	}
+	return name
+}
+
 // toSnakeCase converts camelCase, PascalCase, or kebab-case to snake_case.
 func toSnakeCase(s string) string {
 	s = strings.ReplaceAll(s, "-", "_")

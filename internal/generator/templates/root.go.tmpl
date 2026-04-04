@@ -103,7 +103,9 @@ func Execute() error {
 {{- end}}
 {{- end}}
 	rootCmd.AddCommand(newDoctorCmd(&flags))
+{{- if not (index .Resources "auth")}}
 	rootCmd.AddCommand(newAuthCmd(&flags))
+{{- end}}
 {{- if .VisionSet.Export}}
 	rootCmd.AddCommand(newExportCmd(&flags))
 {{- end}}
