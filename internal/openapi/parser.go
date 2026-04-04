@@ -150,6 +150,24 @@ func parse(data []byte, lenient bool) (*spec.APISpec, error) {
 		version = strings.TrimSpace(doc.Info.Version)
 	}
 
+	// Extract website URL from spec metadata (contact URL, externalDocs, or x-website)
+	var websiteURL string
+	if doc.Info != nil {
+		if doc.Info.Contact != nil && doc.Info.Contact.URL != "" {
+			websiteURL = doc.Info.Contact.URL
+		}
+		if websiteURL == "" && doc.Info.Extensions != nil {
+			if raw, ok := doc.Info.Extensions["x-website"]; ok {
+				if s, ok := raw.(string); ok {
+					websiteURL = s
+				}
+			}
+		}
+	}
+	if websiteURL == "" && doc.ExternalDocs != nil && doc.ExternalDocs.URL != "" {
+		websiteURL = doc.ExternalDocs.URL
+	}
+
 	// Extract x-proxy-routes extension for proxy-envelope client pattern
 	var proxyRoutes map[string]string
 	if doc.Info != nil && doc.Info.Extensions != nil {
@@ -213,6 +231,7 @@ func parse(data []byte, lenient bool) (*spec.APISpec, error) {
 		Version:     version,
 		BaseURL:     baseURL,
 		BasePath:    basePath,
+		WebsiteURL:  websiteURL,
 		ProxyRoutes: proxyRoutes,
 		Auth:        mapAuth(doc, name),
 		Config: spec.ConfigSpec{

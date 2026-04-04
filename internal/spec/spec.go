@@ -18,6 +18,7 @@ type APISpec struct {
 	SpecSource    string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
 	ClientPattern string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
 	ProxyRoutes   map[string]string   `yaml:"proxy_routes,omitempty" json:"proxy_routes,omitempty"`     // path prefix → service name for proxy-envelope routing
+	WebsiteURL    string              `yaml:"website_url,omitempty" json:"website_url,omitempty"`       // product/company website (not the API base URL)
 	Auth          AuthConfig          `yaml:"auth" json:"auth"`
 	Config        ConfigSpec          `yaml:"config" json:"config"`
 	Resources     map[string]Resource `yaml:"resources" json:"resources"`

@@ -3,6 +3,7 @@ package generator
 import (
 	"embed"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,6 +188,12 @@ type readmeTemplateData struct {
 }
 
 func (g *Generator) readmeData() *readmeTemplateData {
+	// For sniffed APIs without a website URL, derive it from the base URL domain
+	if g.Spec.WebsiteURL == "" && g.Spec.SpecSource == "sniffed" && g.Spec.BaseURL != "" {
+		if u, err := url.Parse(g.Spec.BaseURL); err == nil && u.Host != "" {
+			g.Spec.WebsiteURL = u.Scheme + "://" + u.Host
+		}
+	}
 	return &readmeTemplateData{
 		APISpec:        g.Spec,
 		Sources:        g.Sources,

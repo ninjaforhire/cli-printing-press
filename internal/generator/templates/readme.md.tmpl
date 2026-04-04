@@ -1,6 +1,8 @@
 # {{humanName .Name}} CLI
 
-{{.Description}}
+{{.Description}}{{if .WebsiteURL}}
+
+Learn more at [{{humanName .Name}}]({{.WebsiteURL}}).{{end}}
 
 ## Install
 
