@@ -148,7 +148,7 @@ func Profile(s *spec.APISpec) *APIProfile {
 					p.SearchQueryParam = "q" // default
 					for _, param := range endpoint.Params {
 						pname := strings.ToLower(param.Name)
-						if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" {
+						if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" || pname == "querytext" || pname == "searchterm" || pname == "searchtext" || pname == "text" {
 							p.SearchQueryParam = param.Name
 							break
 						}
@@ -157,7 +157,7 @@ func Profile(s *spec.APISpec) *APIProfile {
 					if p.SearchEndpointMethod == "POST" {
 						for _, param := range endpoint.Body {
 							pname := strings.ToLower(param.Name)
-							if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" {
+							if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" || pname == "querytext" || pname == "searchterm" || pname == "searchtext" || pname == "text" {
 								p.SearchQueryParam = param.Name
 								break
 							}
