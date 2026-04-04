@@ -44,6 +44,14 @@ type PaginationProfile struct {
 	DefaultPageSize int    `json:"default_page_size"` // detected or default 100
 }
 
+// SearchBodyField describes an additional body field needed for POST search endpoints.
+type SearchBodyField struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`    // string, integer, boolean, array
+	Default  any    `json:"default"` // default value from spec, or synthesized from enum
+	Required bool   `json:"required"`
+}
+
 // SyncableResource describes a resource that supports paginated list sync.
 type SyncableResource struct {
 	Name string
@@ -77,6 +85,10 @@ type APIProfile struct {
 	SearchQueryParam string
 	// SearchEndpointMethod is the HTTP method for the search endpoint (GET or POST).
 	SearchEndpointMethod string
+	// SearchBodyFields holds additional body fields (beyond the query param) needed for POST
+	// search endpoints. Each entry has name, default value, and type. The search template
+	// uses these to construct the full POST body at generation time.
+	SearchBodyFields []SearchBodyField
 
 	Domain     DomainSignals
 	Pagination PaginationProfile
@@ -142,25 +154,75 @@ func Profile(s *spec.APISpec) *APIProfile {
 				hasSearchEndpoint = true
 				// Prefer shorter/more general search paths (e.g., /search over /users/search)
 				if p.SearchEndpointPath == "" || len(endpoint.Path) < len(p.SearchEndpointPath) {
+					method := strings.ToUpper(endpoint.Method)
 					p.SearchEndpointPath = endpoint.Path
-					p.SearchEndpointMethod = strings.ToUpper(endpoint.Method)
-					// Find the query parameter for the search endpoint
+					p.SearchEndpointMethod = method
 					p.SearchQueryParam = "q" // default
+					p.SearchBodyFields = nil
+
+					// Find the query parameter
+					searchParamNames := []string{"q", "query", "search", "keyword", "term", "querytext", "searchterm", "searchtext", "text"}
+					isSearchParam := func(name string) bool {
+						lower := strings.ToLower(name)
+						for _, sp := range searchParamNames {
+							if lower == sp {
+								return true
+							}
+						}
+						return false
+					}
+
 					for _, param := range endpoint.Params {
-						pname := strings.ToLower(param.Name)
-						if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" || pname == "querytext" || pname == "searchterm" || pname == "searchtext" || pname == "text" {
+						if isSearchParam(param.Name) {
 							p.SearchQueryParam = param.Name
 							break
 						}
 					}
-					// For POST search endpoints, check body params too
-					if p.SearchEndpointMethod == "POST" {
+
+					// For POST endpoints, check body params for query param and
+					// capture additional required fields with their defaults
+					if method == "POST" {
 						for _, param := range endpoint.Body {
-							pname := strings.ToLower(param.Name)
-							if pname == "q" || pname == "query" || pname == "search" || pname == "keyword" || pname == "term" || pname == "querytext" || pname == "searchterm" || pname == "searchtext" || pname == "text" {
+							if isSearchParam(param.Name) {
 								p.SearchQueryParam = param.Name
-								break
+								continue
 							}
+							// Capture non-query body fields so the template can
+							// construct the full POST body at generation time
+							field := SearchBodyField{
+								Name:     param.Name,
+								Type:     param.Type,
+								Required: param.Required,
+							}
+							// Use spec default if available
+							if param.Default != nil {
+								field.Default = param.Default
+							} else if len(param.Enum) > 0 {
+								// For arrays with enum values, use all enum values as default
+								if param.Type == "array" {
+									field.Default = param.Enum
+								} else {
+									field.Default = param.Enum[0]
+								}
+							} else if param.Type == "array" && len(param.Fields) > 0 && len(param.Fields[0].Enum) > 0 {
+								// Array items have enum — use all enum values (e.g., search all entity types)
+								field.Default = param.Fields[0].Enum
+							} else {
+								// Synthesize reasonable defaults by type
+								switch param.Type {
+								case "integer", "number":
+									field.Default = 10
+								case "boolean":
+									field.Default = true
+								case "string":
+									field.Default = ""
+								case "object":
+									field.Default = map[string]any{}
+								case "array":
+									field.Default = []any{}
+								}
+							}
+							p.SearchBodyFields = append(p.SearchBodyFields, field)
 						}
 					}
 				}
