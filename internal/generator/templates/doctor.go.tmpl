@@ -150,6 +150,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 {{- else}}
 					authReq.Header.Set("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}", authHeader)
 {{- end}}
+{{- range .RequiredHeaders}}
+					authReq.Header.Set("{{.Name}}", "{{.Value}}")
+{{- end}}
 					authReq.Header.Set("User-Agent", "{{.Name}}-pp-cli")
 					authResp, authErr := httpClient.Do(authReq)
 					if authErr != nil {

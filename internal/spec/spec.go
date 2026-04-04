@@ -9,20 +9,30 @@ import (
 )
 
 type APISpec struct {
-	Name          string              `yaml:"name" json:"name"`
-	Description   string              `yaml:"description" json:"description"`
-	Version       string              `yaml:"version" json:"version"`
-	BaseURL       string              `yaml:"base_url" json:"base_url"`
-	BasePath      string              `yaml:"base_path,omitempty" json:"base_path,omitempty"`
-	Owner         string              `yaml:"owner,omitempty" json:"owner,omitempty"`                   // GitHub owner for import paths and Homebrew tap
-	SpecSource    string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
-	ClientPattern string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
-	ProxyRoutes   map[string]string   `yaml:"proxy_routes,omitempty" json:"proxy_routes,omitempty"`     // path prefix → service name for proxy-envelope routing
-	WebsiteURL    string              `yaml:"website_url,omitempty" json:"website_url,omitempty"`       // product/company website (not the API base URL)
-	Auth          AuthConfig          `yaml:"auth" json:"auth"`
-	Config        ConfigSpec          `yaml:"config" json:"config"`
-	Resources     map[string]Resource `yaml:"resources" json:"resources"`
-	Types         map[string]TypeDef  `yaml:"types" json:"types"`
+	Name            string              `yaml:"name" json:"name"`
+	Description     string              `yaml:"description" json:"description"`
+	Version         string              `yaml:"version" json:"version"`
+	BaseURL         string              `yaml:"base_url" json:"base_url"`
+	BasePath        string              `yaml:"base_path,omitempty" json:"base_path,omitempty"`
+	Owner           string              `yaml:"owner,omitempty" json:"owner,omitempty"`                   // GitHub owner for import paths and Homebrew tap
+	SpecSource      string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
+	ClientPattern   string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
+	ProxyRoutes     map[string]string   `yaml:"proxy_routes,omitempty" json:"proxy_routes,omitempty"`     // path prefix → service name for proxy-envelope routing
+	WebsiteURL      string              `yaml:"website_url,omitempty" json:"website_url,omitempty"`       // product/company website (not the API base URL)
+	Auth            AuthConfig          `yaml:"auth" json:"auth"`
+	RequiredHeaders []RequiredHeader    `yaml:"required_headers,omitempty" json:"required_headers,omitempty"`
+	Config          ConfigSpec          `yaml:"config" json:"config"`
+	Resources       map[string]Resource `yaml:"resources" json:"resources"`
+	Types           map[string]TypeDef  `yaml:"types" json:"types"`
+}
+
+// RequiredHeader represents a non-auth header that the API requires on most
+// requests (e.g., cal-api-version, Stripe-Version, anthropic-version).
+// Detected automatically from OpenAPI specs when a required header parameter
+// appears on >80% of operations.
+type RequiredHeader struct {
+	Name  string `yaml:"name" json:"name"`
+	Value string `yaml:"value" json:"value"`
 }
 
 type AuthConfig struct {

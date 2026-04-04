@@ -343,6 +343,9 @@ func (c *Client) do(method, path string, params map[string]string, body any) (js
 			req.Header.Set("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}", authHeader)
 {{- end}}
 		}
+{{- range .RequiredHeaders}}
+		req.Header.Set("{{.Name}}", "{{.Value}}")
+{{- end}}
 		req.Header.Set("User-Agent", "{{.Name}}-pp-cli/{{.Version}}")
 
 		resp, err := c.HTTPClient.Do(req)

@@ -701,6 +701,9 @@ func validateComposedAuth(authHeader string) error {
 		return nil // can't validate, assume OK
 	}
 	req.Header.Set("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}", authHeader)
+{{- range .RequiredHeaders}}
+	req.Header.Set("{{.Name}}", "{{.Value}}")
+{{- end}}
 	req.Header.Set("User-Agent", "{{.Name}}-pp-cli/{{.Version}}")
 
 	client := &http.Client{Timeout: 5 * time.Second}

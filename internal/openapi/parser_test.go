@@ -437,3 +437,44 @@ func TestHumanizeDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectRequiredHeaders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("versioned API with required header on all operations", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openapi", "versioned-api.yaml"))
+		require.NoError(t, err)
+
+		parsed, err := Parse(data)
+		require.NoError(t, err)
+
+		require.Len(t, parsed.RequiredHeaders, 1)
+		assert.Equal(t, "X-Api-Version", parsed.RequiredHeaders[0].Name)
+		assert.Equal(t, "2024-01-01", parsed.RequiredHeaders[0].Value)
+	})
+
+	t.Run("petstore has no required headers", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openapi", "petstore.yaml"))
+		require.NoError(t, err)
+
+		parsed, err := Parse(data)
+		require.NoError(t, err)
+
+		assert.Empty(t, parsed.RequiredHeaders)
+	})
+
+	t.Run("stytch has no required headers (optional session headers)", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openapi", "stytch.yaml"))
+		require.NoError(t, err)
+
+		parsed, err := Parse(data)
+		require.NoError(t, err)
+
+		assert.Empty(t, parsed.RequiredHeaders)
+	})
+
+	t.Run("authorization header excluded even if required on all ops", func(t *testing.T) {
+		headers := detectRequiredHeaders(nil, spec.AuthConfig{})
+		assert.Empty(t, headers)
+	})
+}

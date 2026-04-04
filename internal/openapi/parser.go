@@ -248,6 +248,7 @@ func parse(data []byte, lenient bool) (*spec.APISpec, error) {
 	}
 	mapResources(doc, result, resourceBasePath)
 	mapTypes(doc, result)
+	result.RequiredHeaders = detectRequiredHeaders(doc, result.Auth)
 
 	if err := result.Validate(); err != nil {
 		return nil, fmt.Errorf("validating parsed spec: %w", err)
@@ -423,6 +424,92 @@ func inferQueryParamAuth(doc *openapi3.T, name string, fallback spec.AuthConfig)
 		Header:  best,
 		EnvVars: []string{envPrefix + "_API_KEY"},
 	}
+}
+
+// detectRequiredHeaders scans all operations for required header parameters
+// and returns those appearing on >80% of operations as global required headers.
+// Auth-related and dynamic headers are excluded via case-insensitive matching.
+func detectRequiredHeaders(doc *openapi3.T, auth spec.AuthConfig) []spec.RequiredHeader {
+	if doc == nil || doc.Paths == nil {
+		return nil
+	}
+
+	// Headers to exclude (case-insensitive) — handled by other mechanisms
+	excludeHeaders := map[string]bool{
+		"authorization": true,
+		"content-type":  true,
+		"accept":        true,
+		"user-agent":    true,
+	}
+	if auth.Header != "" {
+		excludeHeaders[strings.ToLower(auth.Header)] = true
+	}
+
+	type headerInfo struct {
+		name         string
+		defaultValue string
+		count        int
+	}
+
+	headers := map[string]*headerInfo{} // keyed by lowercase name
+	totalOps := 0
+
+	for _, pathKey := range doc.Paths.InMatchingOrder() {
+		pathItem := doc.Paths.Value(pathKey)
+		if pathItem == nil {
+			continue
+		}
+		for _, op := range pathItem.Operations() {
+			if op == nil {
+				continue
+			}
+			totalOps++
+			seen := map[string]bool{}
+			for _, params := range []openapi3.Parameters{pathItem.Parameters, op.Parameters} {
+				for _, pRef := range params {
+					if pRef == nil || pRef.Value == nil {
+						continue
+					}
+					p := pRef.Value
+					lower := strings.ToLower(p.Name)
+					if p.In != openapi3.ParameterInHeader || !p.Required || excludeHeaders[lower] || seen[lower] {
+						continue
+					}
+					seen[lower] = true
+					h, ok := headers[lower]
+					if !ok {
+						h = &headerInfo{name: p.Name}
+						// Extract default value from schema
+						if p.Schema != nil && p.Schema.Value != nil {
+							if p.Schema.Value.Default != nil {
+								h.defaultValue = fmt.Sprintf("%v", p.Schema.Value.Default)
+							} else if len(p.Schema.Value.Enum) > 0 {
+								h.defaultValue = fmt.Sprintf("%v", p.Schema.Value.Enum[0])
+							}
+						}
+						headers[lower] = h
+					}
+					h.count++
+				}
+			}
+		}
+	}
+
+	if totalOps == 0 {
+		return nil
+	}
+
+	var result []spec.RequiredHeader
+	threshold := 0.8
+	for _, h := range headers {
+		if float64(h.count)/float64(totalOps) >= threshold {
+			result = append(result, spec.RequiredHeader{
+				Name:  h.name,
+				Value: h.defaultValue,
+			})
+		}
+	}
+	return result
 }
 
 func selectSecurityScheme(doc *openapi3.T) (string, *openapi3.SecurityScheme) {

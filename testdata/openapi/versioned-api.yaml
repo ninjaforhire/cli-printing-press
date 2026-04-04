@@ -1,0 +1,96 @@
+openapi: "3.0.0"
+info:
+  title: Versioned API
+  version: "1.0.0"
+  description: Test fixture for required header detection
+servers:
+  - url: https://api.example.com/v2
+paths:
+  /v2/users:
+    get:
+      operationId: getUsers
+      summary: List users
+      parameters:
+        - name: X-Api-Version
+          in: header
+          required: true
+          schema:
+            type: string
+            default: "2024-01-01"
+      responses:
+        "200":
+          description: OK
+    post:
+      operationId: createUser
+      summary: Create user
+      parameters:
+        - name: X-Api-Version
+          in: header
+          required: true
+          schema:
+            type: string
+            default: "2024-01-01"
+      responses:
+        "201":
+          description: Created
+  /v2/users/{id}:
+    get:
+      operationId: getUser
+      summary: Get user by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Api-Version
+          in: header
+          required: true
+          schema:
+            type: string
+            default: "2024-01-01"
+      responses:
+        "200":
+          description: OK
+    patch:
+      operationId: updateUser
+      summary: Update user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Api-Version
+          in: header
+          required: true
+          schema:
+            type: string
+            default: "2024-01-01"
+      responses:
+        "200":
+          description: OK
+    delete:
+      operationId: deleteUser
+      summary: Delete user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Api-Version
+          in: header
+          required: true
+          schema:
+            type: string
+            default: "2024-01-01"
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Optional per-request correlation ID (should NOT be detected as global)
+      responses:
+        "204":
+          description: No Content
