@@ -88,6 +88,7 @@ func (s *Store) migrate() error {
 		`CREATE {{if .Unique}}UNIQUE {{end}}INDEX IF NOT EXISTS {{.Name}} ON {{safeName .TableName}}({{safeName .Columns}})`,
 {{- end}}
 {{- if .FTS5}}
+{{- if .FTS5Triggers}}
 		`CREATE VIRTUAL TABLE IF NOT EXISTS {{.Name}}_fts USING fts5(
 {{- range $i, $field := .FTS5Fields}}
 {{- if $i}},{{end}}
@@ -110,6 +111,15 @@ func (s *Store) migrate() error {
 			INSERT INTO {{.Name}}_fts(rowid, {{join .FTS5Fields ", "}})
 			VALUES (new.rowid, {{- range $i, $field := .FTS5Fields}}{{if $i}}, {{end}}new.{{safeName $field}}{{- end}});
 		END`,
+{{- else}}
+		`CREATE VIRTUAL TABLE IF NOT EXISTS {{.Name}}_fts USING fts5(
+			id,
+{{- range $i, $field := .FTS5Fields}}
+			{{safeName $field}},
+{{- end}}
+			tokenize='porter unicode61'
+		)`,
+{{- end}}
 {{- end}}
 {{- end}}
 {{- end}}
@@ -299,6 +309,19 @@ func (s *Store) Upsert{{pascal .Name}}(data json.RawMessage) error {
 	if err != nil {
 		return err
 	}
+{{- if and .FTS5 (not .FTS5Triggers)}}
+
+	// Standalone FTS: manually sync since content-sync triggers aren't used
+	// (FTS fields are inside the JSON data column, not extracted table columns)
+	_, _ = tx.Exec(`DELETE FROM {{.Name}}_fts WHERE id = ?`, id)
+	_, _ = tx.Exec(
+		`INSERT INTO {{.Name}}_fts (id, {{join .FTS5Fields ", "}}) VALUES (?{{- range .FTS5Fields}}, ?{{- end}})`,
+		id,
+{{- range .FTS5Fields}}
+		lookupFieldValue(obj, "{{.}}"),
+{{- end}}
+	)
+{{- end}}
 
 	return tx.Commit()
 }
