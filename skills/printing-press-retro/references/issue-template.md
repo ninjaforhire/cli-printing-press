@@ -79,7 +79,7 @@ retro — not the full retro document. The full retro is linked via catbox artif
 *If uploads failed:* Artifacts could not be uploaded to catbox.moe. The retro author
 has local copies. Ask them to attach manually if needed.
 
-## What the Machine Got Right
+## What the Printing Press Got Right
 
 - <pattern to preserve>
 - <pattern to preserve>

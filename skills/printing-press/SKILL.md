@@ -415,8 +415,8 @@ Before new research:
    If prior research was also found (step 2), include the research summary alongside the library info.
 
    Then ask:
-   1. **"Generate a fresh CLI"** — Re-runs the generator into a working directory, overwrites generated code, then rebuilds transcendence features. Prior research is reused if recent. ~15-20 min.
-   2. **"Improve existing CLI"** — Keeps all current code, audits for quality gaps, implements top improvements. The generator is not re-run. ~10 min.
+   1. **"Generate a fresh CLI"** — Re-runs the Printing Press into a working directory, overwrites generated code, then rebuilds transcendence features. Prior research is reused if recent. ~15-20 min.
+   2. **"Improve existing CLI"** — Keeps all current code, audits for quality gaps, implements top improvements. The Printing Press is not re-run. ~10 min.
    3. **"Review prior research first"** — Show the full research brief and absorb manifest before deciding.
 
    If the user picks option 1, proceed to Phase 1 (research) and then Phase 2 (generate) as normal.
@@ -1347,7 +1347,7 @@ For each test, print the command and result in this format:
 
 When a test fails, fix it immediately — do not accumulate failures. Tag each fix:
 - **CLI fix** — specific to this printed CLI
-- **Machine issue** — should be fixed in the generator (note for retro)
+- **Printing Press issue** — should be fixed in the Printing Press (note for retro)
 
 ### Step 4: Report and gate
 
@@ -1362,7 +1362,7 @@ Acceptance Report: <cli-name>
     - [command]: expected [X], got [Y]
   Fixes applied: K
     - [each fix]
-  Machine issues: J
+  Printing Press issues: J
     - [each issue for retro]
   Gate: PASS / FAIL
 ```
@@ -1528,7 +1528,7 @@ Present via `AskUserQuestion`:
 >
 > 1. **Publish now** (validate, package, and open a PR)
 > 2. **Polish first** (run `/printing-press-polish` to fix verify failures, dead code, and README before publishing)
-> 3. **Run retro** (analyze the session to find improvements for the generator)
+> 3. **Run retro** (analyze the session to find improvements for the Printing Press)
 > 4. **Done for now**
 
 If the verdict was `ship-with-gaps`, prepend: "Note: shipcheck found minor gaps (see the shipcheck report above)." and recommend the polish option.

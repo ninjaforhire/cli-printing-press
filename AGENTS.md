@@ -47,6 +47,10 @@ Key terms used throughout this repo. Several have overloaded meanings — the gl
 
 **Use the canonical term** (left column) in your own responses so intent stays unambiguous. If the user's phrasing is ambiguous and the distinction affects what action to take — e.g., "publish it" could mean the pipeline step or pushing to the public library repo — ask before acting.
 
+**In skills and user-facing output** (GitHub issues, retro documents, confirmation prompts), use **"the Printing Press"** as the system name — never "the machine." Skills run as a plugin without AGENTS.md loaded, so readers won't have this glossary. "The machine" is fine in AGENTS.md, code comments, and developer conversation within this repo.
+
+**Subsystem names are fine alongside the Printing Press name.** When skills produce diagnostic output (retro findings, issue tables, work units), use component names — generator, scorer, skills, binary — to tell developers *where* to fix something. "Fix the Printing Press" is useless as an action item; "fix the scorer — it penalizes cookie auth" is actionable. The Printing Press is the system; the subsystems are how you navigate within it.
+
 | Canonical term | Meaning |
 |----------------|---------|
 | **the printing press** / **the machine** | This repo's generator system — the Go binary, templates, skills, and catalog that together produce CLIs. |

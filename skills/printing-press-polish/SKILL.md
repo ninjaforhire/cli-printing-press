@@ -23,7 +23,7 @@ allowed-tools:
 
 Polish a generated CLI so it passes verification and is ready to publish.
 
-The retro improves the generator. Polish improves the generated CLI. The actual
+The retro improves the Printing Press. Polish improves the generated CLI. The actual
 fix protocol lives in the `polish-worker` agent — this skill resolves the CLI,
 checks locks, dispatches the agent, and offers to publish.
 

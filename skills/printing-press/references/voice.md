@@ -27,7 +27,7 @@ type by hand, now running digital machinery with the same pride of craft.
 | **Publish** | Push a Printed CLI to the public library repo as a PR. |
 | **Scorecard** | Quantitative quality score out of 100 across 16+ dimensions. |
 | **Spec** | The API contract that drives generation. |
-| **The Machine** | This whole system — binary, templates, skills, catalog. |
+| **The Printing Press** | This whole system — binary, templates, skills, catalog. |
 | **Absorb Manifest** | The feature inventory from Phase 1.5. Everything to build. |
 | **Sniff Gate** | Decision point on whether to capture live site traffic. |
 | **Quality Gates** | The 7 static checks every Printed CLI must pass. |

@@ -2,9 +2,10 @@
 name: printing-press-retro
 description: >
   Run a retrospective after generating a CLI. Identifies systemic improvements
-  to the printing press machine — generator templates, Go binary, skill
-  instructions, catalog. Creates a GitHub issue with findings and artifacts
-  so anyone can fix the machine. Use after any /printing-press run.
+  to the Printing Press — templates, Go binary, skill instructions, catalog —
+  so the next CLI comes out better. Creates a GitHub issue with actionable
+  findings when there are Printing Press fixes to make.
+  Use after any /printing-press run.
   Trigger phrases: "retro", "retrospective", "what went wrong", "improve
   the press", "post-mortem", "lessons learned", "what can we improve",
   "file a retro", "submit findings".
@@ -21,25 +22,41 @@ allowed-tools:
 
 # /printing-press-retro
 
-Analyze a printing press session to find ways to make the *machine* better. Not
-fixes to the CLI that was just printed — improvements to the generator, binary,
-skill, and catalog so the *next* CLI comes out stronger with less manual effort.
+Analyze a Printing Press session to find ways to improve the system that produces
+CLIs — the Go binary, templates, skills, and catalog. Not fixes to the specific CLI
+that was just printed, but improvements so the *next* CLI comes out stronger with
+less manual effort.
 
 This goes beyond bugs. The most valuable findings are often the work that *succeeded
-but shouldn't have been necessary* — features you built by hand that the generator
-should have emitted, friction that recurs on every generation, and optimizations you
-discovered that should become defaults.
+but shouldn't have been necessary* — features you built by hand that the Printing
+Press should have emitted, friction that recurs on every generation, and optimizations
+you discovered that should become defaults.
 
 The retro creates a GitHub issue on the printing-press repo with your findings and
-artifacts so maintainers (or an AI agent) can fix the machine.
+artifacts so maintainers (or an AI agent) can fix the Printing Press.
+
+## Terminology
+
+- **The Printing Press**: The whole system that produces CLIs. Use this name in all
+  user-facing output (issues, retros, prompts). It has four subsystems:
+  - **Generator** — templates that emit Go code (`internal/generator/`)
+  - **Scorer** — tools that grade the output: verify, dogfood, scorecard
+  - **Skills** — SKILL.md instructions that guide Claude during generation
+  - **Binary** — the Go CLI itself: commands, flags, parsers (`cmd/printing-press/`)
+- **Printed CLI**: A CLI produced by the Printing Press for a specific API (e.g.,
+  `notion-pp-cli`). Printed-CLI fixes only help that one CLI.
+
+Use "the Printing Press" when talking about the system. Use the subsystem name when
+pointing a developer at what to fix — "fix the scorer" and "fix the generator" are
+different PRs.
 
 ## Cardinal rules
 
-- The retro is about the machine, not the CLI. Do not propose fixes to the generated CLI.
+- The retro is about the Printing Press, not the printed CLI. Do not propose fixes to one specific generated CLI.
 - **Never upload un-scrubbed artifacts.** All artifacts go through the secrets scrub before upload.
 - **Never modify source directories.** Manuscripts and library directories are read-only. Scrub operations work on temporary copies.
 - **Never skip the secrets scrub,** even if the generation pipeline already ran one. Defense in depth.
-- **Never work around a scorer bug in the generator.** If a scoring tool penalizes something incorrectly, the fix goes in the scoring tool.
+- **Never work around a scorer bug in the Printing Press.** If a scoring tool penalizes something incorrectly, the fix goes in the scoring tool.
 
 ## Setup
 
@@ -181,39 +198,39 @@ Mark session-dependent findings as "evidence: manuscripts only."
 
 ### 2a. Errors and retries
 
-Any time a command failed and was re-run, a build broke, or the generator produced
+Any time a command failed and was re-run, a build broke, or the Printing Press produced
 code that didn't compile. What broke and what fixed it?
 
 ### 2b. Manual code edits
 
-Every hand-edit to generated code is a signal — the generator *should have* gotten it
-right but didn't. These are the highest-value findings because they point directly at
-template gaps.
+Every hand-edit to generated code is a signal — the Printing Press *should have* gotten
+it right but didn't. These are the highest-value findings because they point directly
+at template gaps.
 
 ### 2c. Features built from scratch
 
 Features that had to be written entirely by hand. Ask: is this a feature class the
-generator could reasonably emit, or is it genuinely custom?
+Printing Press could reasonably emit, or is it genuinely custom?
 
 ### 2d. Recurring friction
 
 Work that happens on *every* generation, not just this one. For each: **is this
-inherent to the approach, or can the machine eliminate it?**
+inherent to the approach, or can the Printing Press eliminate it?**
 
-Propose at least two possible fixes at different levels (generator, binary
+Propose at least two possible fixes at different levels (generator templates, binary
 post-processing, skill instruction) and assess which is most durable.
 
 ### 2e. Discovered optimizations
 
 Improvements noticed during the session — UX ideas, performance improvements, new
 command patterns, output format improvements. Could this optimization be detected
-automatically and applied by the generator?
+automatically and applied by the Printing Press?
 
 ### 2f. Scorer accuracy audit
 
-Before proposing machine fixes to improve scores, check whether the scoring itself
-is correct. **Changing the generator to satisfy a broken scorer is worse than doing
-nothing.**
+Before proposing Printing Press fixes to improve scores, check whether the scoring
+itself is correct. **Changing the Printing Press to satisfy a broken scorer is worse
+than doing nothing.**
 
 For each score penalty from dogfood, verify, and scorecard:
 
@@ -240,8 +257,8 @@ affect this specific API and wouldn't recur.
 **1. What happened?** One sentence — the symptom, not the fix.
 
 **2. Is the scorer correct?** (mandatory for score-penalty findings)
-- **Scorer correct** → fix the generator/template/CLI code
-- **Scorer wrong** → fix the scoring tool, not the generator
+- **Scorer correct** → fix the Printing Press (templates, binary, or skill)
+- **Scorer wrong** → fix the scoring tool, not the Printing Press
 - **Both** → fix both, label which is primary
 
 **3. What category?**
@@ -250,15 +267,15 @@ affect this specific API and wouldn't recur.
 |----------|-------------|
 | **Bug** | Generated code is wrong |
 | **Scorer bug** | Scoring tool reports a false positive |
-| **Template gap** | Generator has no template for a common pattern |
-| **Assumption mismatch** | Generator assumes X but API uses Y |
+| **Template gap** | No template for a common pattern |
+| **Assumption mismatch** | Printing Press assumes X but API uses Y |
 | **Recurring friction** | Happens every generation, might be inherent |
-| **Missing scaffolding** | Feature class the generator could emit but doesn't |
-| **Default gap** | Generator emits a wrong or placeholder default |
+| **Missing scaffolding** | Feature class the Printing Press could emit but doesn't |
+| **Default gap** | Printing Press emits a wrong or placeholder default |
 | **Discovered optimization** | Improvement found during use |
 | **Skill instruction gap** | Skill told Claude wrong thing or missed a step |
 
-**4. Where in the machine does this originate?**
+**4. Where in the Printing Press does this originate?**
 
 | Component | Path |
 |-----------|------|
@@ -269,7 +286,7 @@ affect this specific API and wouldn't recur.
 | Main skill | `skills/printing-press/SKILL.md` |
 | Verify/dogfood/scorecard | CLI commands |
 
-**5. Blast radius and fallback cost — should the machine handle this?**
+**5. Blast radius and fallback cost — should the Printing Press handle this?**
 
 **Step A: Cross-API stress test.** Test across API shapes (standard REST, proxy-envelope,
 RPC-style) and input methods (OpenAPI, crowd-sniffed, HAR-sniffed, no spec).
@@ -279,17 +296,18 @@ RPC-style) and input methods (OpenAPI, crowd-sniffed, HAR-sniffed, no spec).
 **Step C: Assess fallback cost.** How reliably will Claude catch and fix this across every
 future API? A "simple" edit Claude forgets 30% of the time means 30% ship with the defect.
 
-**Step D: Make the tradeoff.** Default is **fix it in the machine**. The burden of proof
-is on *not* fixing. Skip only when the behavior is unlikely to recur across 50 different APIs.
+**Step D: Make the tradeoff.** Default is **fix it in the Printing Press**. The burden of
+proof is on *not* fixing. Skip only when the behavior is unlikely to recur across 50
+different APIs.
 
 When the finding applies to an API subclass, include: Condition (when to activate),
 Guard (when to skip), Frequency estimate.
 
-**6. Is this inherent or fixable?** Push hard on whether a smarter generator, a
+**6. Is this inherent or fixable?** Push hard on whether smarter templates, a
 post-processing step, or better spec analysis could eliminate the friction. If inherent,
 propose the cheapest mitigation.
 
-**7. What is the durable fix?** Prefer: generator template fix > binary post-processing > skill instruction.
+**7. What is the durable fix?** Prefer: template fix > binary post-processing > skill instruction.
 
 ## Phase 4: Prioritize
 
@@ -297,7 +315,7 @@ Group findings into three buckets using judgment, not a formula:
 
 - **Fix the scorer** — scoring tool is wrong. Highest priority because a wrong scorer
   distorts every future retro.
-- **Do** — score is correct, machine fix is warranted. Split into "Do now" (scoped,
+- **Do** — score is correct, Printing Press fix is warranted. Split into "Do now" (scoped,
   immediate) and "Do next" (needs design/planning).
 - **Skip** — unlikely to recur. State why.
 
@@ -327,8 +345,8 @@ Write the full retro document using this template:
 - **Root cause:** Component + what's specifically wrong
 - **Cross-API check:** Would this recur?
 - **Frequency:** every API / most / subclass:<name> / this API only
-- **Fallback if machine doesn't fix it:** ...
-- **Worth a machine fix?** ...
+- **Fallback if the Printing Press doesn't fix it:** ...
+- **Worth a Printing Press fix?** ...
 - **Inherent or fixable:** ...
 - **Durable fix:** ...
 - **Test:** How to verify (positive + negative)
@@ -358,7 +376,7 @@ Write the full retro document using this template:
 ## Anti-patterns
 - ...
 
-## What the Machine Got Right
+## What the Printing Press Got Right
 - ...
 ```
 
@@ -398,6 +416,32 @@ Describe target components by name (e.g., "Generator templates in `internal/gene
 and acceptance criteria without resolved file paths. The fixer will resolve paths when
 they pick up the work.
 
+## Phase 5.6: Issue gate — are there Printing Press improvements?
+
+After prioritization and work units are written, decide whether a GitHub issue is
+warranted. The purpose of the issue is to give someone (human or agent) something to
+fix in the Printing Press. If every finding is specific to this one printed CLI with
+nothing to change in the Printing Press, the issue is noise — there's nothing to act on.
+
+**Skip the GitHub issue if:**
+- Every finding landed in "Skip"
+- All findings are printed-CLI-specific (manual edits that only apply to this one API
+  and wouldn't recur across other CLIs)
+- The "Do Now" and "Do Next" tables are empty and there are no scorer bugs
+
+**Create the GitHub issue if:**
+- There is at least one "Fix the Scorer", "Do Now", or "Do Next" finding — i.e.,
+  something a maintainer or agent could act on in the Printing Press (templates, binary,
+  skills, or scoring tools)
+
+Use judgment. A retro that found three things but all three are "this API has a weird
+auth scheme no other API uses" is not worth an issue. A retro that found one small
+template gap that would help every future CLI *is* worth an issue.
+
+If the issue is skipped, still save the retro locally (manuscript proofs + `docs/retros/`
+if in-repo), present the findings to the user, then jump directly to Phase 6 Step 6
+(present results — adjusted to show local-only paths) and Step 8 (offer next steps).
+
 ## Phase 6: Package, upload, and present
 
 ### Step 1: Package artifacts into staging folder
@@ -410,6 +454,8 @@ The staging folder (`$STAGING_DIR`) now contains the scrubbed copies and the zip
 This is both the review target and the upload source.
 
 ### Step 2: Confirm before publishing
+
+*This step only runs if the Phase 5.6 issue gate passed (there are Printing Press findings to act on).*
 
 Before uploading anything, show the user a friendly summary and ask for confirmation
 via `AskUserQuestion`.
@@ -504,7 +550,7 @@ it's not available, fall back to printing the prompt the user would run manually
 
 ## Rules
 
-- Prefer automatic fixes (generator, binary) over instructional fixes (skill).
+- Prefer automatic fixes (templates, binary) over instructional fixes (skill).
 - For recurring friction, always answer "inherent or fixable?" honestly.
 - Be honest about what went well. Protecting good patterns matters.
 - **Bias toward fixing.** When in doubt, fix it — scope narrowly with conditional
@@ -516,4 +562,4 @@ it's not available, fall back to printing the prompt the user would run manually
 - Be thorough. Include enough detail that someone reading months later can understand
   the finding, the reasoning, and the proposed fix without the original conversation.
 - Do not add more phases, documents, or gates to the main printing-press skill.
-  Propose making existing phases smarter or the generator emit better defaults.
+  Propose making existing phases smarter or the Printing Press emit better defaults.

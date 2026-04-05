@@ -716,10 +716,10 @@ Before creating the PR, verify that no secrets leaked into the packaged CLI.
 **This matters because the library repo is public.** A leaked API key in a PR is
 a security incident — anyone can see it, even if the PR is later closed.
 
-### What the machine checks (deterministic)
+### What the Printing Press checks (deterministic)
 
 The generation skill (`/printing-press`) runs an exact-value scan during Phase 5.5
-if the user provided an API key. By the time publish runs, the machine's own
+if the user provided an API key. By the time publish runs, the Printing Press's own
 mistakes should already be caught. But the user may have edited files between
 generation and publish.
 
