@@ -327,33 +327,54 @@ func (g *Generator) Generate() error {
 	promotedCommands := buildPromotedCommands(g.Spec)
 	hasPromoted := len(promotedCommands) > 0
 
+	// Build set of resource names that have promoted commands. Promoted commands
+	// replace the resource parent entirely — the promoted command wires sibling
+	// endpoints and sub-resources directly. Generating the unused parent would
+	// create a dead constructor (e.g., newBookingsCmd never called).
+	promotedResourceNames := make(map[string]bool)
+	// Map resource name → promoted endpoint name. The promoted command's RunE
+	// inlines this endpoint's logic, so the standalone file is dead code.
+	promotedEndpointNames := make(map[string]string)
+	for _, pc := range promotedCommands {
+		promotedResourceNames[pc.ResourceName] = true
+		promotedEndpointNames[pc.ResourceName] = pc.EndpointName
+	}
+
 	// Generate per-resource parent files + per-endpoint command files
 	// This produces more files (one per endpoint) which improves Breadth scoring
 	for name, resource := range g.Spec.Resources {
-		// Parent file: wires subcommands together
-		// When promoted commands exist, hide resource parents from --help
-		parentData := struct {
-			ResourceName string
-			FuncPrefix   string
-			CommandPath  string
-			Resource     spec.Resource
-			Hidden       bool
-			*spec.APISpec
-		}{
-			ResourceName: name,
-			FuncPrefix:   name,
-			CommandPath:  name,
-			Resource:     resource,
-			Hidden:       hasPromoted,
-			APISpec:      g.Spec,
-		}
-		parentPath := filepath.Join("internal", "cli", name+".go")
-		if err := g.renderTemplate("command_parent.go.tmpl", parentPath, parentData); err != nil {
-			return fmt.Errorf("rendering parent command %s: %w", name, err)
+		// Skip parent file for promoted resources — the promoted command replaces it.
+		// Sub-resource parents and endpoint files are still needed (wired by the promoted command).
+		if !promotedResourceNames[name] {
+			// Parent file: wires subcommands together
+			// When promoted commands exist, hide resource parents from --help
+			parentData := struct {
+				ResourceName string
+				FuncPrefix   string
+				CommandPath  string
+				Resource     spec.Resource
+				Hidden       bool
+				*spec.APISpec
+			}{
+				ResourceName: name,
+				FuncPrefix:   name,
+				CommandPath:  name,
+				Resource:     resource,
+				Hidden:       hasPromoted,
+				APISpec:      g.Spec,
+			}
+			parentPath := filepath.Join("internal", "cli", name+".go")
+			if err := g.renderTemplate("command_parent.go.tmpl", parentPath, parentData); err != nil {
+				return fmt.Errorf("rendering parent command %s: %w", name, err)
+			}
 		}
 
 		// Per-endpoint files
 		for eName, endpoint := range resource.Endpoints {
+			// Skip the promoted endpoint — its logic is inlined in the promoted command's RunE.
+			if promotedEndpointNames[name] == eName {
+				continue
+			}
 			epData := struct {
 				ResourceName string
 				FuncPrefix   string
@@ -379,24 +400,30 @@ func (g *Generator) Generate() error {
 
 		// Sub-resource parent + endpoint files
 		for subName, subResource := range resource.SubResources {
-			subParentData := struct {
-				ResourceName string
-				FuncPrefix   string
-				CommandPath  string
-				Resource     spec.Resource
-				Hidden       bool
-				*spec.APISpec
-			}{
-				ResourceName: subName,
-				FuncPrefix:   name + "-" + subName,
-				CommandPath:  name + " " + subName,
-				Resource:     subResource,
-				Hidden:       hasPromoted,
-				APISpec:      g.Spec,
-			}
-			subParentPath := filepath.Join("internal", "cli", name+"_"+subName+".go")
-			if err := g.renderTemplate("command_parent.go.tmpl", subParentPath, subParentData); err != nil {
-				return fmt.Errorf("rendering sub-parent %s/%s: %w", name, subName, err)
+			// Skip single-endpoint sub-resource parents under promoted resources.
+			// The promoted command wires the endpoint directly, making the parent dead code.
+			// Multi-endpoint sub-resource parents are still needed (the promoted command uses them).
+			skipSubParent := promotedResourceNames[name] && len(subResource.Endpoints) == 1
+			if !skipSubParent {
+				subParentData := struct {
+					ResourceName string
+					FuncPrefix   string
+					CommandPath  string
+					Resource     spec.Resource
+					Hidden       bool
+					*spec.APISpec
+				}{
+					ResourceName: subName,
+					FuncPrefix:   name + "-" + subName,
+					CommandPath:  name + " " + subName,
+					Resource:     subResource,
+					Hidden:       hasPromoted,
+					APISpec:      g.Spec,
+				}
+				subParentPath := filepath.Join("internal", "cli", name+"_"+subName+".go")
+				if err := g.renderTemplate("command_parent.go.tmpl", subParentPath, subParentData); err != nil {
+					return fmt.Errorf("rendering sub-parent %s/%s: %w", name, subName, err)
+				}
 			}
 
 			for eName, endpoint := range subResource.Endpoints {
@@ -633,13 +660,6 @@ func (g *Generator) Generate() error {
 		if err := g.renderTemplate("command_promoted.go.tmpl", promotedPath, promotedData); err != nil {
 			return fmt.Errorf("rendering promoted command %s: %w", pc.PromotedName, err)
 		}
-	}
-
-	// Build set of resource names that have promoted commands — root.go.tmpl
-	// skips registering these as separate root commands to avoid duplicate names.
-	promotedResourceNames := make(map[string]bool)
-	for _, pc := range promotedCommands {
-		promotedResourceNames[pc.ResourceName] = true
 	}
 
 	rootData := struct {

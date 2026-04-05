@@ -22,9 +22,9 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		specPath      string
 		expectedFiles int
 	}{
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 34},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 40},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 36},
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 30},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 34},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 34},
 	}
 
 	for _, tt := range tests {
@@ -798,12 +798,12 @@ func TestGeneratedOutput_PromotedCommandExists(t *testing.T) {
 	require.NoError(t, gen.Generate())
 
 	// Promoted command file SHOULD exist — it provides a user-friendly shortcut.
-	// The resource group command is hidden from --help when promoted commands exist.
 	promotedFile := filepath.Join(outputDir, "internal", "cli", "promoted_users.go")
 	assert.FileExists(t, promotedFile)
 
-	// The resource group command should still exist (but hidden)
-	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "users.go"))
+	// The resource parent command should NOT be generated — the promoted command replaces it.
+	// Generating both would leave the parent as dead code (never wired to root).
+	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "users.go"))
 }
 
 func TestGeneratedOutput_PromotedCommandCompiles(t *testing.T) {
