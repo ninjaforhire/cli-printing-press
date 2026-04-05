@@ -78,6 +78,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"snake":                 toSnake,
 		"pascal":                toPascal,
 		"goType":                goType,
+		"goStructType":          goStructType,
 		"goTypeForParam":        goTypeForParam,
 		"goStoreType":           goStoreType,
 		"cobraFlagFunc":         cobraFlagFunc,
@@ -103,10 +104,20 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"oneline":            oneline,
 		"flagName":           flagName,
 		"safeTypeName":       safeTypeName,
-		"exampleLine":        g.exampleLine,
-		"currentYear":        func() string { return strconv.Itoa(time.Now().Year()) },
-		"modulePath":         func() string { return naming.CLI(s.Name) },
-		"kebab":              toKebab,
+		"hasNonScalarType": func(types map[string]spec.TypeDef) bool {
+			for _, td := range types {
+				for _, f := range td.Fields {
+					if f.Type == "object" || f.Type == "array" {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		"exampleLine": g.exampleLine,
+		"currentYear": func() string { return strconv.Itoa(time.Now().Year()) },
+		"modulePath":  func() string { return naming.CLI(s.Name) },
+		"kebab":       toKebab,
 		"humanName": func(s string) string {
 			// "steam-web" → "Steam Web", "notion" → "Notion"
 			return cases.Title(language.English).String(strings.ReplaceAll(s, "-", " "))
@@ -784,6 +795,18 @@ func goType(t string) string {
 		return "float64"
 	default:
 		return "string"
+	}
+}
+
+// goStructType returns the Go type for a struct field definition.
+// Unlike goType (used for CLI flags which are always primitives),
+// this maps object/array types to json.RawMessage for type fidelity.
+func goStructType(t string) string {
+	switch t {
+	case "object", "array":
+		return "json.RawMessage"
+	default:
+		return goType(t)
 	}
 }
 

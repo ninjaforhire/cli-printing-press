@@ -1328,3 +1328,77 @@ func TestGenerate_ComposedAuthUsesBrowserTemplate(t *testing.T) {
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "build", "./...")
 }
+
+// --- Regression tests for machinery fixes (cal.com retro 2026-04-04) ---
+
+func TestGeneratedOutput_NoMarkFlagRequired(t *testing.T) {
+	t.Parallel()
+
+	outputDir := generatePetstore(t)
+
+	// Read all generated endpoint command files
+	cliDir := filepath.Join(outputDir, "internal", "cli")
+	entries, err := os.ReadDir(cliDir)
+	require.NoError(t, err)
+
+	foundRunEValidation := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cliDir, e.Name()))
+		require.NoError(t, err)
+		content := string(data)
+
+		// No command should use MarkFlagRequired (except import.go which is not verify-tested)
+		if e.Name() != "import.go" && strings.Contains(content, "MarkFlagRequired") {
+			t.Errorf("%s still contains MarkFlagRequired", e.Name())
+		}
+
+		// Track whether we find the RunE-based validation
+		if strings.Contains(content, `!flags.dryRun`) && strings.Contains(content, `required flag`) {
+			foundRunEValidation = true
+		}
+	}
+
+	// The petstore spec has required params, so we should find RunE validation
+	assert.True(t, foundRunEValidation, "required params should use RunE validation with dryRun guard")
+}
+
+func TestGeneratedOutput_PromotedNoImportGuards(t *testing.T) {
+	t.Parallel()
+
+	outputDir := generatePetstore(t)
+
+	cliDir := filepath.Join(outputDir, "internal", "cli")
+	entries, err := os.ReadDir(cliDir)
+	require.NoError(t, err)
+
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "promoted_") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cliDir, e.Name()))
+		require.NoError(t, err)
+		content := string(data)
+
+		assert.NotContains(t, content, "var _ =", "promoted command %s should not contain import guards", e.Name())
+		assert.NotContains(t, content, "var _ json", "promoted command %s should not contain import guards", e.Name())
+		assert.NotContains(t, content, `"io"`, "promoted command %s should not import io", e.Name())
+		assert.NotContains(t, content, `"strings"`, "promoted command %s should not import strings", e.Name())
+	}
+}
+
+func TestGeneratedOutput_ObjectFieldsUseRawMessage(t *testing.T) {
+	t.Parallel()
+
+	outputDir := generatePetstore(t)
+
+	typesGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "types", "types.go"))
+	require.NoError(t, err)
+	content := string(typesGo)
+
+	// The petstore spec has object-typed schema fields; they should be json.RawMessage
+	assert.Contains(t, content, "json.RawMessage", "types.go should use json.RawMessage for object/array fields")
+	assert.Contains(t, content, `import "encoding/json"`, "types.go should import encoding/json when RawMessage is used")
+}
