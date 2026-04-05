@@ -595,3 +595,56 @@ func TestInferDescriptionAuth(t *testing.T) {
 		assert.Equal(t, fb, inferDescriptionAuth(nil, "test", fb))
 	})
 }
+
+func TestAuthTierPrecedence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit securitySchemes wins over description keywords", func(t *testing.T) {
+		// Gmail has both securitySchemes AND description that could mention auth
+		data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openapi", "gmail.yaml"))
+		require.NoError(t, err)
+
+		parsed, err := Parse(data)
+		require.NoError(t, err)
+
+		assert.Equal(t, "bearer_token", parsed.Auth.Type)
+		assert.False(t, parsed.Auth.Inferred, "explicit auth from securitySchemes should not be marked as inferred")
+	})
+
+	t.Run("query-param auth (tier 2) wins over description (tier 3)", func(t *testing.T) {
+		// Build a minimal spec with auth-like query params on >30% of ops
+		// AND bearer keyword in description. Tier 2 should win.
+		doc := &openapi3.T{
+			Info: &openapi3.Info{
+				Description: "This API uses Bearer token authentication.",
+			},
+			Paths: &openapi3.Paths{},
+		}
+		// Add 5 operations, 3 with api_key query param (60% > 30% threshold)
+		for i, path := range []string{"/a", "/b", "/c", "/d", "/e"} {
+			pathItem := &openapi3.PathItem{
+				Get: &openapi3.Operation{
+					Responses: openapi3.NewResponses(),
+				},
+			}
+			if i < 3 { // first 3 have api_key param
+				pathItem.Get.Parameters = openapi3.Parameters{
+					&openapi3.ParameterRef{
+						Value: &openapi3.Parameter{
+							Name:     "api_key",
+							In:       "query",
+							Required: false,
+						},
+					},
+				}
+			}
+			doc.Paths.Set(path, pathItem)
+		}
+
+		// Run mapAuth directly — it should pick up query-param auth (tier 2)
+		result := mapAuth(doc, "test-api")
+		assert.Equal(t, "api_key", result.Type)
+		assert.Equal(t, "query", result.In, "tier 2 query-param auth should win over tier 3 description")
+		assert.False(t, result.Inferred, "query-param auth is not 'inferred from description'")
+	})
+}

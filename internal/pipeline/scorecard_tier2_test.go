@@ -967,6 +967,110 @@ func runLookup(db *store.DB) {
 	})
 }
 
+func TestEvaluateAuthProtocol_InferredAuth(t *testing.T) {
+	t.Run("inferred auth is scored when Auth inferred marker present", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Config with inferred auth marker and env var
+		writeScorecardFixture(t, dir, "internal/config/config.go", `package config
+// Auth inferred from API description — verify the env var below is correct
+func Load() {
+	if v := os.Getenv("EXAMPLE_TOKEN"); v != "" {
+		cfg.Token = v
+	}
+}
+func (c *Config) AuthHeader() string {
+	return "Bearer " + c.Token
+}
+`)
+		// Client sends Authorization header
+		writeScorecardFixture(t, dir, "internal/client/client.go", `package client
+func (c *Client) do() {
+	req.Header.Set("Authorization", authHeader)
+}
+`)
+
+		// Spec with NO securitySchemes
+		specPath := filepath.Join(dir, "spec.json")
+		writeScorecardFixture(t, dir, "spec.json", `{
+  "paths": { "/users": { "get": { "responses": { "200": { "description": "ok" } } } } },
+  "components": { "securitySchemes": {} }
+}`)
+
+		pipelineDir := t.TempDir()
+		sc, err := RunScorecard(dir, pipelineDir, specPath, nil)
+		assert.NoError(t, err)
+		// auth_protocol should be SCORED (not in UnscoredDimensions)
+		assert.NotContains(t, sc.UnscoredDimensions, "auth_protocol",
+			"inferred auth with marker should be scored, not unscored")
+		assert.Greater(t, sc.Steinberger.AuthProtocol, 0,
+			"inferred auth should score > 0")
+	})
+
+	t.Run("query-param auth without inferred marker stays unscored", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Config with env var but NO "Auth inferred" marker (query-param auth)
+		writeScorecardFixture(t, dir, "internal/config/config.go", `package config
+func Load() {
+	if v := os.Getenv("STEAM_API_KEY"); v != "" {
+		cfg.APIKey = v
+	}
+}
+`)
+		writeScorecardFixture(t, dir, "internal/client/client.go", `package client
+func (c *Client) do() {
+	q.Set("key", apiKey)
+}
+`)
+
+		// Spec with NO securitySchemes (query-param auth was inferred by inferQueryParamAuth)
+		specPath := filepath.Join(dir, "spec.json")
+		writeScorecardFixture(t, dir, "spec.json", `{
+  "paths": { "/users": { "get": { "responses": { "200": { "description": "ok" } } } } },
+  "components": { "securitySchemes": {} }
+}`)
+
+		pipelineDir := t.TempDir()
+		sc, err := RunScorecard(dir, pipelineDir, specPath, nil)
+		assert.NoError(t, err)
+		// auth_protocol should be UNSCORED — no marker, no securitySchemes
+		assert.Contains(t, sc.UnscoredDimensions, "auth_protocol",
+			"query-param auth without inferred marker should stay unscored (not penalized)")
+	})
+
+	t.Run("inferred auth with custom header X-Api-Key is scored", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeScorecardFixture(t, dir, "internal/config/config.go", `package config
+// Auth inferred from API description — verify the env var below is correct
+func Load() {
+	if v := os.Getenv("EXAMPLE_API_KEY"); v != "" {
+		cfg.APIKey = v
+	}
+}
+`)
+		writeScorecardFixture(t, dir, "internal/client/client.go", `package client
+func (c *Client) do() {
+	req.Header.Set("X-Api-Key", apiKey)
+}
+`)
+
+		specPath := filepath.Join(dir, "spec.json")
+		writeScorecardFixture(t, dir, "spec.json", `{
+  "paths": { "/users": { "get": { "responses": { "200": { "description": "ok" } } } } },
+  "components": { "securitySchemes": {} }
+}`)
+
+		pipelineDir := t.TempDir()
+		sc, err := RunScorecard(dir, pipelineDir, specPath, nil)
+		assert.NoError(t, err)
+		assert.NotContains(t, sc.UnscoredDimensions, "auth_protocol",
+			"inferred auth with custom header should be scored")
+		assert.Greater(t, sc.Steinberger.AuthProtocol, 0)
+	})
+}
+
 func writeScorecardFixture(t *testing.T, root, relPath, content string) {
 	t.Helper()
 
