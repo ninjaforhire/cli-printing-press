@@ -1067,8 +1067,8 @@ func evaluateAuthProtocol(dir string, spec *openAPISpecInfo) dimensionScore {
 		if strings.Contains(configContent, "os.Getenv(") {
 			score += 4 // env var support present
 		}
-		if strings.Contains(clientContent, "Authorization") {
-			score += 3 // client sends auth header
+		if strings.Contains(clientContent, "Authorization") || strings.Contains(clientContent, "X-Api-Key") || strings.Contains(clientContent, "X-Auth-Token") || strings.Contains(clientContent, "X-Access-Token") {
+			score += 3 // client sends auth header (standard or custom)
 		}
 		return dimensionScore{scored: true, score: score}
 	}

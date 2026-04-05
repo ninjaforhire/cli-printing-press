@@ -549,10 +549,11 @@ func inferDescriptionAuth(doc *openapi3.T, name string, fallback spec.AuthConfig
 
 	envPrefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 
-	// Check bearer keywords first (stronger signal for Bearer-prefix auth)
+	// Check bearer keywords first (stronger signal for Bearer-prefix auth).
+	// Scan all occurrences — a negated first mention ("does not require bearer")
+	// should not prevent finding a later positive mention ("use a bearer token").
 	for _, kw := range bearerKeywords {
-		idx := strings.Index(desc, kw)
-		if idx >= 0 && !isNegated(desc, idx) {
+		if findUnnegated(desc, kw) {
 			return spec.AuthConfig{
 				Type:     "bearer_token",
 				In:       "header",
@@ -565,8 +566,7 @@ func inferDescriptionAuth(doc *openapi3.T, name string, fallback spec.AuthConfig
 
 	// Check API key keywords
 	for _, kw := range apiKeyKeywords {
-		idx := strings.Index(desc, kw)
-		if idx >= 0 && !isNegated(desc, idx) {
+		if findUnnegated(desc, kw) {
 			return spec.AuthConfig{
 				Type:     "api_key",
 				In:       "header",
@@ -599,6 +599,24 @@ func detectHeaderName(desc string) string {
 		}
 	}
 	return "Authorization"
+}
+
+// findUnnegated scans all occurrences of keyword in text and returns true if
+// at least one is not negated. Handles "sandbox does not require bearer, but
+// production uses a bearer token" by scanning past the first negated match.
+func findUnnegated(text, keyword string) bool {
+	offset := 0
+	for {
+		idx := strings.Index(text[offset:], keyword)
+		if idx < 0 {
+			return false
+		}
+		absIdx := offset + idx
+		if !isNegated(text, absIdx) {
+			return true
+		}
+		offset = absIdx + len(keyword)
+	}
 }
 
 // isNegated checks if any negation word appears as a whole word within ~50 chars

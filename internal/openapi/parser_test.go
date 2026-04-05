@@ -556,6 +556,17 @@ func TestInferDescriptionAuth(t *testing.T) {
 		assert.True(t, result.Inferred)
 	})
 
+	t.Run("scans past negated match to find positive mention", func(t *testing.T) {
+		doc := &openapi3.T{
+			Info: &openapi3.Info{
+				Description: "Sandbox requests do not require a bearer token, but production requests use a bearer token for authentication.",
+			},
+		}
+		result := inferDescriptionAuth(doc, "example", spec.AuthConfig{Type: "none"})
+		assert.Equal(t, "bearer_token", result.Type, "should find the second non-negated 'bearer' mention")
+		assert.True(t, result.Inferred)
+	})
+
 	t.Run("Notion bearer token not falsely negated", func(t *testing.T) {
 		doc := &openapi3.T{
 			Info: &openapi3.Info{
