@@ -35,6 +35,7 @@ func newPublishCmd() *cobra.Command {
 
 	cmd.AddCommand(newPublishValidateCmd())
 	cmd.AddCommand(newPublishPackageCmd())
+	cmd.AddCommand(newPublishRenameCmd())
 
 	return cmd
 }
@@ -65,6 +66,86 @@ type PackageResult struct {
 	ModulePath          string `json:"module_path,omitempty"`
 	ManuscriptsIncluded bool   `json:"manuscripts_included"`
 	RunID               string `json:"run_id,omitempty"`
+}
+
+// RenameResult is the JSON output of publish rename.
+type RenameResult struct {
+	Success       bool   `json:"success"`
+	OldName       string `json:"old_name"`
+	NewName       string `json:"new_name"`
+	NewDir        string `json:"new_dir"`
+	FilesModified int    `json:"files_modified"`
+	Error         string `json:"error,omitempty"`
+}
+
+func newPublishRenameCmd() *cobra.Command {
+	var dir string
+	var oldName string
+	var newName string
+	var apiName string
+	var asJSON bool
+
+	cmd := &cobra.Command{
+		Use:   "rename",
+		Short: "Rename a staged CLI (for name collision resolution)",
+		Example: `  printing-press publish rename --dir /tmp/staging/library/ai/notion-pp-cli --old-name notion-pp-cli --new-name notion-alt-pp-cli --json
+  printing-press publish rename --dir /tmp/staging/library/ai/notion-pp-cli --old-name notion-pp-cli --new-name notion-2-pp-cli --api-name notion --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if dir == "" {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--dir is required")}
+			}
+			if oldName == "" {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--old-name is required")}
+			}
+			if newName == "" {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--new-name is required")}
+			}
+			if apiName == "" {
+				apiName = naming.TrimCLISuffix(oldName)
+			}
+
+			filesModified, err := pipeline.RenameCLI(dir, oldName, newName, apiName)
+
+			if asJSON {
+				result := RenameResult{
+					OldName:       oldName,
+					NewName:       newName,
+					FilesModified: filesModified,
+				}
+				if err != nil {
+					result.Error = err.Error()
+				} else {
+					result.Success = true
+					result.NewDir = filepath.Join(filepath.Dir(dir), newName)
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if encErr := enc.Encode(result); encErr != nil {
+					return encErr
+				}
+				if err != nil {
+					return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("rename failed"), Silent: true}
+				}
+				return nil
+			}
+
+			if err != nil {
+				return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("rename failed: %w", err)}
+			}
+			newDir := filepath.Join(filepath.Dir(dir), newName)
+			fmt.Fprintf(os.Stderr, "Renamed %s → %s (%d files modified)\n", oldName, newName, filesModified)
+			fmt.Fprintf(os.Stderr, "  New directory: %s\n", newDir)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&dir, "dir", "", "Staged CLI directory to rename (required)")
+	cmd.Flags().StringVar(&oldName, "old-name", "", "Current CLI name (required)")
+	cmd.Flags().StringVar(&newName, "new-name", "", "New CLI name (required)")
+	cmd.Flags().StringVar(&apiName, "api-name", "", "Original API name (defaults to TrimCLISuffix of old-name)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
+
+	return cmd
 }
 
 func newPublishValidateCmd() *cobra.Command {

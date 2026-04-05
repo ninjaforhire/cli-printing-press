@@ -530,6 +530,112 @@ func TestPublishPackageDestNonexistent(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not exist")
 }
 
+func TestPublishRenameMissingFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"missing dir", []string{"rename", "--old-name", "a-pp-cli", "--new-name", "b-pp-cli", "--json"}, "--dir is required"},
+		{"missing old-name", []string{"rename", "--dir", "/tmp/x", "--new-name", "b-pp-cli", "--json"}, "--old-name is required"},
+		{"missing new-name", []string{"rename", "--dir", "/tmp/x", "--old-name", "a-pp-cli", "--json"}, "--new-name is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newPublishCmd()
+			cmd.SetArgs(tt.args)
+			err := cmd.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestPublishRenameJSONSuccess(t *testing.T) {
+	root := t.TempDir()
+	oldName := "test-pp-cli"
+	newName := "test-alt-pp-cli"
+	cliDir := filepath.Join(root, oldName)
+	require.NoError(t, os.MkdirAll(filepath.Join(cliDir, "cmd", oldName), 0o755))
+
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "cmd", oldName, "main.go"), []byte(`package main
+func main() {}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "README.md"), []byte("# "+oldName+"\n"), 0o644))
+
+	writeTestManifest(t, cliDir, pipeline.CLIManifest{
+		SchemaVersion: 1,
+		APIName:       "test",
+		CLIName:       oldName,
+	})
+
+	cmd := newPublishCmd()
+	cmd.SetArgs([]string{"rename", "--dir", cliDir, "--old-name", oldName, "--new-name", newName, "--json"})
+
+	output, err := runWithCapturedStdout(t, cmd.Execute)
+	require.NoError(t, err)
+
+	var result RenameResult
+	require.NoError(t, json.Unmarshal([]byte(output), &result))
+	assert.True(t, result.Success)
+	assert.Equal(t, oldName, result.OldName)
+	assert.Equal(t, newName, result.NewName)
+	assert.Equal(t, filepath.Join(root, newName), result.NewDir)
+	assert.Greater(t, result.FilesModified, 0)
+}
+
+func TestPublishRenameAPINameFallback(t *testing.T) {
+	root := t.TempDir()
+	oldName := "test-pp-cli"
+	newName := "test-alt-pp-cli"
+	cliDir := filepath.Join(root, oldName)
+	require.NoError(t, os.MkdirAll(cliDir, 0o755))
+
+	writeTestManifest(t, cliDir, pipeline.CLIManifest{
+		SchemaVersion: 1,
+		APIName:       "test",
+		CLIName:       oldName,
+	})
+
+	cmd := newPublishCmd()
+	// No --api-name flag — should fall back to TrimCLISuffix("test-pp-cli") = "test"
+	cmd.SetArgs([]string{"rename", "--dir", cliDir, "--old-name", oldName, "--new-name", newName, "--json"})
+
+	output, err := runWithCapturedStdout(t, cmd.Execute)
+	require.NoError(t, err)
+
+	var result RenameResult
+	require.NoError(t, json.Unmarshal([]byte(output), &result))
+	assert.True(t, result.Success)
+
+	// Verify manifest has correct api_name from fallback
+	newDir := filepath.Join(root, newName)
+	mData, err := os.ReadFile(filepath.Join(newDir, pipeline.CLIManifestFilename))
+	require.NoError(t, err)
+	var m pipeline.CLIManifest
+	require.NoError(t, json.Unmarshal(mData, &m))
+	assert.Equal(t, "test", m.APIName, "api_name should come from TrimCLISuffix fallback")
+	assert.Equal(t, newName, m.CLIName)
+}
+
+func TestPublishRenameJSONError(t *testing.T) {
+	root := t.TempDir()
+	cliDir := filepath.Join(root, "test-pp-cli")
+	require.NoError(t, os.MkdirAll(cliDir, 0o755))
+
+	cmd := newPublishCmd()
+	// Invalid new name — will fail validation
+	cmd.SetArgs([]string{"rename", "--dir", cliDir, "--old-name", "test-pp-cli", "--new-name", "bad-name", "--json"})
+
+	output, err := runWithCapturedStdout(t, cmd.Execute)
+	require.Error(t, err)
+
+	var result RenameResult
+	require.NoError(t, json.Unmarshal([]byte(output), &result))
+	assert.False(t, result.Success)
+	assert.NotEmpty(t, result.Error)
+}
+
 func writePublishableTestCLI(t *testing.T, dir string) {
 	t.Helper()
 

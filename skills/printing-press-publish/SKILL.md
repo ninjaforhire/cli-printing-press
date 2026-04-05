@@ -330,9 +330,33 @@ This removes any existing version of the CLI (handling category changes), copies
 
 Parse the JSON result. Note the `staged_dir`, `module_path`, `manuscripts_included`, and `run_id`. The `module_path` field confirms the Go module path that was set in the packaged CLI's `go.mod` and import paths.
 
-## Step 7: Check for Existing PR
+## Step 7: Collision Detection & Resolution
 
-Before creating a branch, check whether you have an open PR for this CLI. The `--author @me` filter ensures we only match PRs owned by the current user — if someone else published the same CLI name, we won't stomp their PR.
+After the managed clone is freshened, check for name collisions before creating a branch or PR. This replaces the previous "Check for Existing PR" step.
+
+### Detection
+
+Run these checks in sequence:
+
+**1. Check merged CLIs in managed clone:**
+
+```bash
+ls "$PUBLISH_REPO_DIR/library"/*/"<cli-name>" 2>/dev/null
+```
+
+If found, record `MERGED_COLLISION=true` and note the category path.
+
+**2. Check all open PRs (any author):**
+
+```bash
+gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --json number,title,url,author
+```
+
+If the list is non-empty, record `PR_COLLISION=true`. For each PR, note the PR number, URL, and author login.
+
+**3. Identify own PRs:**
+
+Filter the PR list from step 2 by `--author @me`:
 
 For fork-based PRs, the head includes the username prefix:
 
@@ -349,9 +373,7 @@ fi
 gh pr list --repo mvanhorn/printing-press-library --head "$HEAD_REF" --state open --author @me --json number,title,url
 ```
 
-Parse the result:
-- If the list is non-empty, store `EXISTING_PR_NUMBER` and `EXISTING_PR_URL` from the first entry
-- If the list is empty or the command fails (network, auth), set `EXISTING_PR_NUMBER=""` — proceed as if no PR exists
+If found, record `OWN_PR=true`, store `EXISTING_PR_NUMBER` and `EXISTING_PR_URL`.
 
 **If no open PR was found**, also check for a previously merged PR on the same branch:
 
@@ -361,13 +383,122 @@ MERGED_PR=$(gh pr list --repo mvanhorn/printing-press-library --head "$HEAD_REF"
 
 If `MERGED_PR` is non-empty, the branch name was already used and merged. Set `BRANCH_MERGED=true` so Step 8 creates a new branch name (e.g., `feat/<cli-name>-YYYYMMDD`) instead of reusing the merged branch. Do NOT force-push onto a merged branch — `gh pr edit` would silently update a closed PR nobody is watching.
 
-If an existing open PR was found, inform the user:
+### No collision
+
+If no merged CLI exists and no open PRs match (other than your own), set `EXISTING_PR_NUMBER` from the own-PR check (or empty if none) and proceed to Step 8 normally.
+
+If an existing open PR of yours was found, inform the user:
 > "Found your open PR #N for `<cli-name>`. Will update it with the new version."
 
-This determines the flow in Step 8:
-- **Existing open PR:** Overwrite the branch automatically, force-push, update the PR description
-- **No open PR, branch not merged:** Standard flow — ask about branch conflicts if any, create a new PR
-- **No open PR, branch was merged (`BRANCH_MERGED=true`):** Auto-create a timestamped branch `feat/<cli-name>-YYYYMMDD` and create a new PR
+### Collision detected — display info
+
+Show the user what was found:
+
+```
+⚠️  Name collision detected for <cli-name>
+
+  Merged: <category>/<cli-name> exists in the library
+  Open PR: #<number> by <author> — <url>
+```
+
+Show all applicable lines. If `OWN_PR=true`, tag the PR as "(yours)".
+
+### Resolution paths
+
+Present three options via AskUserQuestion:
+
+**If `OWN_PR=true` (your own open PR exists):**
+- **Update** — Update your existing PR with the new version (default, preserves current behavior)
+- **Alongside** — Rename yours with a qualifier and publish next to the existing one
+- **Bail** — Cancel the publish
+
+**If PR collision exists but is another user's, or merged collision only:**
+- **Replace** — Intentionally overwrite the existing CLI
+- **Alongside** — Rename yours with a qualifier and publish next to the existing one
+- **Bail** — Cancel the publish and view the existing CLI/PR
+
+#### Update path (own PR)
+
+This is the existing update flow. Set `EXISTING_PR_NUMBER` from the detection step and proceed to Step 8, which handles force-push and PR description update.
+
+#### Replace path
+
+**For merged CLIs or your own PR:** Standard confirmation:
+> "This will replace the existing `<cli-name>`. Continue?"
+
+**For another user's PR:** Stronger confirmation naming the other author:
+> "⚠️  This will replace `<author>`'s `<cli-name>` (PR #N). Are you sure?"
+
+If confirmed:
+- The PR description must include: `⚠️ **Replaces existing \`<cli-name>\`** — <reason provided by user or "newer version">`
+- Set `EXISTING_PR_NUMBER=""` (create a new PR, don't update theirs)
+- Proceed to Step 8 normally
+
+#### Alongside path (rename)
+
+**1. Extract API slug** from the manifest's `api_name` field (not from the CLI name):
+
+```bash
+# Read from .printing-press.json in the publish repo's staged CLI
+API_SLUG=$(cat "$PUBLISH_REPO_DIR/library/<category>/<cli-name>/.printing-press.json" | jq -r '.api_name')
+```
+
+**2. Generate rename suggestions:**
+
+- Numeric: `<api-slug>-2-pp-cli` (if that collides, try `-3`, `-4`, etc.)
+- Non-numeric: `<api-slug>-alt-pp-cli`
+- Custom: prompt the user for a qualifier word
+
+Present the format to the user:
+> "Rename format: `<api-slug>-<qualifier>-pp-cli`. Pick a qualifier:"
+>
+> 1. `2` → `<api-slug>-2-pp-cli`
+> 2. `alt` → `<api-slug>-alt-pp-cli`
+> 3. Enter custom qualifier
+
+**3. Verify each suggestion is non-colliding** before presenting:
+
+```bash
+# Check merged
+ls "$PUBLISH_REPO_DIR/library"/*/"<suggestion>" 2>/dev/null
+# Check open PRs
+gh pr list --repo mvanhorn/printing-press-library --head "feat/<suggestion>" --state open --json number
+```
+
+If a suggestion collides, skip it or increment the numeric suffix.
+
+**4. Rename the CLI in the publish repo:**
+
+Since Step 6 wrote the CLI directly into `$PUBLISH_REPO_DIR` via `--dest`, the rename operates on that directory:
+
+```bash
+printing-press publish rename \
+  --dir "$PUBLISH_REPO_DIR/library/<category>/<old-cli-name>" \
+  --old-name <old-cli-name> \
+  --new-name <new-cli-name> \
+  --api-name "$API_SLUG" \
+  --json
+```
+
+Parse the JSON result. Verify `"success": true`. Note the `new_dir` path.
+
+**5. Update all downstream references for Step 8:**
+
+- Branch name: `feat/<new-cli-name>` (not the old name)
+- PR title: `feat(<api-slug>): add <new-cli-name>`
+- Commit message: `feat(<api-slug>): add <new-cli-name>`
+- Registry.json entry: `cli_name` → `<new-cli-name>`
+- Set `EXISTING_PR_NUMBER=""` (always a new PR for a renamed CLI)
+
+Proceed to Step 8 with the new name.
+
+#### Bail path
+
+Show links to what exists:
+- If merged: "Existing CLI at `library/<category>/<cli-name>/`"
+- If open PR: "Open PR: <url>"
+
+Exit the publish flow. If Step 6 already wrote files into `$PUBLISH_REPO_DIR`, clean up with `git checkout -- . && git clean -fd` in the managed clone.
 
 ## Step 8: Branch, Commit, and PR
 
@@ -500,6 +631,8 @@ Build the PR description from:
 ```markdown
 ## <cli-name>
 
+<If this is a Replace path, add: "⚠️ **Replaces existing `<cli-name>`** — <reason from user>">
+
 <description from manifest, or "No description available">
 
 **API:** <api_name> | **Category:** <category> | **Press version:** <printing_press_version>
@@ -627,7 +760,8 @@ flagged (e.g., a test fixture with a fake key). Don't block silently.
 - **Validation fails:** Show per-check results in Step 4, stop
 - **Repo unreachable:** Report clearly in Step 5
 - **Fork creation fails:** `gh repo fork` may fail if the user already has a fork with a different name, or if the org restricts forking. Report the error and suggest the user fork manually via the GitHub web UI.
-- **Existing PR check fails:** Fall back to standard branch-conflict flow (treat as no existing PR)
+- **Collision check fails:** If `gh pr list` or `ls` commands fail (network, auth), warn but don't block — proceed as if no collision exists
+- **Rename fails:** Show the error from `publish rename --json`. Offer to retry with a different qualifier or bail. If the publish repo is in a partial state, reset with `git checkout -- . && git clean -fd` before retrying
 - **Branch conflict (no existing PR):** Ask user in Step 8 (overwrite or timestamp)
 - **Push fails:** For fork users, ensure they're pushing to their fork (origin), not upstream. Report the error, suggest checking `gh auth status` and `git remote -v`
 - **Cross-repo PR creation fails:** If `gh pr create --head user:branch` fails with "head not found", the branch wasn't pushed to the fork. Verify with `git ls-remote origin feat/<cli-name>`
