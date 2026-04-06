@@ -1152,6 +1152,8 @@ When `CODEX_MODE` is false, skip this section.
 
 Build comprehensively. The absorb manifest from Phase 1.5 IS the feature list.
 
+**macOS framework access:** When the plan or manifest specifies macOS framework APIs (ScreenCaptureKit, CoreGraphics, CoreAudio, Vision, Shortcuts, etc.), use the Swift subprocess bridge pattern - Go shells out to `swift -e '<inline script>'`. Swift is always available with Xcode CLT. Do NOT attempt Python+PyObjC - it requires separate installation and is unreliable across Python distributions. Reference `agent-capture-pp-cli/internal/capture/cgwindow.go` as the canonical example of this pattern.
+
 Priority 0 (foundation):
 - data layer for ALL primary entities from the manifest
 - sync/search/SQL path - this is what makes transcendence possible
