@@ -189,7 +189,7 @@ func MakeToolHandler(manifest *ToolsManifest, tool ManifestTool, httpClient *htt
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Network error: %v", err)), nil
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		if err != nil {

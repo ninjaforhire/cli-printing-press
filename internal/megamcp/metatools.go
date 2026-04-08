@@ -208,33 +208,33 @@ func makeSetupGuideHandler(am *ActivationManager) server.ToolHandlerFunc {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("# Setup Guide for %s\n\n", m.APIName))
-		sb.WriteString(fmt.Sprintf("**Auth type:** %s\n\n", m.Auth.Type))
+		fmt.Fprintf(&sb, "# Setup Guide for %s\n\n", m.APIName)
+		fmt.Fprintf(&sb, "**Auth type:** %s\n\n", m.Auth.Type)
 
 		// Env vars.
 		if len(m.Auth.EnvVars) > 0 {
 			sb.WriteString("**Required environment variables:**\n")
 			for _, envVar := range m.Auth.EnvVars {
-				sb.WriteString(fmt.Sprintf("- `%s`\n", envVar))
+				fmt.Fprintf(&sb, "- `%s`\n", envVar)
 			}
 			sb.WriteString("\n")
 		}
 
 		// Key URL.
 		if m.Auth.KeyURL != "" {
-			sb.WriteString(fmt.Sprintf("**Get your API key:** %s\n\n", m.Auth.KeyURL))
+			fmt.Fprintf(&sb, "**Get your API key:** %s\n\n", m.Auth.KeyURL)
 		}
 
 		// Example claude mcp add command.
 		if len(m.Auth.EnvVars) > 0 {
 			sb.WriteString("**Example setup command:**\n```\nclaude mcp add printing-press")
 			for _, envVar := range m.Auth.EnvVars {
-				sb.WriteString(fmt.Sprintf(" --env %s=<your-key>", envVar))
+				fmt.Fprintf(&sb, " --env %s=<your-key>", envVar)
 			}
 			sb.WriteString(" -- printing-press-mcp\n```\n\n")
 		}
 
-		sb.WriteString(fmt.Sprintf("Once configured, activate with: activate_api(%q)", slug))
+		fmt.Fprintf(&sb, "Once configured, activate with: activate_api(%q)", slug)
 
 		return mcp.NewToolResultText(sb.String()), nil
 	}
@@ -433,7 +433,7 @@ func makeDebugAPIHandler(am *ActivationManager) server.ToolHandlerFunc {
 					Error: fmt.Sprintf("Connection failed: %v", doErr),
 				}
 			} else {
-				httpResp.Body.Close()
+				_ = httpResp.Body.Close()
 				headers := make(map[string]string)
 				for _, key := range []string{"Content-Type", "Server", "X-RateLimit-Limit", "X-RateLimit-Remaining"} {
 					if v := httpResp.Header.Get(key); v != "" {

@@ -120,7 +120,7 @@ func loadSpec(source string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fetching %s: %w", source, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != 200 {
 			return nil, fmt.Errorf("fetching %s: HTTP %d", source, resp.StatusCode)
 		}
