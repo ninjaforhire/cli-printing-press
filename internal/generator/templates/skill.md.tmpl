@@ -1,0 +1,200 @@
+---
+name: pp-{{.Name}}
+description: "{{if and .Narrative .Narrative.Headline}}{{.Narrative.Headline}}{{else}}Printing Press CLI for {{humanName .Name}}. {{.Description}}{{end}}{{if and .Narrative .Narrative.TriggerPhrases}} Trigger phrases: {{range $i, $p := .Narrative.TriggerPhrases}}{{if $i}}, {{end}}'{{$p}}'{{end}}.{{end}}"
+argument-hint: "<command> [args] | install cli|mcp"
+allowed-tools: "Read Bash"
+metadata: '{"openclaw":{"requires":{"bins":["{{.Name}}-pp-cli"]},"install":[{"id":"go","kind":"shell","command":"go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{.Category}}{{else}}other{{end}}/{{.Name}}-pp-cli/cmd/{{.Name}}-pp-cli@latest","bins":["{{.Name}}-pp-cli"],"label":"Install via go install"}]}}'
+---
+
+# {{humanName .Name}} — Printing Press CLI
+{{- if and .Narrative .Narrative.ValueProp}}
+
+{{.Narrative.ValueProp}}
+{{- else}}
+
+{{.Description}}
+{{- end}}
+{{- if and .Narrative .Narrative.WhenToUse}}
+
+## When to Use This CLI
+
+{{.Narrative.WhenToUse}}
+{{- end}}
+{{- if .NovelFeatures}}
+
+## Unique Capabilities
+
+These capabilities aren't available in any other tool for this API.
+{{- $groups := groupNovelFeatures .NovelFeatures}}
+{{- if $groups}}
+{{- range $groups}}
+
+### {{.Name}}
+{{range .Features}}
+- **`{{.Command}}`** — {{.Description}}
+{{- if .WhyItMatters}}
+
+  _{{.WhyItMatters}}_
+{{- end}}
+{{- if .Example}}
+
+  ```bash
+  {{.Example}}
+  ```
+{{- end}}
+{{- end}}
+{{- end}}
+{{- else}}
+{{range .NovelFeatures}}
+- **`{{.Command}}`** — {{.Description}}
+{{- if .WhyItMatters}}
+
+  _{{.WhyItMatters}}_
+{{- end}}
+{{- if .Example}}
+
+  ```bash
+  {{.Example}}
+  ```
+{{- end}}
+{{- end}}
+{{- end}}
+{{- end}}
+
+## Command Reference
+{{range $name, $resource := .Resources}}
+**{{$name}}** — {{$resource.Description}}
+{{range $eName, $endpoint := $resource.Endpoints}}
+- `{{$.Name}}-pp-cli {{$name}} {{$eName}}` — {{oneline $endpoint.Description}}
+{{- end}}
+{{end}}
+{{- if and .Narrative .Narrative.Recipes}}
+
+## Recipes
+{{range .Narrative.Recipes}}
+
+### {{.Title}}
+
+```bash
+{{.Command}}
+```
+{{- if .Explanation}}
+
+{{.Explanation}}
+{{- end}}
+{{- end}}
+{{- end}}
+
+## Auth Setup
+{{- if and .Narrative .Narrative.AuthNarrative}}
+
+{{.Narrative.AuthNarrative}}
+{{- else if eq .Auth.Type "api_key"}}
+
+Set your API key via environment variable:
+{{- if .Auth.EnvVars}}
+
+```bash
+export {{index .Auth.EnvVars 0}}="<your-key>"
+```
+{{- end}}
+
+Or persist it in `{{.Config.Path}}`.
+{{- else if eq .Auth.Type "oauth2"}}
+
+Authenticate via the browser:
+
+```bash
+{{.Name}}-pp-cli auth login
+```
+
+Tokens are stored locally and refreshed automatically.
+{{- else if eq .Auth.Type "bearer_token"}}
+
+Store your access token:
+
+```bash
+{{.Name}}-pp-cli auth set-token YOUR_TOKEN_HERE
+```
+{{- if .Auth.EnvVars}}
+
+Or set `{{index .Auth.EnvVars 0}}` as an environment variable.
+{{- end}}
+{{- else if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
+
+This CLI uses a browser session. Log in to {{.Auth.CookieDomain}} in Chrome, then:
+
+```bash
+{{.Name}}-pp-cli auth login --chrome
+```
+
+Requires a cookie extraction tool (`pycookiecheat` via pip, or `cookies` via Homebrew).
+{{- else}}
+
+No authentication required.
+{{- end}}
+
+Run `{{.Name}}-pp-cli doctor` to verify setup.
+
+## Agent Mode
+
+Add `--agent` to any command. Expands to: `--json --compact --no-input --no-color --yes`.
+
+- **Pipeable** — JSON on stdout, errors on stderr
+- **Filterable** — `--select id,name` returns a subset of fields
+- **Previewable** — `--dry-run` shows the request without sending
+- **Cacheable** — GET responses cached for 5 minutes, bypass with `--no-cache`
+- **Non-interactive** — never prompts, every input is a flag
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 2 | Usage error (wrong arguments) |
+| 3 | Resource not found |
+| 4 | Authentication required |
+| 5 | API error (upstream issue) |
+| 7 | Rate limited (wait and retry) |
+| 10 | Config error |
+
+## Argument Parsing
+
+Parse `$ARGUMENTS`:
+
+1. **Empty, `help`, or `--help`** → show `{{.Name}}-pp-cli --help` output
+2. **Starts with `install`** → ends with `mcp` → MCP installation; otherwise → CLI installation
+3. **Anything else** → Direct Use (execute as CLI command with `--agent`)
+
+## CLI Installation
+
+1. Check Go is installed: `go version` (requires Go 1.23+)
+2. Install:
+   ```bash
+   go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{.Category}}{{else}}other{{end}}/{{.Name}}-pp-cli/cmd/{{.Name}}-pp-cli@latest
+   ```
+3. Verify: `{{.Name}}-pp-cli --version`
+4. Ensure `$GOPATH/bin` (or `$HOME/go/bin`) is on `$PATH`.
+
+## MCP Server Installation
+
+1. Install the MCP server:
+   ```bash
+   go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{.Category}}{{else}}other{{end}}/{{.Name}}-pp-cli/cmd/{{.Name}}-pp-mcp@latest
+   ```
+2. Register with Claude Code:
+   ```bash
+   claude mcp add {{.Name}}-pp-mcp -- {{.Name}}-pp-mcp
+   ```
+3. Verify: `claude mcp list`
+
+## Direct Use
+
+1. Check if installed: `which {{.Name}}-pp-cli`
+   If not found, offer to install (see CLI Installation above).
+2. Match the user query to the best command from the Unique Capabilities and Command Reference above.
+3. Execute with the `--agent` flag:
+   ```bash
+   {{.Name}}-pp-cli <command> [subcommand] [args] --agent
+   ```
+4. If ambiguous, drill into subcommand help: `{{.Name}}-pp-cli <command> --help`.
