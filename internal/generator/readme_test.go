@@ -114,6 +114,206 @@ func TestGeneratedREADMEHasNoHallucinatedCookbook(t *testing.T) {
 		"README should not reference an unimplemented export command")
 }
 
+func minimalSpec(name string) *spec.APISpec {
+	return &spec.APISpec{
+		Name:    name,
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"MYAPI_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/" + name + "-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+}
+
+// TestReadmeRendersNarrativeHeadlineAndValueProp asserts the template uses
+// the LLM-authored headline + value prop when Narrative is populated,
+// pushing past the generic spec-derived description.
+func TestReadmeRendersNarrativeHeadlineAndValueProp(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("narrated")
+	outputDir := filepath.Join(t.TempDir(), "narrated-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		Headline:  "Every feature plus a local store nothing else has",
+		ValueProp: "Quotes, fundamentals, and a SQLite-backed portfolio tracker.",
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "**Every feature plus a local store nothing else has**"),
+		"headline should render as bold text")
+	assert.True(t, strings.Contains(content, "Quotes, fundamentals, and a SQLite-backed portfolio tracker."),
+		"value prop should render as a paragraph")
+}
+
+// TestReadmeFallsBackWhenNarrativeAbsent asserts the generic description
+// is used when Narrative is nil — no breakage for specs without absorb data.
+func TestReadmeFallsBackWhenNarrativeAbsent(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("plain")
+	apiSpec.Description = "A basic example API."
+	outputDir := filepath.Join(t.TempDir(), "plain-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "A basic example API."),
+		"falls back to .Description when no narrative is present")
+}
+
+// TestReadmeRendersNovelFeaturesGrouped asserts the Unique Features block
+// switches to group subheadings when any feature carries a Group value.
+// Also verifies Example and WhyItMatters render beneath each feature.
+func TestReadmeRendersNovelFeaturesGrouped(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("grouped")
+	outputDir := filepath.Join(t.TempDir(), "grouped-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.NovelFeatures = []NovelFeature{
+		{
+			Command:      "portfolio perf",
+			Description:  "Show unrealized P&L",
+			Example:      "grouped-pp-cli portfolio perf --agent",
+			WhyItMatters: "Agents answer portfolio questions in one call",
+			Group:        "Local state that compounds",
+		},
+		{
+			Command:     "watchlist show",
+			Description: "Render a watchlist",
+			Group:       "Local state that compounds",
+		},
+		{
+			Command:      "auth login-chrome",
+			Description:  "Import a Chrome session when rate-limited",
+			WhyItMatters: "Unblocks CI IPs Yahoo has throttled",
+			Group:        "Reachability mitigation",
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "### Local state that compounds"),
+		"grouped rendering should use group names as subheadings")
+	assert.True(t, strings.Contains(content, "### Reachability mitigation"),
+		"each distinct group should appear as its own subheading")
+	assert.True(t, strings.Contains(content, "_Agents answer portfolio questions in one call_"),
+		"WhyItMatters should render as italic text")
+	assert.True(t, strings.Contains(content, "grouped-pp-cli portfolio perf --agent"),
+		"Example should render as a code block")
+}
+
+// TestReadmeRendersNovelFeaturesFlat asserts that when no feature has a
+// Group, the Unique Features block renders as a flat bullet list without
+// any group subheadings.
+func TestReadmeRendersNovelFeaturesFlat(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("flat")
+	outputDir := filepath.Join(t.TempDir(), "flat-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.NovelFeatures = []NovelFeature{
+		{Command: "foo", Description: "Do foo"},
+		{Command: "bar", Description: "Do bar"},
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "## Unique Features"),
+		"Unique Features section should render")
+	assert.True(t, strings.Contains(content, "- **`foo`** — Do foo"),
+		"flat bullet should render")
+	assert.False(t, strings.Contains(content, "### More"),
+		"ungrouped features should not produce a 'More' subheading")
+}
+
+// TestReadmeRendersNarrativeQuickStart asserts the Quick Start section
+// renders narrative.quickstart commands verbatim instead of the generic
+// auth-branched flow when the narrative provides realistic steps.
+func TestReadmeRendersNarrativeQuickStart(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("qstart")
+	outputDir := filepath.Join(t.TempDir(), "qstart-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		QuickStart: []QuickStartStep{
+			{Command: "qstart-pp-cli quote AAPL MSFT", Comment: "Get current quotes"},
+			{Command: "qstart-pp-cli watchlist create tech", Comment: "Build a watchlist"},
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "qstart-pp-cli quote AAPL MSFT"),
+		"quickstart command should render verbatim")
+	assert.True(t, strings.Contains(content, "# Get current quotes"),
+		"quickstart comment should render as a bash comment above the command")
+	// The generic "### 1. Install" numbered steps should NOT appear when
+	// narrative quickstart takes over.
+	assert.False(t, strings.Contains(content, "### 1. Install"),
+		"generic numbered steps should be suppressed when narrative quickstart is present")
+}
+
+// TestReadmeAppendsNarrativeTroubleshoots asserts the Troubleshooting
+// section appends API-specific symptom/fix pairs when provided.
+func TestReadmeAppendsNarrativeTroubleshoots(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("trouble")
+	outputDir := filepath.Join(t.TempDir(), "trouble-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		Troubleshoots: []TroubleshootTip{
+			{Symptom: "HTTP 429 on every request", Fix: "Import a Chrome session via `auth login-chrome`"},
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	assert.True(t, strings.Contains(content, "### API-specific"),
+		"API-specific troubleshoots subheading should render")
+	assert.True(t, strings.Contains(content, "**HTTP 429 on every request**"),
+		"troubleshoot symptom should render as bold")
+	assert.True(t, strings.Contains(content, "Import a Chrome session via `auth login-chrome`"),
+		"troubleshoot fix should render after the symptom")
+}
+
 // TestEmptyEnvVarsSectionHidden asserts the Environment variables subheader
 // is not rendered when the spec has no env vars (e.g., cookie-based auth).
 // Previously the header shipped with no bullets underneath — a dangling

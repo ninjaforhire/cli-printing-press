@@ -63,6 +63,14 @@ type TroubleshootTip struct {
 	Fix     string
 }
 
+// novelFeatureGroup is a template-facing bucket of novel features sharing
+// a Group name. Produced by the groupNovelFeatures template helper so the
+// README/SKILL templates don't have to do collection logic in-template.
+type novelFeatureGroup struct {
+	Name     string
+	Features []NovelFeature
+}
+
 // ReadmeNarrative mirrors pipeline.ReadmeNarrative for template rendering.
 // Holds LLM-authored prose that makes generated docs feel like product
 // documentation rather than scaffolding. All fields are optional.
@@ -269,6 +277,39 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 				return names[0]
 			}
 			return "resource"
+		},
+		// groupNovelFeatures clusters features by their Group field, preserving
+		// first-seen order of group names. Features with empty Group land in a
+		// trailing "More" bucket so nothing gets dropped. Returns nil when no
+		// feature carries a Group value — callers should then render flat.
+		"groupNovelFeatures": func(features []NovelFeature) []novelFeatureGroup {
+			anyGrouped := false
+			for _, f := range features {
+				if f.Group != "" {
+					anyGrouped = true
+					break
+				}
+			}
+			if !anyGrouped {
+				return nil
+			}
+			order := []string{}
+			byGroup := map[string][]NovelFeature{}
+			for _, f := range features {
+				g := f.Group
+				if g == "" {
+					g = "More"
+				}
+				if _, seen := byGroup[g]; !seen {
+					order = append(order, g)
+				}
+				byGroup[g] = append(byGroup[g], f)
+			}
+			out := make([]novelFeatureGroup, 0, len(order))
+			for _, g := range order {
+				out = append(out, novelFeatureGroup{Name: g, Features: byGroup[g]})
+			}
+			return out
 		},
 		// firstCommandExample returns a real "resource endpoint" pair for use
 		// in docs that need a runnable example. Prefers read-only verbs when

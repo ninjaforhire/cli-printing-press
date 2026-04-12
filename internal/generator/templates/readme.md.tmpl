@@ -1,8 +1,19 @@
 # {{humanName .Name}} CLI
+{{- if and .Narrative .Narrative.Headline}}
 
-{{.Description}}{{if .WebsiteURL}}
+**{{.Narrative.Headline}}**
+{{- else}}
 
-Learn more at [{{humanName .Name}}]({{.WebsiteURL}}).{{end}}
+{{.Description}}
+{{- end}}
+{{- if and .Narrative .Narrative.ValueProp}}
+
+{{.Narrative.ValueProp}}
+{{- end}}
+{{- if .WebsiteURL}}
+
+Learn more at [{{humanName .Name}}]({{.WebsiteURL}}).
+{{- end}}
 
 ## Install
 
@@ -15,8 +26,24 @@ go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{
 ### Binary
 
 Download from [Releases](https://github.com/mvanhorn/printing-press-library/releases).
+{{- if and .Narrative .Narrative.AuthNarrative}}
+
+## Authentication
+
+{{.Narrative.AuthNarrative}}
+{{- end}}
 
 ## Quick Start
+{{- if and .Narrative .Narrative.QuickStart}}
+
+```bash
+{{- range .Narrative.QuickStart}}
+{{if .Comment}}# {{.Comment}}
+{{end}}{{.Command}}
+
+{{end -}}
+```
+{{- else}}
 
 ### 1. Install
 
@@ -99,13 +126,45 @@ This checks your configuration{{if and (ne .Auth.Type "") (ne .Auth.Type "none")
 {{.Name}}-pp-cli {{$firstCmd}}
 ```
 {{- end}}
+{{- end}}
 {{- if .NovelFeatures}}
 
 ## Unique Features
 
 These capabilities aren't available in any other tool for this API.
+{{- $groups := groupNovelFeatures .NovelFeatures}}
+{{- if $groups}}
+{{- range $groups}}
+
+### {{.Name}}
+{{range .Features}}
+- **`{{.Command}}`** — {{.Description}}
+{{- if .WhyItMatters}}
+
+  _{{.WhyItMatters}}_
+{{- end}}
+{{- if .Example}}
+
+  ```bash
+  {{.Example}}
+  ```
+{{- end}}
+{{- end}}
+{{- end}}
+{{- else}}
 {{range .NovelFeatures}}
 - **`{{.Command}}`** — {{.Description}}
+{{- if .WhyItMatters}}
+
+  _{{.WhyItMatters}}_
+{{- end}}
+{{- if .Example}}
+
+  ```bash
+  {{.Example}}
+  ```
+{{- end}}
+{{- end}}
 {{- end}}
 {{- end}}
 
@@ -267,6 +326,13 @@ Environment variables:
 **Rate limit errors (exit code 7)**
 - The CLI auto-retries with exponential backoff
 - If persistent, wait a few minutes and try again
+{{- if and .Narrative .Narrative.Troubleshoots}}
+
+### API-specific
+{{range .Narrative.Troubleshoots}}
+- **{{.Symptom}}** — {{.Fix}}
+{{- end}}
+{{- end}}
 
 ---
 {{- if or (gt (len .Sources) 1) (gt (len .DiscoveryPages) 0)}}
