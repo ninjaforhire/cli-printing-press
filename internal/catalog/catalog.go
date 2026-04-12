@@ -14,21 +14,25 @@ import (
 
 var namePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
+// Public categories first, alphabetized. "other" and "example" are explicitly
+// special (catch-all / test-only) and kept at the end.
 var validCategories = map[string]struct{}{
-	"developer-tools":         {},
-	"monitoring":              {},
-	"cloud":                   {},
-	"project-management":      {},
-	"productivity":            {},
-	"social-and-messaging":    {},
-	"sales-and-crm":           {},
-	"marketing":               {},
-	"payments":                {},
-	"auth":                    {},
-	"commerce":                {},
 	"ai":                      {},
-	"media-and-entertainment": {},
+	"auth":                    {},
+	"cloud":                   {},
+	"commerce":                {},
+	"developer-tools":         {},
 	"devices":                 {},
+	"food-and-dining":         {},
+	"marketing":               {},
+	"media-and-entertainment": {},
+	"monitoring":              {},
+	"payments":                {},
+	"productivity":            {},
+	"project-management":      {},
+	"sales-and-crm":           {},
+	"social-and-messaging":    {},
+	"travel":                  {},
 	"other":                   {},
 	"example":                 {},
 }

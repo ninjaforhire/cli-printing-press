@@ -128,7 +128,7 @@ Releases are fully automated. No manual steps required.
 Catalog entries in `catalog/` must pass `internal/catalog` validation:
 - Required fields: name, display_name, description, category, spec_url, spec_format, tier
 - spec_url must use HTTPS
-- category must be: developer-tools, monitoring, cloud, project-management, productivity, social-and-messaging, sales-and-crm, marketing, payments, auth, commerce, ai, media-and-entertainment, devices, other
+- category must be: ai, auth, cloud, commerce, developer-tools, devices, food-and-dining, marketing, media-and-entertainment, monitoring, payments, productivity, project-management, sales-and-crm, social-and-messaging, travel, or other
 - tier must be: official or community
 
 ## Testing
