@@ -557,11 +557,22 @@ func detectRequiredHeaders(doc *openapi3.T, auth spec.AuthConfig) ([]spec.Requir
 			continue
 		}
 
-		// Find the majority value (global default)
+		// Find the majority value (global default). Iterate valueCounts in
+		// sorted-key order so ties resolve deterministically; on a count tie,
+		// prefer the lexically-greatest value — for ISO-date API-version
+		// strings this corresponds to "newest version wins," which matches
+		// most APIs' intent. Without this, map iteration order made the
+		// choice nondeterministic and the test flaked roughly 1 run in 10.
+		vals := make([]string, 0, len(h.valueCounts))
+		for v := range h.valueCounts {
+			vals = append(vals, v)
+		}
+		sort.Strings(vals)
 		bestVal := ""
 		bestCount := 0
-		for val, cnt := range h.valueCounts {
-			if cnt > bestCount {
+		for _, val := range vals {
+			cnt := h.valueCounts[val]
+			if cnt > bestCount || (cnt == bestCount && val > bestVal) {
 				bestVal = val
 				bestCount = cnt
 			}

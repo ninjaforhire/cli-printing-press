@@ -12,6 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// skipIfRootCannotSimulateUnreadable skips tests that rely on chmod 0
+// making a file unreadable. Root bypasses file-mode checks on Linux, so
+// these tests can't produce the expected copy failure when euid == 0
+// (CI sandboxes, devcontainers, some cloud runners).
+func skipIfRootCannotSimulateUnreadable(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0 does not block reads — cannot simulate an unreadable-file failure")
+	}
+}
+
 func TestPublishValidateMissingManifest(t *testing.T) {
 	home := setLibraryTestEnv(t)
 	cliDir := filepath.Join(home, "library", "test-pp-cli")
@@ -290,6 +301,7 @@ func TestPublishPackageDoesNotStageCompiledBinary(t *testing.T) {
 }
 
 func TestPublishPackageFailsWhenManuscriptsCopyFails(t *testing.T) {
+	skipIfRootCannotSimulateUnreadable(t)
 	home := setLibraryTestEnv(t)
 	cliDir := filepath.Join(home, "library", "test-pp-cli")
 	writePublishableTestCLI(t, cliDir)
@@ -480,6 +492,7 @@ func TestPublishPackageDestRemovesOldCLI(t *testing.T) {
 }
 
 func TestPublishPackageDestRestoresOldCLIOnFailure(t *testing.T) {
+	skipIfRootCannotSimulateUnreadable(t)
 	home := setLibraryTestEnv(t)
 	cliDir := filepath.Join(home, "library", "test-pp-cli")
 	writePublishableTestCLI(t, cliDir)
