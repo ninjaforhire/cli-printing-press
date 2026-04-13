@@ -59,9 +59,10 @@ type AuthConfig struct {
 	Header           string   `yaml:"header" json:"header"`
 	Format           string   `yaml:"format" json:"format"`
 	EnvVars          []string `yaml:"env_vars" json:"env_vars"`
-	Scheme           string   `yaml:"scheme,omitempty" json:"scheme,omitempty"`   // OpenAPI security scheme name
-	In               string   `yaml:"in,omitempty" json:"in,omitempty"`           // header, query, cookie
-	KeyURL           string   `yaml:"key_url,omitempty" json:"key_url,omitempty"` // URL where users can register for an API key
+	Optional         bool     `yaml:"optional,omitempty" json:"optional,omitempty"` // true when the key enhances a subset of features (e.g., USDA nutrition backfill) rather than gating core functionality; doctor treats unconfigured optional auth as INFO not FAIL and README frames the section as "Optional"
+	Scheme           string   `yaml:"scheme,omitempty" json:"scheme,omitempty"`     // OpenAPI security scheme name
+	In               string   `yaml:"in,omitempty" json:"in,omitempty"`             // header, query, cookie
+	KeyURL           string   `yaml:"key_url,omitempty" json:"key_url,omitempty"`   // URL where users can register for an API key
 	AuthorizationURL string   `yaml:"authorization_url,omitempty" json:"authorization_url,omitempty"`
 	TokenURL         string   `yaml:"token_url,omitempty" json:"token_url,omitempty"`
 	Scopes           []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`

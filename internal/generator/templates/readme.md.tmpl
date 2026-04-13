@@ -28,9 +28,11 @@ go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{
 Download from [Releases](https://github.com/mvanhorn/printing-press-library/releases).
 {{- if and .Narrative .Narrative.AuthNarrative}}
 
-## Authentication
+{{if .Auth.Optional}}## Optional: API Key{{else}}## Authentication{{end}}
 
-{{.Narrative.AuthNarrative}}
+{{if .Auth.Optional}}**All core commands work without setup.** The API key below is only needed to unlock additional features.
+
+{{end}}{{.Narrative.AuthNarrative}}
 {{- end}}
 
 ## Quick Start
