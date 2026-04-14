@@ -963,7 +963,10 @@ func newDeleteCmd() *cobra.Command {
 	assert.Equal(t, "flag", result.Violations[0].Category)
 }
 
-func TestCheckNamingConsistency_BannedFlagYes(t *testing.T) {
+func TestCheckNamingConsistency_YesFlagIsNotBanned(t *testing.T) {
+	// --yes is a long-standing Unix convention (apt, dnf, etc.) and the
+	// printed CLI root template uses it today. Document that only the
+	// explicitly-banned skip-confirmations variants trigger the check.
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "cli"), 0o755))
 
@@ -981,9 +984,7 @@ func newCmd() *cobra.Command {
 `)
 
 	result := checkNamingConsistency(dir)
-	require.Len(t, result.Violations, 1)
-	assert.Equal(t, "--yes", result.Violations[0].Banned)
-	assert.Equal(t, "--force", result.Violations[0].Preferred)
+	assert.Empty(t, result.Violations, "--yes is allowed; only --skip-confirmations variants are banned")
 }
 
 func TestCheckNamingConsistency_NoFalsePositiveOnIdentifierWithBannedSubstring(t *testing.T) {

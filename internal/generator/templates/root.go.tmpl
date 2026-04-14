@@ -140,6 +140,7 @@ Run '{{.Name}}-pp-cli doctor' to verify auth and connectivity.{{backtick}},
 {{- end}}
 	rootCmd.AddCommand(newDoctorCmd(&flags))
 	rootCmd.AddCommand(newAuthCmd(&flags))
+	rootCmd.AddCommand(newAgentContextCmd(rootCmd))
 {{- if .VisionSet.Export}}
 	rootCmd.AddCommand(newExportCmd(&flags))
 {{- end}}

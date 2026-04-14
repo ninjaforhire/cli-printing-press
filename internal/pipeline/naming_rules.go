@@ -47,10 +47,9 @@ var namingRules = []NamingRule{
 		Category:  "flag",
 		Reason:    "`--force` is the cross-CLI convention for bypassing confirmation prompts",
 	},
-	{
-		Banned:    "--yes",
-		Preferred: "--force",
-		Category:  "flag",
-		Reason:    "standardize on `--force` across all printed CLIs so agents do not guess which flag skips confirmation",
-	},
+	// NOTE: `--yes` is NOT banned. It is a long-standing Unix convention
+	// (apt, dnf, etc.) and printed CLIs use it as the canonical skip-prompt
+	// flag today. Cloudflare's article bans only `--skip-confirmations`,
+	// not `--yes`. If a retro shows agents getting confused between `--yes`
+	// and `--force`, consolidate then — not speculatively here.
 }

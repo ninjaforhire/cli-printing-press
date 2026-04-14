@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,9 +25,10 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		expectedFiles int
 	}{
 		// +3 for cliutil package: fanout.go, text.go, cliutil_test.go
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 35},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 39},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 39},
+		// +1 for internal/cli/agent_context.go (Cloudflare-style runtime introspection)
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 36},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 40},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 40},
 	}
 
 	for _, tt := range tests {
@@ -98,6 +100,64 @@ func TestGenerateCliutilPackage(t *testing.T) {
 	// The generated cliutil package must compile and its tests must pass.
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "test", "./internal/cliutil/...")
+}
+
+// TestGenerateAgentContextCommand verifies that every generated CLI ships
+// with the agent-context subcommand and that it emits valid JSON matching
+// the documented schema. Inspired by Cloudflare's /cdn-cgi/explorer/api
+// endpoint (2026-04-13 Wrangler post) — agents introspect at runtime.
+func TestGenerateAgentContextCommand(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := spec.Parse(filepath.Join("..", "..", "testdata", "stytch.yaml"))
+	require.NoError(t, err)
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	// The agent_context.go file must exist in internal/cli/.
+	agentContextPath := filepath.Join(outputDir, "internal", "cli", "agent_context.go")
+	data, err := os.ReadFile(agentContextPath)
+	require.NoError(t, err, "agent_context.go must be generated")
+
+	src := string(data)
+	// Key symbols callers (root.go, tests, agents) rely on.
+	for _, snippet := range []string{
+		"func newAgentContextCmd",
+		"agentContextSchemaVersion",
+		`"schema_version"`,
+		`Use:   "agent-context"`,
+		"collectAgentCommands",
+		`"pretty"`,
+	} {
+		assert.Contains(t, src, snippet, "agent_context.go missing %q", snippet)
+	}
+
+	// The subcommand must be registered in root.go so the CLI picks it up.
+	rootSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "root.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(rootSrc), "newAgentContextCmd(rootCmd)",
+		"agent-context command must be registered in root.go")
+
+	// The CLI must build with the new subcommand.
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
+
+	// Build the binary and run agent-context; output must be valid JSON
+	// carrying the schema_version field at the top level.
+	binaryPath := filepath.Join(outputDir, naming.CLI(apiSpec.Name))
+	runGoCommand(t, outputDir, "build", "-o", binaryPath, "./cmd/"+naming.CLI(apiSpec.Name))
+
+	out, err := exec.Command(binaryPath, "agent-context").Output()
+	require.NoError(t, err, "running agent-context must succeed")
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(out, &payload), "agent-context must emit valid JSON")
+	assert.Equal(t, "1", payload["schema_version"], "schema_version must be present and start at 1")
+	assert.Contains(t, payload, "cli")
+	assert.Contains(t, payload, "auth")
+	assert.Contains(t, payload, "commands")
 }
 
 func TestGenerateOAuth2AuthTemplateConditionally(t *testing.T) {

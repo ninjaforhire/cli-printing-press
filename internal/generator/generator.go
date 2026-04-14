@@ -650,6 +650,7 @@ func (g *Generator) Generate() error {
 		"main.go.tmpl":           filepath.Join("cmd", naming.CLI(g.Spec.Name), "main.go"),
 		"helpers.go.tmpl":        filepath.Join("internal", "cli", "helpers.go"),
 		"doctor.go.tmpl":         filepath.Join("internal", "cli", "doctor.go"),
+		"agent_context.go.tmpl":  filepath.Join("internal", "cli", "agent_context.go"),
 		"config.go.tmpl":         filepath.Join("internal", "config", "config.go"),
 		"cache.go.tmpl":          filepath.Join("internal", "cache", "cache.go"),
 		"client.go.tmpl":         filepath.Join("internal", "client", "client.go"),
