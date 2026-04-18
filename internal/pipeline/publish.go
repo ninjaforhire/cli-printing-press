@@ -217,14 +217,13 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		}
 	}
 
-	// Detect spec format and compute checksum from the spec file in the
-	// working directory. spec.json only exists when specFlag is --spec;
-	// for --docs runs it won't be present and these fields stay empty.
-	specFile := filepath.Join(state.EffectiveWorkingDir(), "spec.json")
-	if data, err := os.ReadFile(specFile); err == nil {
+	// Detect spec format and compute checksum from the spec file archived
+	// alongside the CLI. generate writes spec.json for JSON inputs and
+	// spec.yaml for YAML inputs; --docs / --plan runs leave no archive and
+	// these fields stay empty.
+	if specFile, data, err := findArchivedSpec(state.EffectiveWorkingDir()); err == nil && specFile != "" {
 		m.SpecFormat = detectSpecFormat(data)
-		checksum, err := specChecksum(specFile)
-		if err == nil {
+		if checksum, err := specChecksum(specFile); err == nil {
 			m.SpecChecksum = checksum
 		}
 

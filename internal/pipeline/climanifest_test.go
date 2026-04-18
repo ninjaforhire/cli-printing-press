@@ -259,6 +259,45 @@ func TestPublishManifestNormalizesURLDuplicatedInBothFields(t *testing.T) {
 	assert.Empty(t, got.SpecPath, "URL should not be duplicated in spec_path")
 }
 
+func TestPublishWorkingCLIWritesManifestForYAMLSpec(t *testing.T) {
+	home := setPressTestEnv(t)
+
+	workingDir := filepath.Join(home, "working", "yaml-spec-pp-cli")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "main.go"),
+		[]byte("package main\nfunc main() {}"),
+		0o644,
+	))
+
+	specContent := []byte("openapi: 3.0.0\ninfo:\n  title: YAML Test\n  version: 1.0.0\npaths: {}\n")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "spec.yaml"),
+		specContent,
+		0o644,
+	))
+
+	state := NewState("yaml-api", workingDir)
+	require.NoError(t, os.MkdirAll(filepath.Dir(state.StatePath()), 0o755))
+	require.NoError(t, state.Save())
+
+	publishDir := filepath.Join(home, "library", "yaml-spec-pp-cli")
+	finalDir, err := PublishWorkingCLI(state, publishDir)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(finalDir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	assert.Equal(t, "openapi3", got.SpecFormat, "publish must detect format of YAML-archived specs")
+
+	h := sha256.Sum256(specContent)
+	expectedChecksum := "sha256:" + hex.EncodeToString(h[:])
+	assert.Equal(t, expectedChecksum, got.SpecChecksum, "publish must checksum YAML-archived specs")
+}
+
 func TestPublishWorkingCLIManifestWithoutSpec(t *testing.T) {
 	home := setPressTestEnv(t)
 

@@ -76,6 +76,25 @@ func WriteCLIManifest(dir string, m CLIManifest) error {
 	return nil
 }
 
+// findArchivedSpec looks for a spec file archived alongside a generated CLI.
+// generate archives the source spec as spec.json (for JSON inputs) or
+// spec.yaml (for YAML inputs); older runs occasionally used spec.yml. Returns
+// the first match's path and contents, or an empty path with nil error when
+// no archive is present.
+func findArchivedSpec(dir string) (string, []byte, error) {
+	for _, name := range []string{"spec.json", "spec.yaml", "spec.yml"} {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return path, data, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+	}
+	return "", nil, nil
+}
+
 // specChecksum computes a SHA-256 checksum of the file at path.
 // Returns "sha256:<hex>" on success, or an empty string if the file
 // does not exist.
@@ -173,22 +192,15 @@ func WriteManifestForGenerate(p GenerateManifestParams) error {
 
 	// Fallback: detect format and checksum from any spec file cached in the output dir.
 	if m.SpecFormat == "" || m.SpecChecksum == "" {
-		for _, name := range []string{"spec.json", "spec.yaml", "spec.yml"} {
-			specFile := filepath.Join(p.OutputDir, name)
-			data, err := os.ReadFile(specFile)
-			if err != nil {
-				continue
-			}
+		if specFile, data, err := findArchivedSpec(p.OutputDir); err == nil && specFile != "" {
 			if m.SpecFormat == "" {
 				m.SpecFormat = detectSpecFormat(data)
 			}
 			if m.SpecChecksum == "" {
-				cs, err := specChecksum(specFile)
-				if err == nil {
+				if cs, err := specChecksum(specFile); err == nil {
 					m.SpecChecksum = cs
 				}
 			}
-			break
 		}
 	}
 
