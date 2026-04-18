@@ -99,6 +99,22 @@ func Patch(opts Options) (*Report, error) {
 	for _, c := range fatal {
 		skipFeatures[c.Symbol] = true
 	}
+	// Shape-mismatch guard: drop-ins reference rootFlags and assume
+	// `rootCmd.PersistentFlags()` / `rootCmd.AddCommand` call sites exist
+	// for the AST-injection anchors. If the target CLI has a different
+	// shape (e.g. `root.PersistentFlags()` with a package-global rootCmd
+	// and no rootFlags struct), writing drop-ins alone would produce a
+	// compile failure. Verify shape first and refuse loudly.
+	if mismatch := checkRootShape(rootSrc); mismatch != "" {
+		report.Collisions = append(report.Collisions, Collision{
+			Kind:    "shape",
+			Symbol:  "root.go",
+			File:    rootPath,
+			Message: mismatch + " — cannot AST-inject. This CLI needs a reprint rather than a patch.",
+		})
+		return report, nil
+	}
+
 	patchedRoot, rootChanged, err := injectRootAST(rootSrc, injectOptions{Skip: skipFeatures})
 	if err != nil {
 		return nil, fmt.Errorf("AST injection: %w", err)
@@ -149,7 +165,9 @@ func Patch(opts Options) (*Report, error) {
 	}
 
 	if !opts.SkipBuild {
-		out, buildErr := exec.Command("go", "build", "./...").CombinedOutput()
+		buildCmd := exec.Command("go", "build", "./...")
+		buildCmd.Dir = opts.Dir // build the target CLI, not the printing-press repo
+		out, buildErr := buildCmd.CombinedOutput()
 		report.BuildOK = buildErr == nil
 		if buildErr != nil {
 			report.BuildOutput = string(out)

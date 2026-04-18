@@ -453,6 +453,56 @@ func nodeReferences(node dst.Node, name string) bool {
 	return found
 }
 
+// checkRootShape verifies the target root.go matches the printing-press
+// generator's shape that the patcher's AST matchers assume. Returns an
+// empty string on match, or a human-readable mismatch reason. The drop-in
+// files reference `rootFlags` and expect AST injection to land new wiring
+// inside the `rootCmd.PersistentFlags()` / `rootCmd.AddCommand()` blocks;
+// a non-matching shape (e.g. package-global `root` with no rootFlags
+// struct, as some older synthetic CLIs have) would produce a compile
+// failure if we wrote drop-ins anyway.
+func checkRootShape(src []byte) string {
+	file, err := decorator.Parse(src)
+	if err != nil {
+		return fmt.Sprintf("root.go does not parse: %v", err)
+	}
+	hasRootFlags := false
+	hasRootCmdFlags := false
+	hasRootCmdAddCommand := false
+	dst.Inspect(file, func(n dst.Node) bool {
+		switch v := n.(type) {
+		case *dst.TypeSpec:
+			if v.Name.Name == "rootFlags" {
+				if _, ok := v.Type.(*dst.StructType); ok {
+					hasRootFlags = true
+				}
+			}
+		case *dst.ExprStmt:
+			if isPersistentFlagsCall(v) {
+				hasRootCmdFlags = true
+			}
+			if isRootAddCommand(v) {
+				hasRootCmdAddCommand = true
+			}
+		}
+		return true
+	})
+	var missing []string
+	if !hasRootFlags {
+		missing = append(missing, "rootFlags struct")
+	}
+	if !hasRootCmdFlags {
+		missing = append(missing, "rootCmd.PersistentFlags() call")
+	}
+	if !hasRootCmdAddCommand {
+		missing = append(missing, "rootCmd.AddCommand call")
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return "root.go missing " + strings.Join(missing, ", ")
+}
+
 // parseStmt parses a single Go statement and returns it as a dst.Stmt.
 // Wraps the snippet in a synthetic function so go/parser accepts it.
 func parseStmt(src string) dst.Stmt {

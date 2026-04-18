@@ -149,6 +149,35 @@ func TestInjectRootAST_SkipFeedback(t *testing.T) {
 		"deliver-setup block must still be present")
 }
 
+func TestCheckRootShape_MatchesBase(t *testing.T) {
+	assert.Empty(t, checkRootShape([]byte(baseRootGo)), "base fixture should match shape")
+}
+
+func TestCheckRootShape_RejectsInstacartShape(t *testing.T) {
+	// Instacart / agent-capture use a package-global `var rootCmd`, no
+	// rootFlags struct, and register PersistentFlags/AddCommand via a
+	// different receiver.
+	src := `package cli
+
+import "github.com/spf13/cobra"
+
+var jsonOutput bool
+
+var rootCmd = &cobra.Command{Use: "thing"}
+
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "")
+	rootCmd.AddCommand(newThingCmd())
+}
+
+func Execute() error { return rootCmd.Execute() }
+`
+	msg := checkRootShape([]byte(src))
+	require.NotEmpty(t, msg)
+	assert.Contains(t, msg, "rootFlags struct",
+		"must flag missing rootFlags struct")
+}
+
 // TestInjectRootAST_NoPersistentFlagsBlock exercises the "refuse silently"
 // path: if the target root.go doesn't have the expected shape, no mutation.
 func TestInjectRootAST_NoPersistentFlagsBlock(t *testing.T) {
