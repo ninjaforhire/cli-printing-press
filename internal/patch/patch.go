@@ -137,7 +137,14 @@ func Patch(opts Options) (*Report, error) {
 		report.FilesCreated = append(report.FilesCreated, d.path)
 	}
 
-	if err := goimportsDir(filepath.Join(opts.Dir, "internal", "cli")); err != nil {
+	// Run goimports only on the files we created or modified. Running it
+	// over the whole internal/cli directory pulls existing files into a
+	// noisy diff where every file's `cobra` import gets shuffled between
+	// import groups — purely cosmetic but drowns the real patch in 5-line
+	// unrelated changes per CLI.
+	touched := append([]string(nil), report.FilesModified...)
+	touched = append(touched, report.FilesCreated...)
+	if err := goimportsFiles(touched); err != nil {
 		return nil, fmt.Errorf("goimports: %w", err)
 	}
 
@@ -179,16 +186,21 @@ func filterFatalCollisions(all []Collision) []Collision {
 	return fatal
 }
 
-// goimportsDir runs `goimports -w` over the given directory. Missing binary
-// falls back to `gofmt -w` since goimports is a superset.
-func goimportsDir(dir string) error {
-	cmd := exec.Command("goimports", "-w", dir)
-	if err := cmd.Run(); err == nil {
+// goimportsFiles runs `goimports -w` over the given file paths. Scoping to
+// specific files (vs. a whole directory) keeps the patcher's diff tight —
+// see the comment at the call site. Missing binary falls back to `gofmt -w`
+// since goimports is a superset.
+func goimportsFiles(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	args := append([]string{"-w"}, paths...)
+	if err := exec.Command("goimports", args...).Run(); err == nil {
 		return nil
 	}
 	// Fallback: gofmt only sorts imports within a group, won't add/remove
 	// groups, but it's better than nothing and is always available.
-	out, err := exec.Command("gofmt", "-w", dir).CombinedOutput()
+	out, err := exec.Command("gofmt", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gofmt: %v: %s", err, bytes.TrimSpace(out))
 	}
