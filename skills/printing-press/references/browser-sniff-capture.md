@@ -1,17 +1,23 @@
 # Browser-Sniff Capture Implementation
 
 > **When to read:** This file is referenced by Phase 1.7 of the printing-press skill.
-> Read it when the user approves browser-sniff (browser-use or agent-browser capture of live API traffic).
+> Read it when the user approves temporary browser discovery (browser-use, agent-browser, or manual HAR capture of live site traffic).
 >
 > **Context:** This file documents what happens AFTER Phase 1.7 decides to browser-sniff. The decision itself — approve, decline, or silent-skip — is recorded in `$PRESS_RUNSTATE/runs/$RUN_ID/browser-browser-sniff-gate.json` by Phase 1.7 before this reference is loaded. Phase 1.5 refuses to proceed without that marker file. See SKILL.md Phase 1.7 "Enforcement: the browser-browser-sniff-gate.json marker file" for the contract.
+>
+> Browser discovery is a temporary generation-time aid. It exists to learn URLs, methods, request bodies, persisted GraphQL hashes, BFF envelopes, auth/header construction, response shapes, and replayability. It is not permission to generate a printed CLI that keeps a browser open for normal commands.
 
 ### Cardinal Rules
 
-1. **ALWAYS use browser-use for capture.** Do NOT substitute curl probing, JS bundle grepping, or agent-browser auto-connect for a proper browser-use interactive browser-sniff. Agent-browser is for session transfer only (grabbing cookies from a running Chrome). The capture — browsing pages, collecting URLs, intercepting requests — MUST use browser-use.
+1. **Prefer browser-use CLI mode for capture, but keep valid fallbacks.** Use browser-use CLI mode when available because it gives stable open/eval/scroll control and response interception without an LLM key. If browser-use is unavailable or incompatible, use agent-browser only when it can produce equivalent network capture artifacts, or ask the user for a manual DevTools HAR. Do NOT substitute curl probing, JS bundle grepping, or agent-browser auto-connect alone for an approved browser capture.
 
 2. **Do NOT skip auth discovery when the session expires.** *(Only applies when `AUTH_SESSION_AVAILABLE=true` — the user confirmed they're logged in.)* If a Chrome profile loads but the session has expired (login page visible instead of account page), offer headed login as a fallback. Never proceed without auth just because the profile session was stale. For anonymous sniffs (no auth context), this rule does not apply.
 
 3. **Use click-based SPA navigation after installing interceptors.** `browser-use open` triggers a full page reload which resets the JS context and destroys fetch/XHR interceptors. After installing interceptors, navigate by clicking links (`browser-use eval "document.querySelector('a[href*=account]').click()"` or `browser-use click`). Only use `browser-use open` for the first page load or when you need to re-install interceptors.
+
+4. **Direct HTTP challenges require a cleared browser attempt before scope pivots.** If research or preflight saw Cloudflare/Vercel/WAF/DataDome/PerimeterX/CAPTCHA evidence, tell the user that direct HTTP is blocked and proceed with a real browser capture. Do NOT replace the target with RSS/docs/official API or ask for a smaller CLI shape until after browser capture has failed by the criteria below.
+
+5. **Replayability is the success criterion.** A browser capture succeeds only when it produces a shippable surface: replayable API calls, persisted-query registry entries, browser-clearance cookies that can be imported and replayed, or structured HTML/SSR/RSS/JSON-LD extraction targets. If the only observed path requires live page-context execution, report HOLD or return to discovery for a lighter surface. Do not continue as if resident browser transport is acceptable.
 
 ### If user approves browser-sniff
 
@@ -55,7 +61,7 @@ Check which browser automation tools are available:
 # Prefer browser-use (CLI-driven, Performance API collection)
 if command -v browser-use >/dev/null 2>&1 || uvx browser-use --help >/dev/null 2>&1; then
   SNIFF_BACKEND="browser-use"
-# Fall back to agent-browser (CLI-driven, Claude drives the loop)
+# Fall back to agent-browser only if it can provide equivalent network capture artifacts.
 elif command -v agent-browser >/dev/null 2>&1; then
   SNIFF_BACKEND="agent-browser"
 else
@@ -69,19 +75,19 @@ if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ] || [ -n "$BROWSER_USE
 fi
 ```
 
-If a tool is found, report: "Using **<tool>** for traffic capture (CLI-driven mode — no LLM key needed)." and proceed to Step 1c to verify compatibility.
+If a tool is found, report: "Using **<tool>** for temporary traffic capture during generation (CLI-driven mode — no LLM key needed)." and proceed to Step 1c to verify compatibility.
 
 **Important:** browser-use has two modes: autonomous Agent mode (requires an LLM API key like ANTHROPIC_API_KEY) and CLI mode (open/eval/scroll — no key needed). **Always use CLI mode for browser-sniff.** It is more reliable, version-stable, and does not require the user to provide an additional API key. Do NOT attempt to use browser-use's Python `Agent` class — it requires an LLM key that may not be available.
 
 #### Step 1b: Install capture tool (if none found)
 
-If neither tool is installed, offer to install via `AskUserQuestion`:
+If neither tool is installed, offer to install via `AskUserQuestion`. Do not install automatically:
 
-> "No browser automation tool found. I need one to browser-sniff the live site. Which would you like to install?"
+> "No browser automation tool found. I need one to temporarily inspect the live site during generation. Which would you like to install?"
 >
 > Options:
-> 1. **Install browser-use (Recommended)** — "CLI-driven browser automation. Claude drives the browsing via open/eval/scroll commands. Requires Python."
-> 2. **Install agent-browser** — "Lighter install (~30s). I'll drive the browsing. Requires Node.js."
+> 1. **Install browser-use (Recommended)** — "CLI-driven browser automation for generation-time capture. Requires Python."
+> 2. **Install agent-browser** — "Alternative capture backend when it can provide network artifacts. Requires Node.js."
 > 3. **Skip — I'll provide a HAR manually** — "Export a HAR yourself from browser DevTools and provide the path."
 
 **If user picks browser-use:**
@@ -187,7 +193,7 @@ Present via `AskUserQuestion`:
 >
 > 1. **Grab session, then quit Chrome** (Recommended) — "I save your cookies via agent-browser, you quit Chrome, then I browser-sniff with browser-use using your profile. Full DOM access."
 > 2. **Log in within a new browser window** — "I'll open a visible browser. You log in, then I browser-sniff."
-> 3. **I'll export a HAR file** — "You browse the site in DevTools, export the HAR."
+> 3. **I'll export a HAR file** — "You browse the site in DevTools and export the HAR. I use it for discovery, then keep only surfaces that pass lightweight replayability checks."
 
 For option 1 (save-then-restore):
 
@@ -218,7 +224,7 @@ Present via `AskUserQuestion`:
 >
 > 1. **Use your Chrome profile** (Recommended, requires browser-use) — "Loads your real Chrome profile. Zero setup."
 > 2. **Log in within a new browser window** — "I'll open a visible browser. You log in, then I browser-sniff."
-> 3. **I'll export a HAR file**
+> 3. **I'll export a HAR file** — "I use the HAR for discovery, then keep only replayable HTTP/HTML/RSS/SSR/API surfaces in the printed CLI."
 
 For option 1 (browser-use profile reuse):
 ```bash
@@ -253,7 +259,7 @@ agent-browser state save "$DISCOVERY_DIR/session-state.json"
 ```
 Close the headed browser and restart headless with the saved state.
 
-**For HAR export (option 3):** Guide the user through DevTools > Network > Save all as HAR. Then use `--har` path.
+**For HAR export (option 3):** Guide the user through DevTools > Network > Save all as HAR. Then use `--har` path. Make clear that a HAR is discovery input, not a promise that every captured HTML/XHR route becomes a printed CLI command. After analyzing the HAR, keep only surfaces that replay through lightweight HTTP/Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, or structured HTML/SSR/RSS extraction. If the HAR only proves live page-context execution works, HOLD or pivot scope.
 
 **After any session transfer method**, verify cookies transferred before proceeding:
 
@@ -397,15 +403,15 @@ When the user confirmed a logged-in session (AUTH_SESSION_AVAILABLE=true from Ph
    ```
 
    **If an Authorization header is found:**
-   - Record the scheme (e.g., `Bearer`, `PagliacciAuth`, `Token`, custom)
+   - Record the scheme (e.g., `Bearer`, `CustomerAuth`, `Token`, custom)
    - **Trace values back to cookies.** Read `document.cookie` and match literal values from the captured header against cookie values:
      ```bash
      browser-use eval "document.cookie"
      ```
      For each cookie `name=value`, check if `value` appears as a substring in the Authorization header. When a match is found, record the cookie name and which part of the header it corresponds to.
    - **Construct the format string.** Replace each literal cookie value in the header with `{cookieName}`:
-     - Example: header `PagliacciAuth 2432962|FD44DA6A-...`, cookies `customerId=2432962; authToken=FD44DA6A-...`
-     - Format string: `PagliacciAuth {customerId}|{authToken}`
+     - Example: header `CustomerAuth 2432962|FD44DA6A-...`, cookies `customerId=2432962; authToken=FD44DA6A-...`
+     - Format string: `CustomerAuth {customerId}|{authToken}`
    - **Write composed auth into the spec.** When building the spec YAML, include:
      ```yaml
      auth:
@@ -655,6 +661,26 @@ After completing the primary user flow capture (browser-use or agent-browser), c
 
 If the thin-results check triggers a re-sniff that discovers additional endpoints, merge the new captures with the originals before proceeding to Step 3.
 
+#### Step 2c.5: Challenge-only capture safety check
+
+After capture, inspect the collected responses before generating a spec. A browser-sniff is **not successful** if it only captured challenge, login, or access-denied pages.
+
+Treat the capture as failed when all or nearly all captured target-site responses match one of these:
+- HTTP `403` or `429` HTML with Cloudflare/Vercel/WAF/DataDome/PerimeterX/CAPTCHA markers
+- titles or body text such as "Just a moment", "Access denied", "Please enable JavaScript", "captcha", "challenge"
+- only login redirects/pages when the user expected an authenticated capture
+- no API-looking requests, no SSR embedded data, no structured HTML/feed data, and no page-context fetch evidence
+
+When this happens, do not continue to Phase 2 with a challenge-page spec. Present via `AskUserQuestion`:
+
+> "The browser capture only saw challenge or login pages, so it did not discover the real website data/API surface. What should we do next?"
+>
+> 1. **Try cleared-browser capture again** — "Open/attach Chrome, solve the challenge, then repeat the browser-sniff."
+> 2. **I'll provide a HAR from DevTools** — "You browse the target site in Chrome and export the HAR. I analyze it for discovery, then keep only routes that pass replayability checks."
+> 3. **Discuss alternate CLI scope** — "Only now consider RSS/docs/official API/browser-backed command scope."
+
+Only option 3 may lead to an RSS-first, official API, docs-only, or narrower-scope proposal. Record the failed capture in `$DISCOVERY_DIR/browser-sniff-report.md` if a report is written.
+
 #### Step 2d: Cookie auth validation (authenticated browser-sniff only)
 
 **Skip this step if:** The browser-sniff was anonymous (no session transfer in Step 1d), or the API uses API key / Bearer token auth rather than cookie-based session auth.
@@ -698,19 +724,26 @@ If the thin-results check triggers a re-sniff that discovers additional endpoint
 
 #### Step 3: Analyze capture
 
-Run websniff on the captured traffic:
+Run browser-sniff on the captured traffic. Always write the structured traffic analysis to the discovery directory so it is archived with the manuscript:
 ```bash
-printing-press browser-sniff --har "$DISCOVERY_DIR/browser-sniff-capture.har" --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml"
+printing-press browser-sniff --har "$DISCOVERY_DIR/browser-sniff-capture.har" --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml" --analysis-output "$DISCOVERY_DIR/traffic-analysis.json"
 ```
 
 If using agent-browser's enriched capture format instead:
 ```bash
-printing-press browser-sniff --har "$DISCOVERY_DIR/browser-sniff-capture.json" --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml"
+printing-press browser-sniff --har "$DISCOVERY_DIR/browser-sniff-capture.json" --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml" --analysis-output "$DISCOVERY_DIR/traffic-analysis.json"
 ```
 
 #### Step 4: Report and update spec source
 
 Report: "Browser-Sniff discovered **N endpoints** across **M resources**. [X new endpoints not in the original spec.]"
+
+Read `$DISCOVERY_DIR/traffic-analysis.json` before reporting. If it includes:
+- `"reachability": {"mode": "browser_clearance_http", ...}` — report: "Direct HTTP is blocked; generation will use browser-compatible HTTP plus `auth login --chrome` cookie import. After generation, test whether Surf + imported cookies can replay the captured requests without a resident browser."
+- Useful same-site HTML document captures — report: "Browser-Sniff found replayable HTML pages; generation can emit `response_format: html` commands that extract metadata and filtered links without a resident browser."
+- `"reachability": {"mode": "browser_required", ...}` — report: "The captured surface appears to require live page-context execution. This is not a shippable runtime shape for ordinary printed CLI commands. Return to discovery for a Surf/direct/browser-clearance replayable surface such as HTML, SSR data, RSS, JSON-LD, or a lighter internal endpoint, or HOLD the run."
+
+Also report the runtime shape the printed CLI will use: standard HTTP, Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, structured HTML/SSR/RSS extraction, or HOLD because no replayable surface was found.
 
 Update the spec source for Phase 2:
 - **Enrichment mode**: Phase 2 will use `--spec <original> --spec <sniff-spec> --name <api>` to merge both
@@ -735,15 +768,24 @@ The report must contain these sections:
 
 4. **Endpoints Discovered** — A markdown table with columns: Method, Path, Status Code, Content-Type, Auth. One row per unique endpoint observed. The Auth column is "public" or "auth-required" (based on Step 2a.1.5 classification). If no authenticated flow was run, omit the Auth column.
 
-5. **Coverage Analysis** — What resource types were exercised (e.g., "collections, workspaces, teams, categories") and what was likely missed. Compare against the Phase 1 research brief to identify gaps (e.g., "Brief mentions 'flows' but no flow endpoints were discovered during browser-sniff").
+5. **Traffic Analysis** — Summarize `$DISCOVERY_DIR/traffic-analysis.json`:
+   - Protocols observed (labels + confidence, e.g., `rest_json`, `graphql`, `google_batchexecute`, `ssr_embedded_data`)
+   - Auth signals (candidate types, header/query/cookie names only -- never values)
+   - Protection signals (Cloudflare/CAPTCHA/login redirects/protected-web hints)
+   - Generation hints (e.g., `requires_browser_auth`, `requires_js_rendering`, `requires_protected_client`, `has_rpc_envelope`)
+   - Candidate commands worth considering
+   - Warnings such as raw protocol envelopes, GraphQL error-only responses, HTML challenge pages, empty payloads, or weak schema evidence
+   Treat warnings as discovery evidence, not publish blockers.
 
-6. **Response Samples** — For each unique response shape (keyed by status code + content-type category), include a truncated sample:
+6. **Coverage Analysis** — What resource types were exercised (e.g., "collections, workspaces, teams, categories") and what was likely missed. Compare against the Phase 1 research brief to identify gaps (e.g., "Brief mentions 'flows' but no flow endpoints were discovered during browser-sniff").
+
+7. **Response Samples** — For each unique response shape (keyed by status code + content-type category), include a truncated sample:
    - JSON/text responses: first 2KB or 100 lines, whichever is smaller
    - Binary responses (images, protobuf, etc.): skip content, include a metadata note: `Binary response: <content-type>, <size> bytes`
    - Aim for one sample per unique shape, not one per endpoint
 
-7. **Rate Limiting Events** — Any 429 responses encountered, delays applied, and effective browser-sniff rate achieved (e.g., "Sniffed 7 endpoints at ~1.5 req/s effective rate, one 429 at request #4").
+8. **Rate Limiting Events** — Any 429 responses encountered, delays applied, and effective browser-sniff rate achieved (e.g., "Sniffed 7 endpoints at ~1.5 req/s effective rate, one 429 at request #4").
 
-8. **Authentication Context** — Whether the browser-sniff used an authenticated session. If yes: transfer method used (auto-connect / profile / headed login / HAR), which endpoints were only reachable with auth (e.g., "order history, saved addresses, rewards required login"), the auth header scheme discovered (e.g., "Authorization: PagliacciAuth {customerId}|{authToken}", "Bearer token from localStorage"), and confirmation that session state was excluded from manuscript archiving. If no: "No authenticated session used."
+9. **Authentication Context** — Whether the browser-sniff used an authenticated session. If yes: transfer method used (auto-connect / profile / headed login / HAR), which endpoints were only reachable with auth (e.g., "order history, saved addresses, rewards required login"), the auth header scheme discovered (e.g., "Authorization: CustomerAuth {customerId}|{authToken}", "Bearer token from localStorage"), and confirmation that session state was excluded from manuscript archiving. If no: "No authenticated session used."
 
-9. **Bundle Extraction** — If JS bundle extraction ran (Step 2a.2.7), list: the bundle URL analyzed, the API base URL discovered, endpoints found only in the bundle (not during interactive browser-sniff), and any API config extracted (version headers, auth construction patterns). If bundle extraction did not run, omit this section.
+10. **Bundle Extraction** — If JS bundle extraction ran (Step 2a.2.7), list: the bundle URL analyzed, the API base URL discovered, endpoints found only in the bundle (not during interactive browser-sniff), and any API config extracted (version headers, auth construction patterns). If bundle extraction did not run, omit this section.

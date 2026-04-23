@@ -11,6 +11,8 @@ This repo contains **the machine** (generator, templates, binary, skills) that p
 
 **Never change the machine for one CLI's edge case** unless explicitly told to. If a fix only helps Pagliacci but would be wrong for Stripe, it doesn't belong in the generator. Add a conditional with a clear guard, or leave it as a printed-CLI-level fix.
 
+**Do not hardcode one API/site into reusable machine artifacts.** Skills, templates, generator code, prompts, and shared docs must use placeholders or generic phrasing (`<api>`, `<site>`, "the target site") unless the text is explicitly labeled as an example or test fixture. A Product Hunt, Pagliacci, Stripe, etc. name in reusable guidance is usually a bug: it leaks one investigation into every future printed CLI. If a concrete example is useful, put it in an "Example:" paragraph and keep the operational instruction generic.
+
 **When iterating on a printed CLI to discover issues**, note which problems are systemic (retro findings) vs specific. The retro → plan → implement loop exists to feed discoveries from individual CLIs back into the machine.
 
 **When adding a capability that affects scoring**, update the scorer in the same change. The goal is not to inflate scores — it's to ensure the scorer accurately reflects the capability. If you add composed cookie auth but the scorer only recognizes Bearer/Basic, it will penalize a correctly-implemented CLI. Fix the scorer to recognize the new pattern, not to give it a free pass.

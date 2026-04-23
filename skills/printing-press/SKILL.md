@@ -401,18 +401,18 @@ Before new research:
    - **multiSelect:** `false`
    - **options:**
      1. **label:** `"<SiteName>'s official API"` — **description:** `"Build a CLI for <SiteName>'s documented API (e.g. REST endpoints, webhooks, OAuth)"`
-     2. **label:** `"The <SiteName> website itself"` — **description:** `"Build a CLI that does what the website does — I'll figure out the underlying API by exploring the site"`
+     2. **label:** `"The <SiteName> website itself"` — **description:** `"Build from the website itself — I may open or attach to Chrome during generation to capture site traffic, then generate a lightweight CLI from replayable HTTP/HTML surfaces"`
 
    The user can also pick the automatic "Other" option to describe what they're after in free text.
 
    **Routing after disambiguation:**
    - "<SiteName>'s official API" → use `<api>` as the argument, proceed with normal discovery (Phase 1 research, then Phase 1.7 browser-sniff gate evaluates independently as usual)
-   - "The <SiteName> website itself" → use `<api>` as the argument, set `BROWSER_SNIFF_TARGET_URL=<url>`. Proceed to Phase 1 research. When Phase 1.7 is reached, skip the browser-sniff gate decision and go directly to "If user approves browser-sniff" (the user already approved in Phase 0 — do not re-ask). Use `BROWSER_SNIFF_TARGET_URL` as the starting URL for browser capture.
+   - "The <SiteName> website itself" → use `<api>` as the argument, set `BROWSER_SNIFF_TARGET_URL=<url>`. Proceed to Phase 1 research. When Phase 1.7 is reached, skip the browser-sniff gate decision and go directly to "If user approves browser-sniff" (the user already approved temporary browser discovery in Phase 0 — do not re-ask). Use `BROWSER_SNIFF_TARGET_URL` as the starting URL for browser capture. The printed CLI must still use a replayable runtime surface; do not ship a resident browser transport.
    - "Other" → read the user's free-form response and adapt
 
    **End of URL detection.** The remaining spec resolution rules apply when the argument is NOT a URL:
 
-   - If the user passed `--har <path>`, this is a HAR-first run. Run `printing-press browser-sniff --har <path> --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml"` to generate a spec from captured traffic. Use the generated spec as the primary spec source for the rest of the pipeline. Skip the browser-sniff gate in Phase 1.7 (browser-sniff already ran).
+   - If the user passed `--har <path>`, this is a HAR-first run. Run `printing-press browser-sniff --har <path> --name <api> --output "$RESEARCH_DIR/<api>-browser-sniff-spec.yaml" --analysis-output "$DISCOVERY_DIR/traffic-analysis.json"` to generate a spec and traffic analysis from captured traffic. Use the generated spec as the primary spec source for the rest of the pipeline. Skip the browser-sniff gate in Phase 1.7 (browser-sniff already ran).
    - If the user passed `--spec`, use it directly (existing behavior).
    - Otherwise, proceed with normal discovery (catalog, KnownSpecs, apis-guru, web search).
 2. Check for prior research in:
@@ -693,6 +693,10 @@ Set `AUTH_SESSION_AVAILABLE=true` if the user selects option 1 or 2. The Browser
 
 After Phase 1 research, evaluate whether browser-sniffing the live site would improve the spec. This phase MUST produce a decision marker file for every source named in the briefing before Phase 1.5 can proceed.
 
+**Browser discovery is temporary discovery, not a printed-CLI runtime.** Use browser-use, agent-browser, or a manual HAR to learn the hidden web contract: URLs, methods, persisted GraphQL hashes, BFF envelopes, response shapes, cookies, CSRF/header construction, HTML/SSR/RSS/JSON-LD surfaces, and whether replay is viable. The final printed CLI must use replayable HTTP, Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, or structured HTML/SSR/RSS extraction. If the only working path requires live page-context execution, HOLD or pivot scope — do not generate a resident browser sidecar transport.
+
+**Automatic offer, explicit consent.** The Printing Press decides when browser discovery should be offered, but opening Chrome, attaching to a browser session, installing browser-use/agent-browser, or asking the user to solve a challenge requires explicit user approval through the Phase 0 website choice or the Phase 1.7 `AskUserQuestion` prompt.
+
 ### Enforcement: the browser-browser-sniff-gate.json marker file
 
 Phase 1.7 is a hard gate. Phase 1.5 reads a marker file and refuses to proceed without it. The model cannot skip this phase by reasoning around it.
@@ -720,7 +724,7 @@ Phase 1.7 is a hard gate. Phase 1.5 reads a marker file and refuses to proceed w
 - `approved` — user selected a browser-sniff option via `AskUserQuestion`. Proceed to "If user approves browser-sniff".
 - `declined` — user explicitly declined browser-sniff via `AskUserQuestion`. Proceed to "If user declines browser-sniff".
 - `skip-silent` — gate was silently skipped per the decision matrix (spec complete, `--har` provided, `--spec` provided, or login required with `AUTH_SESSION_AVAILABLE=false`). The `reason` field names which.
-- `pre-approved` — user already chose "The website itself" in Phase 0, so `BROWSER_SNIFF_TARGET_URL` was set and the question was answered there.
+- `pre-approved` — user already chose "The website itself" in Phase 0, where the prompt disclosed temporary Chrome/browser capture during generation, so `BROWSER_SNIFF_TARGET_URL` was set and the question was answered there.
 
 **Every path through Phase 1.7 MUST write a marker entry** — approve, decline, and every silent-skip case. There is no code path that proceeds to Phase 1.5 without writing the marker.
 
@@ -731,6 +735,7 @@ Phase 1.7 is a hard gate. Phase 1.5 reads a marker file and refuses to proceed w
 The following rationales are NOT valid reasons to skip the browser-sniff gate. If any of these apply, you MUST still ask the user via `AskUserQuestion` and record their answer in the marker file:
 
 - **"The target is client-rendered and needs Playwright"** — browser capture tools (browser-use, agent-browser) exist specifically to handle client-rendered sites. A hard-to-browser-sniff target is not the same as an impossible one. Ask.
+- **"Direct HTTP/curl got 403, 429, Cloudflare, Vercel, WAF, DataDome, or bot-detection HTML"** — direct HTTP reachability failure is exactly when browser capture is valuable. Do not pivot to RSS, docs-only, official API, or a smaller product shape before attempting the approved browser-sniff. Route to cleared-browser capture instead.
 - **"The 3-minute time budget looks tight"** — the time budget applies AFTER the user approves browser-sniff, not before. You do not pre-judge whether a browser-sniff will fit the budget. Ask. If the budget blows after the user approves, fall back per the Time Budget rules below.
 - **"We have a substitute data source from another API"** — substituting one source for another is the user's call, not yours. If the user named a specific site or feature (e.g., Kayak /direct), they chose it deliberately. Ask about that exact source. Offering a different data source is a separate conversation AFTER the gate, not a reason to skip it.
 - **"Installing browser-use or agent-browser is friction"** — the browser-sniff capture reference already documents the install path. Tooling friction is not a valid skip reason. Ask.
@@ -769,13 +774,26 @@ These are the only cases where Phase 1.7 is bypassed as a whole (not just skippe
 - User passed `--har` → marker: `{ "source_name": "<api>", "decision": "skip-silent", "reason": "user-provided-har" }`
 - `BROWSER_SNIFF_TARGET_URL` is set from Phase 0 (user chose "The website itself") → marker: `{ "source_name": "<api>", "decision": "pre-approved", "reason": "phase-0-website-choice" }`, then go directly to "If user approves browser-sniff"
 
+### Direct HTTP challenge rule
+
+If a reachability probe during Phase 1 research returns bot-protection evidence (`403`, `429`, `cf-mitigated: challenge`, `x-vercel-mitigated: challenge`, `x-vercel-challenge-token`, AWS WAF, DataDome, PerimeterX, CAPTCHA, "Just a moment", "access denied"), treat it as a **browser-sniff escalation signal**, not as a browser-sniff failure.
+
+When browser-sniff is approved or pre-approved:
+- Do **not** offer alternate CLI shapes (RSS-first, official API, docs-only, narrower scope, "try anyway") before a real browser capture has been attempted.
+- Do **not** write the brief as if browser-sniff is complete after only curl/direct HTTP probes.
+- Proceed to "If user approves browser-sniff" and explicitly tell the user: "Direct HTTP is blocked by `<protection>`, so I need a real browser capture. I will open or attach to Chrome; please solve the challenge and navigate the target flow."
+- If browser automation tooling is unavailable, offer the user a manual HAR path before offering any scope pivot.
+
+Only after the browser capture attempt fails by the criteria in `references/browser-sniff-capture.md` may you ask whether to pivot to RSS, official API, docs-only, or a smaller CLI scope.
+
 ### Time budget
 
 The browser-sniff gate should complete within 3 minutes of the user approving browser-sniff. If browser automation tooling fails to produce results after 3 minutes of attempts, fall back immediately:
 - If a spec already exists (enrichment mode): "Browser-Sniff failed after 3 minutes — proceeding with existing spec."
 - If no spec exists (primary mode): "Browser-Sniff failed after 3 minutes — falling back to --docs generation."
+- If browser-sniff was approved or pre-approved and direct HTTP showed challenge/bot-protection evidence, do **not** auto-fall back to docs/official API, even when `BROWSER_SNIFF_TARGET_URL` is unset. Ask whether the user wants to provide a HAR manually, retry cleared-browser capture, or discuss alternate CLI scope.
 
-Do NOT spend time debugging tool integration issues. The browser-sniff is optional enrichment, not a blocking requirement. If the first approach fails, fall back to the next option — do not retry the same broken approach.
+Do NOT spend time debugging tool integration issues. Browser-sniff is a temporary discovery aid, not the product runtime. If the first approach fails, fall back to the next option — do not retry the same broken approach.
 
 **The time budget applies AFTER the user approves.** Do not use it as a reason to skip the gate before asking.
 
@@ -794,14 +812,20 @@ Do NOT spend time debugging tool integration issues. The browser-sniff is option
 
 **When the decision matrix says "Offer browser-sniff", you MUST ask the user via `AskUserQuestion`.** Skipping the question and writing a `skip-silent` marker is a contract violation — `skip-silent` is only valid when the matrix says "Skip silently" or one of the Banned Skip Reasons is the only thing holding you back (in which case, you should be asking anyway).
 
+Every browser-sniff approval prompt must make the consent boundary explicit:
+- browser discovery may open or attach to Chrome during generation,
+- it may ask the user to log in or solve a challenge,
+- it may request permission to install or upgrade browser-use/agent-browser if missing,
+- the printed CLI will only ship if discovery finds a replayable surface and will not keep a browser running as normal command transport.
+
 ### Browser-Sniff as enrichment (spec exists but has gaps)
 
 Present to the user via `AskUserQuestion`:
 
-> "Found a spec with **N endpoints**, but research shows the live API likely has more (competitors reference M+ features). Want me to browser-sniff `<url>` to discover endpoints the spec missed? I'll check for browser-use or agent-browser and install if needed."
+> "Found a spec with **N endpoints**, but research shows the live API likely has more (competitors reference M+ features). Want me to use temporary browser discovery on `<url>` to find replayable endpoints the spec missed? I may open or attach to Chrome during generation, and I will ask before installing or upgrading browser-use/agent-browser."
 >
 > Options:
-> 1. **Yes — browser-sniff and merge** (browse the site, capture traffic, merge discovered endpoints with the existing spec. Installs capture tools if needed.)
+> 1. **Yes — browser-sniff and merge** (temporarily open or attach to Chrome during generation, capture traffic, then merge only replayable discovered endpoints with the existing spec. Ask before installing capture tools.)
 > 2. **No — use existing spec** (proceed with what we have)
 
 ### Browser-Sniff as primary (no spec found)
@@ -811,8 +835,8 @@ Present to the user via `AskUserQuestion`. **If `AUTH_SESSION_AVAILABLE=true`**,
 > "No OpenAPI spec found for `<API>`. Want me to browser-sniff `<likely-url>` to discover the API from live traffic?"
 >
 > Options:
-> 1. **Yes — authenticated browser-sniff** (use your browser session to discover both public and authenticated endpoints. Recommended since you confirmed a session.) *(Only show when `AUTH_SESSION_AVAILABLE=true`)*
-> 2. **Yes — browser-sniff the live site** (browse `<url>` anonymously, capture API calls, generate a spec. Installs capture tools if needed.)
+> 1. **Yes — authenticated browser-sniff** (temporarily open or attach to Chrome during generation, use your browser session to discover public and authenticated traffic, and generate only replayable CLI surfaces. Recommended since you confirmed a session.) *(Only show when `AUTH_SESSION_AVAILABLE=true`)*
+> 2. **Yes — browser-sniff the live site** (temporarily browse `<url>` anonymously, capture API/HTML traffic, and generate a spec only from replayable surfaces. Ask before installing capture tools.)
 > 3. **No — use docs instead** (attempt `--docs` generation from documentation pages)
 > 4. **No — I'll provide a spec or HAR** (user will supply input manually)
 
@@ -851,8 +875,8 @@ The browser-sniff will walk through this goal as an interactive user flow. Secon
 State the goal explicitly before proceeding: "Primary browser-sniff goal: [goal]. I will walk through this as a user flow."
 
 Then read and follow [references/browser-sniff-capture.md](references/browser-sniff-capture.md) for the complete
-browser-sniff implementation: tool detection, installation, session transfer, browser-use/agent-browser
-capture, HAR analysis, and discovery report writing.
+browser-sniff implementation: tool detection, installation, session transfer, browser-use/agent-browser/manual HAR
+capture, replayability analysis, and discovery report writing.
 
 ### If user declines browser-sniff
 
@@ -1186,17 +1210,17 @@ Print as regular text output:
 >
 > ## Novel Features (my ideas, not found in any existing tool)
 >
-> Beyond absorbing what exists, I came up with [M] features that no existing tool has. Here are the top 3:
+> Beyond absorbing what exists, I came up with [M] features that no existing tool has. These are all in the proposed shipping scope:
 >
 > 1. **[Feature name]** ([score]/10) — [one-line description]. Evidence: [what research finding inspired this].
 > 2. **[Feature name]** ([score]/10) — [one-line description]. Evidence: [source].
 > 3. **[Feature name]** ([score]/10) — [one-line description]. Evidence: [source].
->
-> Plus [M-3] more in the full manifest.
+> 4. **[Feature name]** ([score]/10) — [one-line description]. Evidence: [source].
+> ...
 >
 > Total: [N+M] features, [Z]% more than [best existing tool name] ([best tool feature count]).
 
-If fewer than 3 novel features scored >= 5/10, show all qualifying features instead of "top 3." If 0 qualified, note: "No novel features scored high enough to recommend. The absorbed features cover the landscape well."
+Show every qualifying novel feature that scored >= 5/10. Do not hide novel features behind "Plus [N] more" or "see full manifest" language — the gate is where the user decides whether these ideas belong in scope, so every proposed novel feature deserves a short readout. If there are more than 12 qualifying novel features, group them by `group` and list all feature names with one-line descriptions under each group. If 0 qualified, note: "No novel features scored high enough to recommend. The absorbed features cover the landscape well."
 
 **Part 2: AskUserQuestion**
 
@@ -1227,6 +1251,16 @@ WAIT for approval. Do NOT generate until approved.
 
 Before spending tokens on generation, verify the API actually responds to programmatic requests. One real HTTP call. If it fails, STOP.
 
+**Exception for browser-clearance/browser-sniffed website CLIs:** If Phase 1.7 produced a successful browser capture and `$DISCOVERY_DIR/traffic-analysis.json` reports `reachability.mode` as `browser_clearance_http` or `browser_http`, a plain `curl` 403/429 is expected evidence, not a hard stop. In that case the reachability gate passes only if:
+- the browser-sniff capture contains useful non-challenge traffic (real API, SSR data, structured HTML, RSS/feed data, or page-context fetch evidence), and
+- Phase 2 will pass `--traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json"` so the generator can emit browser-compatible HTTP transport and, for `browser_clearance_http`, Chrome cookie import.
+
+Do not treat a persistent browser sidecar as a shippable CLI runtime. Browsers are allowed for Printing Press discovery and reusable auth/clearance capture; ordinary printed CLI commands must replay through direct HTTP, Surf/browser-compatible HTTP, or stored reusable auth state. If traffic analysis reports `browser_required`, return to discovery to find a replayable HTTP/HTML/RSS/SSR surface or HOLD the run.
+
+Useful same-site HTML document pages count as a replayable surface when they return real content, not challenge/login pages. Browser-sniff can promote these into `response_format: html` endpoints so generated commands extract page metadata and filtered links through Surf/direct HTTP instead of keeping a browser sidecar alive.
+
+If the browser capture contained only challenge/login/error pages, this exception does not apply.
+
 ### The Check
 
 Pick the simplest GET endpoint from the resolved spec (no required params, no auth if possible). If no such endpoint exists, use the spec's base URL. Run one HTTP request:
@@ -1239,14 +1273,16 @@ Or use `WebFetch` if curl is unavailable. The goal is one real response code.
 
 ### Decision Matrix
 
-| Result | Browser-Sniff gate failed? | Research found 403 issues? | Action |
-|--------|-------------------|---------------------------|--------|
+| Result | Browser capture result | Traffic-analysis reachability | Action |
+|--------|------------------------|-------------------------------|--------|
 | 2xx/3xx | Any | Any | **PASS** - proceed to Phase 2 |
-| 401 (no key provided) | No | No | **PASS** - expected when API needs auth and user declined key gate |
-| 403 with HTML/bot detection | Any | Any | **HARD STOP** |
-| 403 | Yes (bot detection) | Any | **HARD STOP** |
-| 403 | No | Yes (issues found) | **HARD STOP** |
-| 403 | No | No | **WARN** - ask user |
+| 401 (no key provided) | Any | Any | **PASS** - expected when API needs auth and user declined key gate |
+| 403/429 with HTML/bot detection | Successful useful capture | `browser_http` or `browser_clearance_http` | **PASS** - proceed with browser-compatible HTTP / clearance strategy |
+| Any | Capture only works through a live page context | `browser_required` | **HOLD** - find a lighter replayable surface before Phase 2 |
+| 403/429 with HTML/bot detection | No browser capture attempted but browser-sniff approved/pre-approved | Any | **RETURN TO PHASE 1.7** - attempt cleared-browser capture before pivoting scope |
+| 403/429 with HTML/bot detection | Capture contains only challenge/error pages | Any | **HARD STOP** |
+| 403 | No successful useful capture | Research found 403 issues | **HARD STOP** |
+| 403 | No successful useful capture | No 403 research issues | **WARN** - ask user |
 | Timeout/DNS/connection refused | Any | Any | **WARN** - ask user |
 
 ### On HARD STOP
@@ -1348,6 +1384,7 @@ printing-press generate \
   --output "$CLI_WORK_DIR" \
   --research-dir "$API_RUN_DIR" \
   --spec-source browser-sniffed \
+  --traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json" \
   --force --lenient --validate
 # If proxy pattern was detected during browser-sniff, add:
 #   --client-pattern proxy-envelope
@@ -1361,6 +1398,7 @@ printing-press generate \
   --output "$CLI_WORK_DIR" \
   --research-dir "$API_RUN_DIR" \
   --spec-source browser-sniffed \
+  --traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json" \
   --force --lenient --validate
 # If proxy pattern was detected during browser-sniff, add:
 #   --client-pattern proxy-envelope
@@ -1398,6 +1436,7 @@ printing-press generate \
   --name <api> \
   --output "$CLI_WORK_DIR" \
   --research-dir "$API_RUN_DIR" \
+  --traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json" \
   --force --lenient --validate
 ```
 
@@ -1645,7 +1684,7 @@ Ship threshold:
 - `verify` verdict is `PASS` or high `WARN` with 0 critical failures
 - `dogfood` no longer fails because of spec parsing, binary path, or skipped examples
 - `dogfood` wiring checks pass (no unregistered commands, no config field mismatches)
-- `workflow-verify` verdict is `workflow-pass` or `unverified-needs-auth` (not `workflow-fail`)
+- `workflow-verify` verdict is `workflow-pass` or `unverified-needs-auth` (not `workflow-fail`). Exception: if the spec or traffic analysis marks browser-session/browser-clearance auth as required, `unverified-needs-auth` is a `hold` verdict until `auth login --chrome`, `doctor --json`, and a read-only browser-session proof pass against the real site.
 - `verify-skill` exits 0 (no mechanical mismatches between SKILL.md and CLI source). Treat non-zero as a fix-before-ship blocker — the SKILL is what agents read; if it lies about the CLI, the lie ships.
 - `scorecard` is at least 65 and **no flagship or approved-in-Phase-1.5 feature returns wrong/empty output**
 
@@ -1987,7 +2026,7 @@ cp -r "$RESEARCH_DIR" "$PRESS_MANUSCRIPTS/$API_SLUG/$RUN_ID/research" 2>/dev/nul
 cp -f "$API_RUN_DIR/research.json" "$PRESS_MANUSCRIPTS/$API_SLUG/$RUN_ID/research.json" 2>/dev/null || true
 cp -r "$PROOFS_DIR" "$PRESS_MANUSCRIPTS/$API_SLUG/$RUN_ID/proofs" 2>/dev/null || true
 
-# Archive discovery artifacts (browser-sniff captures, URL lists, browser-sniff report).
+# Archive discovery artifacts (browser-sniff captures, URL lists, traffic analysis, browser-sniff report).
 # Remove session state before archiving — contains authentication cookies/tokens.
 rm -f "$DISCOVERY_DIR/session-state.json"
 

@@ -410,8 +410,10 @@ def check_positional_args(cli_dir: Path, skill: Path, cli_binary: str, report: R
         if any(p.startswith("$") for p in positional):
             fp = True
         # For single-token cmd_path where positional[0] is lowercase+alpha,
-        # the parser may have under-counted cmd_path.
-        if len(cmd_path) == 1 and positional and re.match(r"^[a-z][a-z0-9-]+$", positional[0]):
+        # the parser may have under-counted cmd_path. Accept hyphens AND
+        # underscores so snake_case subcommands (e.g. category_page_query
+        # from a GraphQL BFF expansion) classify as false positives.
+        if len(cmd_path) == 1 and positional and re.match(r"^[a-z][a-z0-9_-]+$", positional[0]):
             fp = True
 
         max_display = "∞" if max_ok == float("inf") else int(max_ok)
