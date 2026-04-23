@@ -101,6 +101,12 @@ func autoRefreshIfStale(ctx context.Context, flags *rootFlags, resources []strin
 		meta.Reason = "no_resources"
 		return meta
 	}
+	policy := cachePolicy()
+	if policy.EnvOptOut != "" && os.Getenv(policy.EnvOptOut) == "1" {
+		meta.Decision = "skipped"
+		meta.Reason = "env_opt_out"
+		return meta
+	}
 	dbPath := defaultDBPath("{{.Name}}-pp-cli")
 	db, err := store.Open(dbPath)
 	if err != nil {
@@ -112,12 +118,6 @@ func autoRefreshIfStale(ctx context.Context, flags *rootFlags, resources []strin
 	}
 	defer db.Close()
 
-	policy := cachePolicy()
-	if policy.EnvOptOut != "" && os.Getenv(policy.EnvOptOut) == "1" {
-		meta.Decision = "skipped"
-		meta.Reason = "env_opt_out"
-		return meta
-	}
 	decision, err := cliutil.EnsureFresh(ctx, db.DB(), resources, policy)
 	meta.Decision = decision.String()
 	if err != nil {

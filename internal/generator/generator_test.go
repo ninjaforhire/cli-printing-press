@@ -160,6 +160,16 @@ func TestGenerateFreshnessHelperEmitted(t *testing.T) {
 	} {
 		assert.Contains(t, src, snippet, "auto_refresh.go missing %q", snippet)
 	}
+	optOutIndex := strings.Index(src, "env_opt_out")
+	openStoreIndex := strings.Index(src, "store.Open(dbPath)")
+	require.NotEqual(t, -1, optOutIndex, "auto_refresh.go must report env opt-out")
+	require.NotEqual(t, -1, openStoreIndex, "auto_refresh.go must open the store after opt-out checks")
+	assert.Less(t, optOutIndex, openStoreIndex, "env opt-out must be checked before opening/migrating the store")
+
+	dataSource, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "data_source.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(dataSource), "freshness_checked",
+		"auto mode must stay API-first because local reads do not apply filters/scopes")
 
 	// Root command must wire the hook.
 	rootSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "root.go"))
@@ -183,6 +193,25 @@ func TestGenerateFreshnessHelperEmitted(t *testing.T) {
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "build", "./...")
 	runGoCommand(t, outputDir, "test", "./internal/cliutil/...")
+}
+
+func TestGenerateFreshnessRejectsGeneratedCommandCollision(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := spec.Parse(filepath.Join("..", "..", "testdata", "stytch.yaml"))
+	require.NoError(t, err)
+	apiSpec.Cache = spec.CacheConfig{
+		Enabled: true,
+		Commands: []spec.CacheCommand{
+			{Name: "users list", Resources: []string{"users"}},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	err = gen.Generate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already covered by generated resource freshness")
 }
 
 // TestGenerateShareEmittedWhenEnabled verifies the end-to-end share

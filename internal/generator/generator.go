@@ -1591,6 +1591,9 @@ func (g *Generator) validateFreshnessCommandCoverage() error {
 		syncable[resource.Name] = struct{}{}
 	}
 	for _, command := range g.Spec.Cache.Commands {
+		if _, collides := generatedFreshnessCommandNames(command.Name, syncable); collides {
+			return fmt.Errorf("cache.commands[%s]: command path is already covered by generated resource freshness", command.Name)
+		}
 		for _, resource := range command.Resources {
 			if _, ok := syncable[resource]; !ok {
 				return fmt.Errorf("cache.commands[%s]: resource %q is not syncable and cannot be auto-refreshed", command.Name, resource)
@@ -1598,6 +1601,26 @@ func (g *Generator) validateFreshnessCommandCoverage() error {
 		}
 	}
 	return nil
+}
+
+func generatedFreshnessCommandNames(name string, syncable map[string]struct{}) (string, bool) {
+	parts := strings.Fields(name)
+	if len(parts) == 0 {
+		return "", false
+	}
+	if _, ok := syncable[parts[0]]; !ok {
+		return "", false
+	}
+	if len(parts) == 1 {
+		return parts[0], true
+	}
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "list", "get", "search":
+			return strings.Join(parts, " "), true
+		}
+	}
+	return "", false
 }
 
 func commandConstructorForTemplate(tmpl string) string {

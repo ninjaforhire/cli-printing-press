@@ -99,12 +99,6 @@ func resolveRead(c *client.Client, flags *rootFlags, resourceType string, isList
 		return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
 
 	default: // "auto"
-{{- if .Cache.Enabled}}
-		localData, prov, localErr := resolveLocal(resourceType, isList, path, params, "freshness_checked")
-		if localErr == nil {
-			return localData, attachFreshness(prov, flags), nil
-		}
-{{- end}}
 		data, err := c.Get(path, params)
 		if err == nil {
 			writeThroughCache(resourceType, data)
@@ -139,12 +133,6 @@ func resolvePaginatedRead(c *client.Client, flags *rootFlags, resourceType strin
 		return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
 
 	default: // "auto"
-{{- if .Cache.Enabled}}
-		localData, prov, localErr := resolveLocal(resourceType, true, path, params, "freshness_checked")
-		if localErr == nil {
-			return localData, attachFreshness(prov, flags), nil
-		}
-{{- end}}
 		data, err := paginatedGet(c, path, params, fetchAll, cursorParam, nextCursorPath, hasMoreField)
 		if err == nil {
 			writeThroughCache(resourceType, data)
