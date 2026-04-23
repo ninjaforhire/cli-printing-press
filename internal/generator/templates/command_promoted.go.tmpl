@@ -68,6 +68,20 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- end}}
 {{- end}}
 
+{{- if .Endpoint.UsesHTMLResponse}}
+			htmlRequestParams := map[string]string{}
+{{- range $i, $p := .Endpoint.Params}}
+{{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
+			htmlRequestParams["{{.Name}}"] = args[{{$i}}]
+{{- end}}
+{{- if not .Positional}}
+			if flag{{camel .Name}} != {{zeroValForParam .Name .Type}} {
+				htmlRequestParams["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel .Name}})
+			}
+{{- end}}
+{{- end}}
+{{- end}}
+
 {{- if .Endpoint.Pagination}}
 {{- if .HasStore}}
 			data, prov, err := resolvePaginatedRead(c, flags, "{{lower .ResourceName}}", path, map[string]string{
@@ -114,6 +128,26 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 				return classifyAPIError(err)
 			}
 
+{{- if .Endpoint.UsesHTMLResponse}}
+			if !flags.dryRun {
+				data, err = extractHTMLResponse(data, htmlExtractionOptions{
+					Mode: "{{with .Endpoint.HTMLExtract}}{{.EffectiveMode}}{{else}}page{{end}}",
+					BaseURL: htmlExtractionRequestURL(c.BaseURL, path, htmlRequestParams),
+					LinkPrefixes: []string{
+{{- with .Endpoint.HTMLExtract}}
+{{- range .LinkPrefixes}}
+						{{printf "%q" .}},
+{{- end}}
+{{- end}}
+					},
+					Limit: {{with .Endpoint.HTMLExtract}}{{.Limit}}{{else}}0{{end}},
+				})
+				if err != nil {
+					return err
+				}
+			}
+
+{{- end}}
 {{- if .HasStore}}
 			// Unwrap API response envelopes (e.g. {"status":"success","data":[...]})
 			// so output helpers see the inner data, not the wrapper.

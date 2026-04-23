@@ -83,6 +83,10 @@ func (m *SessionManager) AttachTo(c *http.Client) {
 	}
 }
 
+func (m *SessionManager) CookieJar() http.CookieJar {
+	return m.jar
+}
+
 // Token returns the cached token without triggering a network call. Empty
 // string when no session is established or the cache was invalidated.
 func (m *SessionManager) Token() string {
@@ -109,7 +113,9 @@ func (m *SessionManager) EnsureToken() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("session bootstrap: %w", err)
 		}
+{{- if not .UsesBrowserManagedUserAgent}}
 		req.Header.Set("User-Agent", sessionUserAgent)
+{{- end}}
 		resp, err := m.client.Do(req)
 		if err != nil {
 			return "", fmt.Errorf("session bootstrap: %w", err)
@@ -123,7 +129,9 @@ func (m *SessionManager) EnsureToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("session token fetch: %w", err)
 	}
+{{- if not .UsesBrowserManagedUserAgent}}
 	req.Header.Set("User-Agent", sessionUserAgent)
+{{- end}}
 	if sessionTokenFormat == "json" {
 		req.Header.Set("Accept", "application/json")
 	}

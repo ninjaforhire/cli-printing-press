@@ -39,6 +39,21 @@ type planRootData struct {
 	ParentCommands   []planParentCommand
 }
 
+type planGoModData struct {
+	Owner     string
+	CLIName   string
+	VisionSet struct{ Store, MCP bool }
+	Config    struct{ Format string }
+}
+
+func (planGoModData) UsesBrowserHTTPTransport() bool {
+	return false
+}
+
+func (planGoModData) HasHTMLExtraction() bool {
+	return false
+}
+
 // GenerateFromPlan creates a CLI scaffold from a parsed plan spec.
 func GenerateFromPlan(planSpec *PlanSpec, outputDir string) error {
 	cliName := planSpec.CLIName
@@ -133,12 +148,7 @@ func GenerateFromPlan(planSpec *PlanSpec, outputDir string) error {
 	}
 
 	// Render go.mod (reuse existing template with minimal data)
-	goModData := struct {
-		Owner     string
-		CLIName   string
-		VisionSet struct{ Store, MCP bool }
-		Config    struct{ Format string }
-	}{
+	goModData := planGoModData{
 		Owner:   owner,
 		CLIName: cliName,
 		Config:  struct{ Format string }{Format: ""},

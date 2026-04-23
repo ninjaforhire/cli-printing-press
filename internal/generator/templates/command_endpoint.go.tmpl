@@ -113,6 +113,20 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 {{- end}}
 {{- end}}
 
+{{- if .Endpoint.UsesHTMLResponse}}
+			htmlRequestParams := map[string]string{}
+{{- range $i, $p := .Endpoint.Params}}
+{{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
+			htmlRequestParams["{{.Name}}"] = args[{{$i}}]
+{{- end}}
+{{- if and (not .Positional) (not .PathParam)}}
+			if flag{{camel .Name}} != {{zeroValForParam .Name .Type}} {
+				htmlRequestParams["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel .Name}})
+			}
+{{- end}}
+{{- end}}
+{{- end}}
+
 {{- if .Endpoint.HeaderOverrides}}
 			headerOverrides := map[string]string{
 {{- range .Endpoint.HeaderOverrides}}
@@ -183,9 +197,19 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
+{{- if or (eq .Type "object") (eq .Type "array")}}
+				if body{{camel .Name}} != "" {
+					var parsed{{camel .Name}} any
+					if err := json.Unmarshal([]byte(body{{camel .Name}}), &parsed{{camel .Name}}); err != nil {
+						return fmt.Errorf("parsing --{{flagName .Name}} JSON: %w", err)
+					}
+					body["{{.Name}}"] = parsed{{camel .Name}}
+				}
+{{- else}}
 				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
+{{- end}}
 {{- end}}
 			}
 {{- if .Endpoint.HeaderOverrides}}
@@ -214,9 +238,19 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
+{{- if or (eq .Type "object") (eq .Type "array")}}
+				if body{{camel .Name}} != "" {
+					var parsed{{camel .Name}} any
+					if err := json.Unmarshal([]byte(body{{camel .Name}}), &parsed{{camel .Name}}); err != nil {
+						return fmt.Errorf("parsing --{{flagName .Name}} JSON: %w", err)
+					}
+					body["{{.Name}}"] = parsed{{camel .Name}}
+				}
+{{- else}}
 				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
+{{- end}}
 {{- end}}
 			}
 {{- if .Endpoint.HeaderOverrides}}
@@ -239,9 +273,19 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
+{{- if or (eq .Type "object") (eq .Type "array")}}
+				if body{{camel .Name}} != "" {
+					var parsed{{camel .Name}} any
+					if err := json.Unmarshal([]byte(body{{camel .Name}}), &parsed{{camel .Name}}); err != nil {
+						return fmt.Errorf("parsing --{{flagName .Name}} JSON: %w", err)
+					}
+					body["{{.Name}}"] = parsed{{camel .Name}}
+				}
+{{- else}}
 				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
+{{- end}}
 {{- end}}
 			}
 {{- if .Endpoint.HeaderOverrides}}
@@ -257,6 +301,26 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 {{- else}}
 			if err != nil {
 				return classifyAPIError(err)
+			}
+{{- end}}
+
+{{- if .Endpoint.UsesHTMLResponse}}
+			if !flags.dryRun {
+				data, err = extractHTMLResponse(data, htmlExtractionOptions{
+					Mode: "{{with .Endpoint.HTMLExtract}}{{.EffectiveMode}}{{else}}page{{end}}",
+					BaseURL: htmlExtractionRequestURL(c.BaseURL, path, htmlRequestParams),
+					LinkPrefixes: []string{
+{{- with .Endpoint.HTMLExtract}}
+{{- range .LinkPrefixes}}
+						{{printf "%q" .}},
+{{- end}}
+{{- end}}
+					},
+					Limit: {{with .Endpoint.HTMLExtract}}{{.Limit}}{{else}}0{{end}},
+				})
+				if err != nil {
+					return err
+				}
 			}
 {{- end}}
 

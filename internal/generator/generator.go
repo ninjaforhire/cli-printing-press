@@ -2,6 +2,7 @@ package generator
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -117,18 +118,19 @@ type PlaybookEntry struct {
 }
 
 type Generator struct {
-	Spec           *spec.APISpec
-	OutputDir      string
-	VisionSet      VisionTemplateSet
-	FixtureSet     *browsersniff.FixtureSet
-	Sources        []ReadmeSource          // Ecosystem tools to credit in README
-	DiscoveryPages []string                // Pages visited during browser-sniff discovery
-	NovelFeatures  []NovelFeature          // Transcendence features for README/SKILL
-	Narrative      *ReadmeNarrative        // LLM-authored prose for README/SKILL; optional
-	AsyncJobs      map[string]AsyncJobInfo // Detected async-job endpoints, keyed by "<resource>/<endpoint>"
-	profile        *profiler.APIProfile
-	funcs          template.FuncMap
-	templates      map[string]*template.Template
+	Spec            *spec.APISpec
+	OutputDir       string
+	VisionSet       VisionTemplateSet
+	FixtureSet      *browsersniff.FixtureSet
+	TrafficAnalysis *browsersniff.TrafficAnalysis
+	Sources         []ReadmeSource          // Ecosystem tools to credit in README
+	DiscoveryPages  []string                // Pages visited during browser-sniff discovery
+	NovelFeatures   []NovelFeature          // Transcendence features for README/SKILL
+	Narrative       *ReadmeNarrative        // LLM-authored prose for README/SKILL; optional
+	AsyncJobs       map[string]AsyncJobInfo // Detected async-job endpoints, keyed by "<resource>/<endpoint>"
+	profile         *profiler.APIProfile
+	funcs           template.FuncMap
+	templates       map[string]*template.Template
 }
 
 func New(s *spec.APISpec, outputDir string) *Generator {
@@ -400,6 +402,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 			}
 			return out
 		},
+		"whichFallbackEntries": buildWhichFallbackEntries,
 		// firstCommandExample returns a real "resource endpoint" pair for use
 		// in docs that need a runnable example. Prefers read-only verbs when
 		// available (list, get, search, query) to keep examples non-destructive.
@@ -436,6 +439,56 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		},
 	}
 	return g
+}
+
+func buildWhichFallbackEntries(resources map[string]spec.Resource) []NovelFeature {
+	var entries []NovelFeature
+	var resNames []string
+	for name := range resources {
+		resNames = append(resNames, name)
+	}
+	sort.Strings(resNames)
+	for _, rName := range resNames {
+		r := resources[rName]
+		appendEndpoint := func(command string, endpoint spec.Endpoint) {
+			description := strings.TrimSpace(endpoint.Description)
+			if description == "" {
+				description = "Run " + command
+			}
+			entries = append(entries, NovelFeature{
+				Command:     command,
+				Description: description,
+				Group:       rName,
+			})
+		}
+
+		var endpointNames []string
+		for eName := range r.Endpoints {
+			endpointNames = append(endpointNames, eName)
+		}
+		sort.Strings(endpointNames)
+		for _, eName := range endpointNames {
+			appendEndpoint(rName+" "+eName, r.Endpoints[eName])
+		}
+
+		var subNames []string
+		for subName := range r.SubResources {
+			subNames = append(subNames, subName)
+		}
+		sort.Strings(subNames)
+		for _, subName := range subNames {
+			sub := r.SubResources[subName]
+			var subEndpointNames []string
+			for eName := range sub.Endpoints {
+				subEndpointNames = append(subEndpointNames, eName)
+			}
+			sort.Strings(subEndpointNames)
+			for _, eName := range subEndpointNames {
+				appendEndpoint(rName+" "+subName+" "+eName, sub.Endpoints[eName])
+			}
+		}
+	}
+	return entries
 }
 
 // HelperFlags controls which helper functions are emitted in helpers.go.
@@ -501,14 +554,47 @@ type doctorTemplateData struct {
 	HasStore bool
 }
 
+// authTemplateData wraps APISpec with traffic-analysis generation hints that
+// control optional auth subcommands.
+type authTemplateData struct {
+	*spec.APISpec
+	HasGraphQLPersistedQueries bool
+}
+
+// clientTemplateData wraps APISpec with optional runtime data hooks used by
+// the generated HTTP client.
+type clientTemplateData struct {
+	*spec.APISpec
+	HasGraphQLPersistedQueries bool
+}
+
 // readmeTemplateData wraps APISpec with additional fields for README rendering.
 type readmeTemplateData struct {
 	*spec.APISpec
-	Sources        []ReadmeSource
-	DiscoveryPages []string
-	NovelFeatures  []NovelFeature
-	Narrative      *ReadmeNarrative
-	HasDataLayer   bool
+	Sources         []ReadmeSource
+	DiscoveryPages  []string
+	NovelFeatures   []NovelFeature
+	Narrative       *ReadmeNarrative
+	HasDataLayer    bool
+	TrafficAnalysis *trafficAnalysisTemplateData
+}
+
+type generatorTemplateData struct {
+	*spec.APISpec
+	TrafficAnalysis *trafficAnalysisTemplateData
+}
+
+type trafficAnalysisTemplateData struct {
+	TargetURL         string
+	EntryCount        int
+	APIEntryCount     int
+	Reachability      string
+	Protocols         []string
+	AuthCandidates    []string
+	Protections       []string
+	GenerationHints   []string
+	Warnings          []string
+	CandidateCommands []string
 }
 
 func (g *Generator) readmeData() *readmeTemplateData {
@@ -521,13 +607,108 @@ func (g *Generator) readmeData() *readmeTemplateData {
 		}
 	}
 	return &readmeTemplateData{
-		APISpec:        g.Spec,
-		Sources:        g.Sources,
-		DiscoveryPages: g.DiscoveryPages,
-		NovelFeatures:  g.NovelFeatures,
-		Narrative:      g.Narrative,
-		HasDataLayer:   g.VisionSet.Store,
+		APISpec:         g.Spec,
+		Sources:         g.Sources,
+		DiscoveryPages:  g.DiscoveryPages,
+		NovelFeatures:   g.NovelFeatures,
+		Narrative:       g.Narrative,
+		HasDataLayer:    g.VisionSet.Store,
+		TrafficAnalysis: g.trafficAnalysisData(),
 	}
+}
+
+func (g *Generator) templateData() *generatorTemplateData {
+	return &generatorTemplateData{
+		APISpec:         g.Spec,
+		TrafficAnalysis: g.trafficAnalysisData(),
+	}
+}
+
+func (g *Generator) trafficAnalysisData() *trafficAnalysisTemplateData {
+	if g.TrafficAnalysis == nil {
+		return nil
+	}
+
+	analysis := g.TrafficAnalysis
+	data := &trafficAnalysisTemplateData{
+		TargetURL:     safeDisplayURL(analysis.Summary.TargetURL),
+		EntryCount:    analysis.Summary.EntryCount,
+		APIEntryCount: analysis.Summary.APIEntryCount,
+	}
+	if analysis.Reachability != nil {
+		data.Reachability = fmt.Sprintf("%s (%.0f%% confidence)", analysis.Reachability.Mode, analysis.Reachability.Confidence*100)
+	}
+
+	for _, protocol := range analysis.Protocols {
+		data.Protocols = appendLimited(data.Protocols, fmt.Sprintf("%s (%.0f%% confidence)", protocol.Label, protocol.Confidence*100), 8)
+	}
+	for _, candidate := range analysis.Auth.Candidates {
+		parts := []string{candidate.Type}
+		if len(candidate.HeaderNames) > 0 {
+			parts = append(parts, "headers: "+strings.Join(candidate.HeaderNames, ", "))
+		}
+		if len(candidate.QueryNames) > 0 {
+			parts = append(parts, "query: "+strings.Join(candidate.QueryNames, ", "))
+		}
+		if len(candidate.CookieNames) > 0 {
+			parts = append(parts, "cookies: "+strings.Join(candidate.CookieNames, ", "))
+		}
+		data.AuthCandidates = appendLimited(data.AuthCandidates, strings.Join(parts, " — "), 8)
+	}
+	for _, protection := range analysis.Protections {
+		data.Protections = appendLimited(data.Protections, fmt.Sprintf("%s (%.0f%% confidence)", protection.Label, protection.Confidence*100), 8)
+	}
+	for _, hint := range analysis.GenerationHints {
+		data.GenerationHints = appendLimited(data.GenerationHints, hint, 10)
+	}
+	for _, warning := range analysis.Warnings {
+		data.Warnings = appendLimited(data.Warnings, warning.Type+": "+warning.Message, 10)
+	}
+	for _, command := range analysis.CandidateCommands {
+		label := command.Name
+		if command.Rationale != "" {
+			label += " — " + command.Rationale
+		}
+		data.CandidateCommands = appendLimited(data.CandidateCommands, label, 8)
+	}
+
+	return data
+}
+
+func (g *Generator) hasTrafficAnalysisHint(hint string) bool {
+	if g == nil || g.TrafficAnalysis == nil {
+		return false
+	}
+	for _, got := range g.TrafficAnalysis.GenerationHints {
+		if got == hint {
+			return true
+		}
+	}
+	return false
+}
+
+func appendLimited(values []string, value string, limit int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(values) >= limit {
+		return values
+	}
+	return append(values, value)
+}
+
+func safeDisplayURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 // buildDomainContext constructs structured domain knowledge for MCP agents
@@ -717,11 +898,24 @@ func (g *Generator) Generate() error {
 				APISpec:  g.Spec,
 				HasStore: g.VisionSet.Store,
 			}
+		case "client.go.tmpl":
+			data = &clientTemplateData{
+				APISpec:                    g.Spec,
+				HasGraphQLPersistedQueries: g.hasTrafficAnalysisHint("graphql_persisted_query"),
+			}
+		case "agent_context.go.tmpl":
+			data = g.templateData()
 		default:
 			data = g.Spec
 		}
 		if err := g.renderTemplate(tmplName, outPath, data); err != nil {
 			return fmt.Errorf("rendering %s: %w", tmplName, err)
+		}
+	}
+
+	if g.Spec.HasHTMLExtraction() {
+		if err := g.renderTemplate("html_extract.go.tmpl", filepath.Join("internal", "cli", "html_extract.go"), g.Spec); err != nil {
+			return fmt.Errorf("rendering HTML extraction helper: %w", err)
 		}
 	}
 
@@ -816,7 +1010,6 @@ func (g *Generator) Generate() error {
 		// Sub-resource parents and endpoint files are still needed (wired by the promoted command).
 		if !promotedResourceNames[name] {
 			// Parent file: wires subcommands together
-			// When promoted commands exist, hide resource parents from --help
 			parentData := struct {
 				ResourceName string
 				FuncPrefix   string
@@ -829,7 +1022,7 @@ func (g *Generator) Generate() error {
 				FuncPrefix:   name,
 				CommandPath:  name,
 				Resource:     resource,
-				Hidden:       hasPromoted,
+				Hidden:       false,
 				APISpec:      g.Spec,
 			}
 			parentPath := filepath.Join("internal", "cli", name+".go")
@@ -891,7 +1084,7 @@ func (g *Generator) Generate() error {
 					FuncPrefix:   name + "-" + subName,
 					CommandPath:  name + " " + subName,
 					Resource:     subResource,
-					Hidden:       hasPromoted,
+					Hidden:       false,
 					APISpec:      g.Spec,
 				}
 				subParentPath := filepath.Join("internal", "cli", name+"_"+subName+".go")
@@ -938,10 +1131,17 @@ func (g *Generator) Generate() error {
 	authTmpl := "auth_simple.go.tmpl"
 	if g.Spec.Auth.AuthorizationURL != "" {
 		authTmpl = "auth.go.tmpl"
-	} else if g.Spec.Auth.Type == "cookie" || g.Spec.Auth.Type == "composed" {
+	} else if g.Spec.Auth.Type == "cookie" || g.Spec.Auth.Type == "composed" || g.hasTrafficAnalysisHint("graphql_persisted_query") {
+		// Select the browser-aware auth template for browser-cookie auth or a
+		// persisted-query registry, even for auth.type:none. Query refresh flows
+		// need temporary browser capture support, not a resident browser transport.
 		authTmpl = "auth_browser.go.tmpl"
 	}
-	if err := g.renderTemplate(authTmpl, authPath, g.Spec); err != nil {
+	authData := &authTemplateData{
+		APISpec:                    g.Spec,
+		HasGraphQLPersistedQueries: g.hasTrafficAnalysisHint("graphql_persisted_query"),
+	}
+	if err := g.renderTemplate(authTmpl, authPath, authData); err != nil {
 		return fmt.Errorf("rendering auth: %w", err)
 	}
 
@@ -1187,7 +1387,7 @@ func (g *Generator) Generate() error {
 		}
 	}
 
-	// Generate api discovery command when promoted commands exist (lets users browse hidden interfaces)
+	// Generate api discovery command when promoted commands exist (lets users browse the raw generated surface)
 	if hasPromoted {
 		if err := g.renderTemplate("api_discovery.go.tmpl", filepath.Join("internal", "cli", "api_discovery.go"), g.Spec); err != nil {
 			return fmt.Errorf("rendering api discovery: %w", err)
@@ -1195,7 +1395,7 @@ func (g *Generator) Generate() error {
 	}
 
 	// Generate promoted top-level commands (user-friendly aliases for nested API commands)
-	// promotedCommands was computed earlier (before resource rendering) for Hidden flag
+	// promotedCommands was computed earlier so promoted resources can replace their raw parents.
 	for _, pc := range promotedCommands {
 		// Look up the full resource to pass sibling endpoints/sub-resources
 		resource := g.Spec.Resources[pc.ResourceName]
@@ -1575,6 +1775,12 @@ func defaultVal(p spec.Param) string {
 				return fmt.Sprintf("%f", float64(v))
 			}
 			return "0.0"
+		case "object", "array":
+			data, err := json.Marshal(p.Default)
+			if err != nil {
+				return `""`
+			}
+			return fmt.Sprintf("%q", string(data))
 		}
 	}
 	return zeroVal(p.Type)
@@ -1936,54 +2142,38 @@ var builtinCommands = map[string]bool{
 	"analytics":  true,
 }
 
-// buildPromotedCommands scans spec resources and returns promotable top-level commands.
-// For each resource, it finds the "primary" GET endpoint (no path params, or first GET)
-// and creates a promoted command with a cleaner name.
+// buildPromotedCommands scans spec resources and returns safe top-level shortcuts.
+// Only single-endpoint resources are promoted. Multi-endpoint resources stay
+// nested so an unknown subcommand cannot silently fall back to an arbitrary
+// parent RunE action.
 func buildPromotedCommands(s *spec.APISpec) []PromotedCommand {
 	var promoted []PromotedCommand
 	usedNames := make(map[string]bool)
 
-	for name, resource := range s.Resources {
-		// Find the primary endpoint for the resource.
-		//
-		// Multi-endpoint resources: prefer a GET without positional params (list
-		// endpoint), else first GET — a read is the safest default landing spot.
-		//
-		// Single-endpoint resources: promote the only endpoint regardless of method.
+	resourceNames := make([]string, 0, len(s.Resources))
+	for name := range s.Resources {
+		resourceNames = append(resourceNames, name)
+	}
+	sort.Strings(resourceNames)
+
+	for _, name := range resourceNames {
+		resource := s.Resources[name]
+		if len(resource.Endpoints) > 1 {
+			continue
+		}
+
+		// Single-endpoint resources promote the only endpoint regardless of method.
 		// Without this, POST-only auth resources like `login`/`logout`/`register`
-		// render as `<cli> login login --email …` — ugly double-naming that no
-		// agent or human wants to type.
+		// render as `<cli> login login --email ...`.
 		var bestName string
 		var bestEndpoint spec.Endpoint
 		found := false
 
-		if len(resource.Endpoints) == 1 {
-			for eName, ep := range resource.Endpoints {
-				bestName = eName
-				bestEndpoint = ep
-				found = true
-			}
-		} else {
-			for eName, ep := range resource.Endpoints {
-				if ep.Method != "GET" {
-					continue
-				}
-				hasPositional := false
-				for _, p := range ep.Params {
-					if p.Positional {
-						hasPositional = true
-						break
-					}
-				}
-				if !found || !hasPositional {
-					bestName = eName
-					bestEndpoint = ep
-					found = true
-					if !hasPositional {
-						break // Ideal: GET without path params (list endpoint)
-					}
-				}
-			}
+		for _, eName := range sortedEndpointNames(resource.Endpoints) {
+			ep := resource.Endpoints[eName]
+			bestName = eName
+			bestEndpoint = ep
+			found = true
 		}
 
 		if !found {
@@ -2007,6 +2197,15 @@ func buildPromotedCommands(s *spec.APISpec) []PromotedCommand {
 		})
 	}
 	return promoted
+}
+
+func sortedEndpointNames(endpoints map[string]spec.Endpoint) []string {
+	names := make([]string, 0, len(endpoints))
+	for name := range endpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func envVarPlaceholder(envVar string) string {

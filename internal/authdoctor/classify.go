@@ -25,8 +25,10 @@ type getEnv func(string) string
 //   - a single Finding with StatusNoAuth when the manifest declares
 //     auth type "none" or has no env vars
 //   - one Finding per declared env var otherwise
-//   - a single Finding with StatusUnknown when the manifest is nil
-//     or malformed
+//   - an additional StatusUnknown Finding when browser-session proof is
+//     required; env var findings are still reported because they are useful
+//     setup diagnostics
+//   - a single Finding with StatusUnknown when the manifest is nil or malformed
 //
 // slug is the API identifier used in output. The manifest's own
 // Auth.Type is reported verbatim.
@@ -49,19 +51,35 @@ func Classify(slug string, manifest *pipeline.ToolsManifest, env getEnv) []Findi
 	}
 
 	if len(manifest.Auth.EnvVars) == 0 {
-		return []Finding{{
+		findings := []Finding{{
 			API:    slug,
 			Type:   authType,
 			Status: StatusUnknown,
 			Reason: "auth type declared but no env_vars listed in manifest",
 		}}
+		if manifest.Auth.RequiresBrowserSession {
+			findings = append(findings, browserSessionProofFinding(slug, authType))
+		}
+		return findings
 	}
 
 	findings := make([]Finding, 0, len(manifest.Auth.EnvVars))
 	for _, envVar := range manifest.Auth.EnvVars {
 		findings = append(findings, classifyEnv(slug, authType, envVar, env))
 	}
+	if manifest.Auth.RequiresBrowserSession {
+		findings = append(findings, browserSessionProofFinding(slug, authType))
+	}
 	return findings
+}
+
+func browserSessionProofFinding(slug, authType string) Finding {
+	return Finding{
+		API:    slug,
+		Type:   authType,
+		Status: StatusUnknown,
+		Reason: "requires browser-session proof; run the printed CLI's doctor command",
+	}
 }
 
 // classifyEnv builds one Finding for a single (api, auth-type, env-var) triple.

@@ -335,6 +335,47 @@ Environment variables:
 - **{{.Symptom}}** — {{.Fix}}
 {{- end}}
 {{- end}}
+{{- if .UsesBrowserHTTPTransport}}
+
+## HTTP Transport
+
+This CLI uses Chrome-compatible HTTP transport{{if .UsesBrowserHTTP3Transport}} over HTTP/3{{end}} for browser-facing endpoints. It does not require a resident browser process for normal API calls.
+{{- end}}
+{{- if .TrafficAnalysis}}
+
+## Discovery Signals
+
+This CLI was generated with browser-captured traffic analysis.
+{{- if .TrafficAnalysis.TargetURL}}
+- Target observed: {{.TrafficAnalysis.TargetURL}}
+{{- end}}
+- Capture coverage: {{.TrafficAnalysis.APIEntryCount}} API entries from {{.TrafficAnalysis.EntryCount}} total network entries
+{{- if .TrafficAnalysis.Reachability}}
+- Reachability: {{.TrafficAnalysis.Reachability}}
+{{- end}}
+{{- if .TrafficAnalysis.Protocols}}
+- Protocols: {{join .TrafficAnalysis.Protocols ", "}}
+{{- end}}
+{{- if .TrafficAnalysis.AuthCandidates}}
+- Auth signals: {{join .TrafficAnalysis.AuthCandidates "; "}}
+{{- end}}
+{{- if .TrafficAnalysis.Protections}}
+- Protection signals: {{join .TrafficAnalysis.Protections ", "}}
+{{- end}}
+{{- if .TrafficAnalysis.GenerationHints}}
+- Generation hints: {{join .TrafficAnalysis.GenerationHints ", "}}
+{{- end}}
+{{- if .TrafficAnalysis.CandidateCommands}}
+- Candidate command ideas: {{join .TrafficAnalysis.CandidateCommands "; "}}
+{{- end}}
+{{- if .TrafficAnalysis.Warnings}}
+
+Warnings from discovery:
+{{- range .TrafficAnalysis.Warnings}}
+- {{.}}
+{{- end}}
+{{- end}}
+{{- end}}
 
 ---
 {{- if or (gt (len .Sources) 1) (gt (len .DiscoveryPages) 0)}}

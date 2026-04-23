@@ -103,6 +103,71 @@ func TestSessionHandshakeGeneration(t *testing.T) {
 	}
 }
 
+func TestSessionHandshakeBrowserTransportSharesJar(t *testing.T) {
+	sp := &spec.APISpec{
+		Name:          "demo",
+		Version:       "1.0.0",
+		Description:   "test",
+		BaseURL:       "https://query1.example.com",
+		SpecSource:    "sniffed",
+		HTTPTransport: spec.HTTPTransportBrowserChrome,
+		Auth: spec.AuthConfig{
+			Type:               "session_handshake",
+			BootstrapURL:       "https://bootstrap.example.com/",
+			SessionTokenURL:    "https://query2.example.com/v1/getcrumb",
+			TokenFormat:        "text",
+			TokenParamName:     "crumb",
+			TokenParamIn:       "query",
+			In:                 "query",
+			Header:             "crumb",
+			InvalidateOnStatus: []int{401, 403},
+		},
+		Config: spec.ConfigSpec{Format: "toml", Path: "~/.config/demo-pp-cli/config.toml"},
+		Resources: map[string]spec.Resource{
+			"quote": {
+				Description: "Quotes",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/v7/finance/quote", Description: "Get quotes"},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	g := New(sp, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	clientContent, err := os.ReadFile(filepath.Join(dir, "internal", "client", "client.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionContent, err := os.ReadFile(filepath.Join(dir, "internal", "client", "session.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		`"github.com/enetx/surf"`,
+		"func newHTTPClient(timeout time.Duration, jar http.CookieJar) *http.Client",
+		"if jar == nil",
+		"builder = builder.Session()",
+		"httpClient.Jar = jar",
+		"newHTTPClient(timeout, sess.CookieJar())",
+	} {
+		if !strings.Contains(string(clientContent), want) {
+			t.Errorf("client.go missing expected substring %q", want)
+		}
+	}
+	if !strings.Contains(string(sessionContent), "func (m *SessionManager) CookieJar() http.CookieJar") {
+		t.Error("session.go missing CookieJar accessor")
+	}
+
+	runGoCommand(t, dir, "mod", "tidy")
+	runGoCommand(t, dir, "build", "./...")
+}
+
 // TestSessionHandshakeNotEmittedForOtherAuth verifies the session helper is
 // NOT emitted for non-session auth types — no file bloat for bearer_token CLIs.
 func TestSessionHandshakeNotEmittedForOtherAuth(t *testing.T) {

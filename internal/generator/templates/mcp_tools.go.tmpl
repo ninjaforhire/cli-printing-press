@@ -69,37 +69,37 @@ func RegisterTools(s *server.MCPServer) {
 {{- range $name, $resource := .Resources}}
 {{- range $eName, $endpoint := $resource.Endpoints}}
 	s.AddTool(
-		mcplib.NewTool("{{snake $name}}_{{snake $eName}}",
-			mcplib.WithDescription("{{mcpDescriptionRich $endpoint.Description $endpoint.NoAuth $.Auth.Type $.MCPPublicCount $.MCPTotalCount $endpoint.Method $endpoint.Response.Type $endpoint.Response.Item}}"),
+		mcplib.NewTool({{printf "%q" (printf "%s_%s" (snake $name) (snake $eName))}},
+			mcplib.WithDescription({{printf "%q" (mcpDescriptionRich $endpoint.Description $endpoint.NoAuth $.Auth.Type $.MCPPublicCount $.MCPTotalCount $endpoint.Method $endpoint.Response.Type $endpoint.Response.Item)}}),
 {{- range $endpoint.Params}}
 {{- if eq .Type "integer"}}
-			mcplib.WithNumber("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithNumber({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- else if eq .Type "boolean"}}
-			mcplib.WithBoolean("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithBoolean({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- else}}
-			mcplib.WithString("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithString({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- end}}
 {{- end}}
 		),
-		makeAPIHandler("{{upper $endpoint.Method}}", "{{$endpoint.Path}}", []string{ {{- range $endpoint.Params}}{{if .Positional}}"{{.Name}}",{{end}}{{end}} }),
+		makeAPIHandler({{printf "%q" (upper $endpoint.Method)}}, {{printf "%q" $endpoint.Path}}, []string{ {{- range $endpoint.Params}}{{if .Positional}}{{printf "%q" .Name}},{{end}}{{end}} }),
 	)
 {{- end}}
 {{- range $subName, $subResource := $resource.SubResources}}
 {{- range $eName, $endpoint := $subResource.Endpoints}}
 	s.AddTool(
-		mcplib.NewTool("{{snake $name}}_{{snake $subName}}_{{snake $eName}}",
-			mcplib.WithDescription("{{mcpDescriptionRich $endpoint.Description $endpoint.NoAuth $.Auth.Type $.MCPPublicCount $.MCPTotalCount $endpoint.Method $endpoint.Response.Type $endpoint.Response.Item}}"),
+		mcplib.NewTool({{printf "%q" (printf "%s_%s_%s" (snake $name) (snake $subName) (snake $eName))}},
+			mcplib.WithDescription({{printf "%q" (mcpDescriptionRich $endpoint.Description $endpoint.NoAuth $.Auth.Type $.MCPPublicCount $.MCPTotalCount $endpoint.Method $endpoint.Response.Type $endpoint.Response.Item)}}),
 {{- range $endpoint.Params}}
 {{- if eq .Type "integer"}}
-			mcplib.WithNumber("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithNumber({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- else if eq .Type "boolean"}}
-			mcplib.WithBoolean("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithBoolean({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- else}}
-			mcplib.WithString("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description("{{oneline .Description}}")),
+			mcplib.WithString({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" (oneline .Description)}})),
 {{- end}}
 {{- end}}
 		),
-		makeAPIHandler("{{upper $endpoint.Method}}", "{{$endpoint.Path}}", []string{ {{- range $endpoint.Params}}{{if .Positional}}"{{.Name}}",{{end}}{{end}} }),
+		makeAPIHandler({{printf "%q" (upper $endpoint.Method)}}, {{printf "%q" $endpoint.Path}}, []string{ {{- range $endpoint.Params}}{{if .Positional}}{{printf "%q" .Name}},{{end}}{{end}} }),
 	)
 {{- end}}
 {{- end}}
@@ -222,17 +222,17 @@ func makeAPIHandler(method, pathTemplate string, positionalParams []string) serv
 				return mcplib.NewToolResultError("authentication error: " + sanitizeErrorBody(msg) +
 					"\nhint: the API rejected the request — this usually means auth is missing or invalid." +
 {{- if .Auth.EnvVars}}
-					"\n      Set your API key: export {{index .Auth.EnvVars 0}}=<your-key>" +
+					{{printf "%q" (printf "\n      Set your API key: export %s=<your-key>" (index .Auth.EnvVars 0))}} +
 {{- end}}
 {{- if .Auth.KeyURL}}
-					"\n      Get a key at: {{.Auth.KeyURL}}" +
+					{{printf "%q" (printf "\n      Get a key at: %s" .Auth.KeyURL)}} +
 {{- end}}
-					"\n      Run '{{.Name}}-pp-cli doctor' to check auth status."), nil
+					{{printf "%q" (printf "\n      Run '%s-pp-cli doctor' to check auth status." .Name)}}), nil
 {{- end}}
 			case strings.Contains(msg, "HTTP 401"):
 				return mcplib.NewToolResultError("authentication failed: " + {{if and .Auth.Type (ne .Auth.Type "none")}}sanitizeErrorBody(msg){{else}}msg{{end}} +
 {{- if eq .Auth.Type "oauth2"}}
-					"\nhint: your token may have expired. Re-run '{{.Name}}-pp-cli auth login' to re-authenticate" +
+					{{printf "%q" (printf "\nhint: your token may have expired. Re-run '%s-pp-cli auth login' to re-authenticate" .Name)}} +
 {{- else if eq .Auth.Type "api_key"}}
 					"\nhint: check your API key." +
 {{- else if eq .Auth.Type "bearer_token"}}
@@ -241,26 +241,26 @@ func makeAPIHandler(method, pathTemplate string, positionalParams []string) serv
 					"\nhint: check your API credentials." +
 {{- end}}
 {{- if .Auth.EnvVars}}
-					"\n      Set it with: export {{index .Auth.EnvVars 0}}=<your-key>" +
+					{{printf "%q" (printf "\n      Set it with: export %s=<your-key>" (index .Auth.EnvVars 0))}} +
 {{- end}}
 {{- if .Auth.KeyURL}}
-					"\n      Get a key at: {{.Auth.KeyURL}}" +
+					{{printf "%q" (printf "\n      Get a key at: %s" .Auth.KeyURL)}} +
 {{- end}}
-					"\n      Run '{{.Name}}-pp-cli doctor' to check auth status."), nil
+					{{printf "%q" (printf "\n      Run '%s-pp-cli doctor' to check auth status." .Name)}}), nil
 			case strings.Contains(msg, "HTTP 403"):
 				return mcplib.NewToolResultError("permission denied: " + {{if and .Auth.Type (ne .Auth.Type "none")}}sanitizeErrorBody(msg){{else}}msg{{end}} +
 {{- if eq .Auth.Type "oauth2"}}
-					"\nhint: your token may lack required scopes. Re-run '{{.Name}}-pp-cli auth login' to re-authorize" +
+					{{printf "%q" (printf "\nhint: your token may lack required scopes. Re-run '%s-pp-cli auth login' to re-authorize" .Name)}} +
 {{- else}}
 					"\nhint: your credentials are valid but lack access to this resource." +
 {{- end}}
 {{- if .Auth.EnvVars}}
-					"\n      Set it with: export {{index .Auth.EnvVars 0}}=<your-key>" +
+					{{printf "%q" (printf "\n      Set it with: export %s=<your-key>" (index .Auth.EnvVars 0))}} +
 {{- end}}
 {{- if .Auth.KeyURL}}
-					"\n      Get a key at: {{.Auth.KeyURL}}" +
+					{{printf "%q" (printf "\n      Get a key at: %s" .Auth.KeyURL)}} +
 {{- end}}
-					"\n      Run '{{.Name}}-pp-cli doctor' to check auth status."), nil
+					{{printf "%q" (printf "\n      Run '%s-pp-cli doctor' to check auth status." .Name)}}), nil
 			case strings.Contains(msg, "HTTP 404"):
 				if method == "DELETE" {
 					return mcplib.NewToolResultText("already deleted (no-op)"), nil
@@ -402,29 +402,29 @@ func handleSQL(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 
 func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	ctx := map[string]any{
-		"api":         "{{.DomainContext.APIName}}",
-		"description": "{{.DomainContext.Description}}",
-		"archetype":   "{{.DomainContext.Archetype}}",
+		"api":         {{printf "%q" .DomainContext.APIName}},
+		"description": {{printf "%q" .DomainContext.Description}},
+		"archetype":   {{printf "%q" .DomainContext.Archetype}},
 		"tool_count":  {{.MCPTotalCount}},
 {{- if and .Auth.Type (ne .Auth.Type "none")}}
 		"auth": map[string]any{
-			"type": "{{.Auth.Type}}",
+			"type": {{printf "%q" .Auth.Type}},
 {{- if .Auth.EnvVars}}
-			"env_vars": []string{ {{- range .Auth.EnvVars}}"{{.}}", {{end}} },
+			"env_vars": []string{ {{- range .Auth.EnvVars}}{{printf "%q" .}}, {{end}} },
 {{- end}}
 {{- if .Auth.KeyURL}}
-			"key_url": "{{.Auth.KeyURL}}",
+			"key_url": {{printf "%q" .Auth.KeyURL}},
 {{- end}}
 		},
 {{- end}}
 		"resources": []map[string]any{
 {{- range .DomainContext.Resources}}
 			{
-				"name": "{{.Name}}",
+				"name": {{printf "%q" .Name}},
 {{- if .Description}}
-				"description": "{{.Description}}",
+				"description": {{printf "%q" .Description}},
 {{- end}}
-				"endpoints": []string{ {{- range .Endpoints}}"{{.}}", {{end}} },
+				"endpoints": []string{ {{- range .Endpoints}}{{printf "%q" .}}, {{end}} },
 {{- if .Syncable}}
 				"syncable": true,
 {{- end}}
@@ -437,21 +437,21 @@ func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToo
 {{- if .DomainContext.QueryTips}}
 		"query_tips": []string{
 {{- range .DomainContext.QueryTips}}
-			"{{.}}",
+			{{printf "%q" .}},
 {{- end}}
 		},
 {{- end}}
 {{- if .NovelFeatures}}
 		"unique_capabilities": []map[string]string{
 {{- range .NovelFeatures}}
-			{"name": "{{.Name}}", "command": "{{.Command}}", "description": "{{oneline .Description}}", "rationale": "{{oneline .Rationale}}"},
+			{"name": {{printf "%q" .Name}}, "command": {{printf "%q" .Command}}, "description": {{printf "%q" (oneline .Description)}}, "rationale": {{printf "%q" (oneline .Rationale)}}},
 {{- end}}
 		},
 {{- end}}
 {{- if .DomainContext.Playbook}}
 		"playbook": []map[string]string{
 {{- range .DomainContext.Playbook}}
-			{"topic": "{{.Topic}}", "insight": "{{.Insight}}"},
+			{"topic": {{printf "%q" .Topic}}, "insight": {{printf "%q" .Insight}}},
 {{- end}}
 		},
 {{- end}}

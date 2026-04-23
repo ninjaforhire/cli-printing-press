@@ -14,6 +14,7 @@ import (
 	"time"
 
 	catalogfs "github.com/mvanhorn/cli-printing-press/catalog"
+	"github.com/mvanhorn/cli-printing-press/internal/browsersniff"
 	"github.com/mvanhorn/cli-printing-press/internal/catalog"
 	"github.com/mvanhorn/cli-printing-press/internal/docspec"
 	"github.com/mvanhorn/cli-printing-press/internal/generator"
@@ -76,11 +77,13 @@ func newGenerateCmd() *cobra.Command {
 	var dryRun bool
 	var specSource string
 	var clientPattern string
+	var httpTransport string
 	var researchDir string
 	var maxEndpointsPerResource int
 	var maxResources int
 	var specURL string
 	var planFile string
+	var trafficAnalysisPath string
 
 	cmd := &cobra.Command{
 		Use:   "generate",
@@ -132,12 +135,11 @@ func newGenerateCmd() *cobra.Command {
 					return &ExitError{Code: ExitSpecError, Err: fmt.Errorf("parsing generated spec: %w", err)}
 				}
 				if specSource != "" {
-					switch specSource {
-					case "official", "community", "sniffed", "docs":
-						parsed.SpecSource = specSource
-					default:
-						return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--spec-source must be one of: official, community, sniffed, docs (got %q)", specSource)}
+					normalized, err := normalizeSpecSource(specSource)
+					if err != nil {
+						return &ExitError{Code: ExitInputError, Err: err}
 					}
+					parsed.SpecSource = normalized
 				} else {
 					parsed.SpecSource = "docs"
 				}
@@ -148,6 +150,13 @@ func newGenerateCmd() *cobra.Command {
 					default:
 						return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--client-pattern must be one of: rest, proxy-envelope (got %q)", clientPattern)}
 					}
+				}
+				if httpTransport != "" {
+					normalized, err := normalizeHTTPTransport(httpTransport)
+					if err != nil {
+						return &ExitError{Code: ExitInputError, Err: err}
+					}
+					parsed.HTTPTransport = normalized
 				}
 
 				explicitOutput := outputDir != ""
@@ -166,6 +175,13 @@ func newGenerateCmd() *cobra.Command {
 				enrichSpecFromCatalog(parsed)
 				gen := generator.New(parsed, absOut)
 				loadResearchSources(gen, researchDir)
+				trafficAnalysis, err := loadTrafficAnalysisForGenerate(trafficAnalysisPath, nil, parsed.SpecSource)
+				if err != nil {
+					return &ExitError{Code: ExitInputError, Err: err}
+				}
+				applyHTTPTransportDefault(parsed, trafficAnalysis)
+				browsersniff.ApplyReachabilityDefaults(parsed, trafficAnalysis)
+				gen.TrafficAnalysis = trafficAnalysis
 				if err := gen.Generate(); err != nil {
 					return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("generating project: %w", err)}
 				}
@@ -218,6 +234,9 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			if planFile != "" {
+				if trafficAnalysisPath != "" {
+					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--traffic-analysis cannot be used with --plan")}
+				}
 				planData, err := os.ReadFile(planFile)
 				if err != nil {
 					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("reading plan file: %w", err)}
@@ -322,12 +341,11 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			if specSource != "" {
-				switch specSource {
-				case "official", "community", "sniffed", "docs":
-					apiSpec.SpecSource = specSource
-				default:
-					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--spec-source must be one of: official, community, sniffed, docs (got %q)", specSource)}
+				normalized, err := normalizeSpecSource(specSource)
+				if err != nil {
+					return &ExitError{Code: ExitInputError, Err: err}
 				}
+				apiSpec.SpecSource = normalized
 			}
 			if clientPattern != "" {
 				switch clientPattern {
@@ -336,6 +354,13 @@ func newGenerateCmd() *cobra.Command {
 				default:
 					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--client-pattern must be one of: rest, proxy-envelope (got %q)", clientPattern)}
 				}
+			}
+			if httpTransport != "" {
+				normalized, err := normalizeHTTPTransport(httpTransport)
+				if err != nil {
+					return &ExitError{Code: ExitInputError, Err: err}
+				}
+				apiSpec.HTTPTransport = normalized
 			}
 
 			explicitOutput := outputDir != ""
@@ -358,6 +383,16 @@ func newGenerateCmd() *cobra.Command {
 			enrichSpecFromCatalog(apiSpec)
 			gen := generator.New(apiSpec, absOut)
 			loadResearchSources(gen, researchDir)
+			trafficAnalysis, err := loadTrafficAnalysisForGenerate(trafficAnalysisPath, specFiles, apiSpec.SpecSource)
+			if err != nil {
+				return &ExitError{Code: ExitInputError, Err: err}
+			}
+			if trafficAnalysisRequiresUnshippablePageContext(trafficAnalysis) {
+				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("traffic analysis says this target requires live browser page-context execution; persistent browser transport is not a shippable printed CLI runtime. Re-run discovery for a Surf/direct/browser-clearance replayable surface instead")}
+			}
+			applyHTTPTransportDefault(apiSpec, trafficAnalysis)
+			browsersniff.ApplyReachabilityDefaults(apiSpec, trafficAnalysis)
+			gen.TrafficAnalysis = trafficAnalysis
 			if err := gen.Generate(); err != nil {
 				return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("generating project: %w", err)}
 			}
@@ -450,15 +485,156 @@ func newGenerateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&polish, "polish", false, "Run LLM polish pass on generated CLI (requires claude or codex CLI)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Parse spec and show what would be generated without writing files (remote specs are still fetched)")
-	cmd.Flags().StringVar(&specSource, "spec-source", "", "Spec provenance: official, community, sniffed, docs (affects generated client defaults like rate limiting)")
+	cmd.Flags().StringVar(&specSource, "spec-source", "", "Spec provenance: official, community, sniffed/browser-sniffed, docs (affects generated client defaults like rate limiting)")
 	cmd.Flags().StringVar(&clientPattern, "client-pattern", "", "HTTP client pattern: rest (default), proxy-envelope (wraps requests in POST envelope)")
+	cmd.Flags().StringVar(&httpTransport, "transport", "", "HTTP transport: standard, browser-chrome, or browser-chrome-h3 (defaults based on spec provenance and reachability)")
 	cmd.Flags().StringVar(&researchDir, "research-dir", "", "Pipeline directory containing research.json and discovery/ for README source credits")
 	cmd.Flags().IntVar(&maxResources, "max-resources", 0, "Maximum resource groups to generate (default 500, raise for enormous APIs)")
 	cmd.Flags().IntVar(&maxEndpointsPerResource, "max-endpoints-per-resource", 0, "Maximum endpoints per resource (default 50, raise for large APIs)")
 	cmd.Flags().StringVar(&specURL, "spec-url", "", "Original spec URL for provenance (use when --spec is a local file downloaded from a URL)")
 	cmd.Flags().StringVar(&planFile, "plan", "", "Path to a markdown plan document for plan-driven generation (instead of --spec)")
+	cmd.Flags().StringVar(&trafficAnalysisPath, "traffic-analysis", "", "Path to browser-sniff traffic-analysis.json for advisory generation context")
 
 	return cmd
+}
+
+func normalizeSpecSource(value string) (string, error) {
+	switch value {
+	case "", "official", "community", "sniffed", "docs":
+		return value, nil
+	case "browser-sniffed":
+		return "sniffed", nil
+	default:
+		return "", fmt.Errorf("--spec-source must be one of: official, community, sniffed, browser-sniffed, docs (got %q)", value)
+	}
+}
+
+func normalizeHTTPTransport(value string) (string, error) {
+	switch value {
+	case "", spec.HTTPTransportStandard, spec.HTTPTransportBrowserChrome, spec.HTTPTransportBrowserChromeH3:
+		return value, nil
+	default:
+		return "", fmt.Errorf("--transport must be one of: standard, browser-chrome, browser-chrome-h3 (got %q)", value)
+	}
+}
+
+func applyHTTPTransportDefault(apiSpec *spec.APISpec, analysis *browsersniff.TrafficAnalysis) {
+	if apiSpec == nil || apiSpec.HTTPTransport != "" {
+		return
+	}
+	if trafficAnalysisRecommendsBrowserHTTP3Transport(analysis) {
+		apiSpec.HTTPTransport = spec.HTTPTransportBrowserChromeH3
+		return
+	}
+	if trafficAnalysisRecommendsBrowserTransport(analysis) {
+		apiSpec.HTTPTransport = spec.HTTPTransportBrowserChrome
+	}
+}
+
+func trafficAnalysisRequiresUnshippablePageContext(analysis *browsersniff.TrafficAnalysis) bool {
+	if analysis == nil {
+		return false
+	}
+	if analysis.Reachability != nil {
+		switch analysis.Reachability.Mode {
+		case "browser_required":
+			return true
+		}
+	}
+	for _, hint := range analysis.GenerationHints {
+		hint = strings.ToLower(hint)
+		if hint == "requires_page_context" || hint == "page_context_required" {
+			return true
+		}
+		// Backward compatibility for older traffic-analysis artifacts generated
+		// before resident browser runtime transport was removed.
+		if hint == "browser_runtime_required" || strings.Contains(hint, "browser_runtime") {
+			return true
+		}
+	}
+	return false
+}
+
+func trafficAnalysisRecommendsBrowserTransport(analysis *browsersniff.TrafficAnalysis) bool {
+	if analysis == nil {
+		return false
+	}
+	if analysis.Reachability != nil {
+		switch analysis.Reachability.Mode {
+		case "browser_http", "browser_clearance_http":
+			return true
+		}
+	}
+	for _, protocol := range analysis.Protocols {
+		if protocol.Label == "html_scrape" {
+			return true
+		}
+	}
+	for _, protection := range analysis.Protections {
+		switch strings.ToLower(protection.Label) {
+		case "cloudflare", "datadome", "akamai", "perimeterx", "captcha", "protected_web", "aws_waf", "bot_challenge":
+			return true
+		}
+	}
+	for _, hint := range analysis.GenerationHints {
+		hint = strings.ToLower(hint)
+		if strings.Contains(hint, "browser") || strings.Contains(hint, "scrape") {
+			return true
+		}
+	}
+	return false
+}
+
+func trafficAnalysisRecommendsBrowserHTTP3Transport(analysis *browsersniff.TrafficAnalysis) bool {
+	if analysis == nil {
+		return false
+	}
+	if analysis.Reachability != nil && analysis.Reachability.Mode == "browser_clearance_http" {
+		return true
+	}
+	for _, protection := range analysis.Protections {
+		switch strings.ToLower(protection.Label) {
+		case "cloudflare", "bot_challenge", "aws_waf", "datadome", "akamai", "perimeterx":
+			return true
+		}
+	}
+	for _, hint := range analysis.GenerationHints {
+		hint = strings.ToLower(hint)
+		if strings.Contains(hint, "http3") || strings.Contains(hint, "http_3") || strings.Contains(hint, "h3") {
+			return true
+		}
+	}
+	return false
+}
+
+func loadTrafficAnalysisForGenerate(inputPath string, specFiles []string, specSource string) (*browsersniff.TrafficAnalysis, error) {
+	if strings.TrimSpace(inputPath) == "" {
+		inputPath = inferTrafficAnalysisPath(specFiles, specSource)
+	}
+	if strings.TrimSpace(inputPath) == "" {
+		return nil, nil
+	}
+
+	analysis, err := browsersniff.ReadTrafficAnalysis(inputPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading traffic analysis %s: %w", inputPath, err)
+	}
+	return analysis, nil
+}
+
+func inferTrafficAnalysisPath(specFiles []string, specSource string) string {
+	if specSource != "sniffed" || len(specFiles) != 1 {
+		return ""
+	}
+	specPath := specFiles[0]
+	if strings.HasPrefix(specPath, "http://") || strings.HasPrefix(specPath, "https://") {
+		return ""
+	}
+	candidate := browsersniff.DefaultTrafficAnalysisPath(specPath)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return ""
 }
 
 func readSpec(specFile string, refresh bool, skipCache bool) ([]byte, error) {
@@ -490,6 +666,22 @@ func mergeSpecs(specs []*spec.APISpec, name string) *spec.APISpec {
 	}
 
 	for _, s := range specs {
+		if merged.SpecSource == "" || merged.SpecSource == "official" {
+			switch s.SpecSource {
+			case "sniffed":
+				merged.SpecSource = "sniffed"
+			case "community":
+				merged.SpecSource = "community"
+			}
+		}
+		if s.SpecSource == "sniffed" {
+			merged.SpecSource = "sniffed"
+		}
+		candidateTransport := s.EffectiveHTTPTransport()
+		if s.HTTPTransport != "" || candidateTransport != spec.HTTPTransportStandard || merged.HTTPTransport != "" {
+			merged.HTTPTransport = strongerHTTPTransport(merged.HTTPTransport, candidateTransport)
+		}
+
 		for resourceName, resource := range s.Resources {
 			key := resourceName
 			if _, exists := merged.Resources[key]; exists {
@@ -512,6 +704,26 @@ func mergeSpecs(specs []*spec.APISpec, name string) *spec.APISpec {
 	}
 
 	return merged
+}
+
+func strongerHTTPTransport(current, candidate string) string {
+	if httpTransportPriority(candidate) > httpTransportPriority(current) {
+		return candidate
+	}
+	return current
+}
+
+func httpTransportPriority(value string) int {
+	switch value {
+	case spec.HTTPTransportBrowserChromeH3:
+		return 3
+	case spec.HTTPTransportBrowserChrome:
+		return 2
+	case spec.HTTPTransportStandard:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // claimOrForce resolves the output directory based on --force and --output flags.
@@ -842,5 +1054,8 @@ func enrichSpecFromCatalog(apiSpec *spec.APISpec) {
 	}
 	if entry.Category != "" && apiSpec.Category == "" {
 		apiSpec.Category = entry.Category
+	}
+	if entry.HTTPTransport != "" && apiSpec.HTTPTransport == "" {
+		apiSpec.HTTPTransport = entry.HTTPTransport
 	}
 }

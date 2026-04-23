@@ -30,6 +30,10 @@ type whichEntry struct {
 var whichIndex = []whichEntry{
 {{- range .NovelFeatures}}
 	{Command: {{printf "%q" .Command}}, Description: {{printf "%q" .Description}}, Group: {{printf "%q" .Group}}, WhyItMatters: {{printf "%q" .WhyItMatters}}},
+{{- else}}
+{{- range whichFallbackEntries .Resources}}
+	{Command: {{printf "%q" .Command}}, Description: {{printf "%q" .Description}}, Group: {{printf "%q" .Group}}},
+{{- end}}
 {{- end}}
 }
 

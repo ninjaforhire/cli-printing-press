@@ -20,6 +20,9 @@ import (
 	"sync"
 	"time"
 
+{{- if .UsesBrowserHTTPTransport}}
+	"github.com/enetx/surf"
+{{ end}}
 	"{{modulePath}}/internal/config"
 )
 
@@ -183,12 +186,37 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("%s %s returned HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
+func newHTTPClient(timeout time.Duration, jar http.CookieJar) *http.Client {
+{{- if .UsesBrowserHTTPTransport}}
+	builder := surf.NewClient().
+		Builder().
+		Impersonate().
+		Chrome().
+		Timeout(timeout)
+{{- if .UsesBrowserHTTP3Transport}}
+	builder = builder.ForceHTTP3()
+{{- end}}
+	if jar == nil {
+		builder = builder.Session()
+	}
+	surfClient := builder.Build().Unwrap()
+	httpClient := surfClient.Std()
+	httpClient.Timeout = timeout
+	if jar != nil {
+		httpClient.Jar = jar
+	}
+	return httpClient
+{{- else}}
+	return &http.Client{Timeout: timeout, Jar: jar}
+{{- end}}
+}
+
 func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 	homeDir, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(homeDir, ".cache", "{{.Name}}-pp-cli")
 {{- if eq .Auth.Type "session_handshake"}}
 	sess := newSessionManager(timeout)
-	httpClient := &http.Client{Timeout: timeout}
+	httpClient := newHTTPClient(timeout, sess.CookieJar())
 	sess.AttachTo(httpClient)
 	return &Client{
 		BaseURL:    strings.TrimRight(cfg.BaseURL, "/"),
@@ -199,10 +227,11 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 		Session:    sess,
 	}
 {{- else}}
+	httpClient := newHTTPClient(timeout, nil)
 	return &Client{
 		BaseURL:    strings.TrimRight(cfg.BaseURL, "/"),
 		Config:     cfg,
-		HTTPClient: &http.Client{Timeout: timeout},
+		HTTPClient: httpClient,
 		cacheDir:   cacheDir,
 		limiter:    newAdaptiveLimiter(rateLimit),
 	}
@@ -230,6 +259,11 @@ func (c *Client) GetWithHeaders(path string, params map[string]string, headers m
 		c.writeCache(path, params, result)
 	}
 	return result, err
+}
+
+func (c *Client) ProbeGet(path string) (int, error) {
+	_, status, err := c.do("GET", path, nil, nil, nil)
+	return status, err
 }
 
 func (c *Client) cacheKey(path string, params map[string]string) string {
@@ -310,6 +344,10 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 		}
 		bodyBytes = b
 	}
+{{- if .HasGraphQLPersistedQueries}}
+	bodyBytes = c.applyPersistedQueryBodyOverrides(bodyBytes)
+	params = c.applyPersistedQueryParamOverrides(params)
+{{- end}}
 
 	// Resolve auth material before the dry-run branch so --dry-run can preview
 	// exactly what would be sent. Uses only cached credentials; a token that
@@ -419,7 +457,9 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 		for k, v := range headerOverrides {
 			req.Header.Set(k, v)
 		}
+{{- if not .UsesBrowserManagedUserAgent}}
 		req.Header.Set("User-Agent", "{{.Name}}-pp-cli/{{.Version}}")
+{{- end}}
 
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
@@ -535,6 +575,154 @@ func (c *Client) dryRun(method, targetURL, path string, params map[string]string
 {{- end}}
 	fmt.Fprintf(os.Stderr, "\n(dry run - no request sent)\n")
 	return json.RawMessage(`{"dry_run": true}`), 0, nil
+}
+
+{{- if .HasGraphQLPersistedQueries}}
+type persistedQueryRegistryEntry struct {
+	OperationName string `json:"operation_name"`
+	Hash          string `json:"hash"`
+}
+
+func (c *Client) applyPersistedQueryBodyOverrides(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	hashes := c.persistedQueryHashes()
+	if len(hashes) == 0 {
+		return body
+	}
+
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	changed := rewritePersistedQueryPayload(payload, hashes)
+	if !changed {
+		return body
+	}
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func (c *Client) applyPersistedQueryParamOverrides(params map[string]string) map[string]string {
+	if len(params) == 0 {
+		return params
+	}
+	operationName := params["operationName"]
+	if operationName == "" {
+		return params
+	}
+	hashes := c.persistedQueryHashes()
+	hash := hashes[operationName]
+	if hash == "" {
+		return params
+	}
+
+	updated := make(map[string]string, len(params))
+	for k, v := range params {
+		updated[k] = v
+	}
+
+	var extensions map[string]any
+	if raw := updated["extensions"]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &extensions)
+	}
+	if extensions == nil {
+		extensions = map[string]any{}
+	}
+	persisted, _ := extensions["persistedQuery"].(map[string]any)
+	if persisted == nil {
+		persisted = map[string]any{}
+		extensions["persistedQuery"] = persisted
+	}
+	persisted["sha256Hash"] = hash
+	data, err := json.Marshal(extensions)
+	if err != nil {
+		return params
+	}
+	updated["extensions"] = string(data)
+	return updated
+}
+
+func (c *Client) persistedQueryHashes() map[string]string {
+	path := c.persistedQueryRegistryPath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var entries []persistedQueryRegistryEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil
+	}
+	hashes := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		if entry.OperationName != "" && entry.Hash != "" {
+			hashes[entry.OperationName] = entry.Hash
+		}
+	}
+	return hashes
+}
+
+func (c *Client) persistedQueryRegistryPath() string {
+	if c != nil && c.Config != nil && c.Config.Path != "" {
+		return filepath.Join(filepath.Dir(c.Config.Path), "persisted-queries.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "{{.Name}}-pp-cli", "persisted-queries.json")
+}
+
+func rewritePersistedQueryPayload(payload any, hashes map[string]string) bool {
+	switch typed := payload.(type) {
+	case []any:
+		changed := false
+		for _, item := range typed {
+			if rewritePersistedQueryPayload(item, hashes) {
+				changed = true
+			}
+		}
+		return changed
+	case map[string]any:
+		operationName, _ := typed["operationName"].(string)
+		hash := hashes[operationName]
+		if operationName == "" || hash == "" {
+			return false
+		}
+		extensions, _ := typed["extensions"].(map[string]any)
+		if extensions == nil {
+			extensions = map[string]any{}
+			typed["extensions"] = extensions
+		}
+		persisted, _ := extensions["persistedQuery"].(map[string]any)
+		if persisted == nil {
+			persisted = map[string]any{}
+			extensions["persistedQuery"] = persisted
+		}
+		if persisted["sha256Hash"] == hash {
+			return false
+		}
+		persisted["sha256Hash"] = hash
+		return true
+	default:
+		return false
+	}
+}
+
+{{- end}}
+
+func (c *Client) ConfiguredTimeout() time.Duration {
+	if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
+		return c.HTTPClient.Timeout
+	}
+	return 30 * time.Second
 }
 
 func (c *Client) authHeader() (string, error) {

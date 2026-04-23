@@ -60,6 +60,34 @@ These capabilities aren't available in any other tool for this API.
 {{- end}}
 {{- end}}
 {{- end}}
+{{- if .UsesBrowserHTTPTransport}}
+
+## HTTP Transport
+
+This CLI uses Chrome-compatible HTTP transport{{if .UsesBrowserHTTP3Transport}} over HTTP/3{{end}} for browser-facing endpoints. It does not require a resident browser process for normal API calls.
+{{- end}}
+{{- if .TrafficAnalysis}}
+
+## Discovery Signals
+
+This CLI was generated with browser-observed traffic context.
+- Capture coverage: {{.TrafficAnalysis.APIEntryCount}} API entries from {{.TrafficAnalysis.EntryCount}} total network entries
+{{- if .TrafficAnalysis.Protocols}}
+- Protocols: {{join .TrafficAnalysis.Protocols ", "}}
+{{- end}}
+{{- if .TrafficAnalysis.AuthCandidates}}
+- Auth signals: {{join .TrafficAnalysis.AuthCandidates "; "}}
+{{- end}}
+{{- if .TrafficAnalysis.GenerationHints}}
+- Generation hints: {{join .TrafficAnalysis.GenerationHints ", "}}
+{{- end}}
+{{- if .TrafficAnalysis.CandidateCommands}}
+- Candidate command ideas: {{join .TrafficAnalysis.CandidateCommands "; "}}
+{{- end}}
+{{- if .TrafficAnalysis.Warnings}}
+- Caveats: {{range $i, $warning := .TrafficAnalysis.Warnings}}{{if $i}}; {{end}}{{$warning}}{{end}}
+{{- end}}
+{{- end}}
 
 ## Command Reference
 {{range $name, $resource := .Resources}}
@@ -233,14 +261,6 @@ For endpoints that submit long-running work, the generator detects the submit-th
 | `--wait-timeout` | Maximum wait duration (default 10m, 0 means no timeout) |
 | `--wait-interval` | Initial poll interval (default 2s; grows with exponential backoff up to 30s) |
 
-Every `--wait` invocation records the job to `~/.<cli>-pp-cli/jobs.jsonl`. Inspect the ledger with:
-
-```
-<cli>-pp-cli jobs list [--json] [--limit N]
-<cli>-pp-cli jobs get <job-id>
-<cli>-pp-cli jobs prune --older-than 7d
-```
-
 Use async submission without `--wait` when you want to fire-and-forget; use `--wait` when you want one command to return the finished artifact.
 
 ## Exit Codes
@@ -265,7 +285,7 @@ Parse `$ARGUMENTS`:
 
 ## CLI Installation
 
-1. Check Go is installed: `go version` (requires Go 1.23+)
+1. Check Go is installed: `go version` (requires {{if .UsesBrowserHTTPTransport}}Go 1.25+{{else}}Go 1.23+{{end}})
 2. Install:
    ```bash
    go install github.com/mvanhorn/printing-press-library/library/{{if .Category}}{{.Category}}{{else}}other{{end}}/{{.Name}}-pp-cli/cmd/{{.Name}}-pp-cli@latest

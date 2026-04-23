@@ -9,14 +9,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+{{- if .HasDataLayer}}
 	"path/filepath"
+{{- end}}
 {{- if and .Auth.Type (ne .Auth.Type "none")}}
 	"regexp"
 {{- end}}
 	"sort"
 	"strings"
 	"text/tabwriter"
+{{- if .HasDataLayer}}
 	"time"
+{{- end}}
 	"unicode"
 
 	"github.com/spf13/cobra"

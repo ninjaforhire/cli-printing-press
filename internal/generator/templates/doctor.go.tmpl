@@ -4,6 +4,11 @@
 package cli
 
 import (
+{{- if .Auth.RequiresBrowserSession}}
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+{{- end}}
 {{- if .HasStore}}
 	"database/sql"
 {{- end}}
@@ -12,11 +17,14 @@ import (
 	"io"
 {{- end}}
 	"net/http"
-{{- if or .Auth.EnvVars .HasStore}}
+{{- if or .Auth.EnvVars .HasStore .Auth.RequiresBrowserSession}}
 	"os"
 {{- end}}
 {{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
 	"os/exec"
+{{- end}}
+{{- if .Auth.RequiresBrowserSession}}
+	"path/filepath"
 {{- end}}
 	"strings"
 	"time"
@@ -73,6 +81,15 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					report["auth"] = "configured (browser session)"
 					report["auth_source"] = cfg.AuthSource
 					report["auth_domain"] = "{{.Auth.CookieDomain}}"
+{{- if .Auth.RequiresBrowserSession}}
+					if proofOK, proofDetail := browserSessionProofStatus(cfg, header); proofOK {
+						report["browser_session_proof"] = "valid"
+						report["browser_session_proof_detail"] = proofDetail
+					} else {
+						report["browser_session_proof"] = "missing or stale"
+						report["browser_session_proof_detail"] = proofDetail
+					}
+{{- end}}
 				}
 			}
 			// Check cookie tool availability
@@ -167,6 +184,14 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				authHeader := cfg.AuthHeader()
 				if authHeader == "" {
 					// No auth configured — skip credential validation
+{{- if .Auth.RequiresBrowserSession}}
+				} else if proofOK, proofDetail := browserSessionProofStatus(cfg, authHeader); proofOK {
+					report["credentials"] = "valid"
+					report["credentials_detail"] = proofDetail
+				} else {
+					report["credentials"] = "invalid (browser-session proof missing or stale)"
+					report["credentials_detail"] = proofDetail
+{{- else}}
 				} else if !apiReachable {
 					report["credentials"] = "skipped (API unreachable)"
 				} else {
@@ -181,7 +206,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 {{- range .RequiredHeaders}}
 					authReq.Header.Set("{{.Name}}", "{{.Value}}")
 {{- end}}
+{{- if not .UsesBrowserManagedUserAgent}}
 					authReq.Header.Set("User-Agent", "{{.Name}}-pp-cli")
+{{- end}}
 					authResp, authErr := httpClient.Do(authReq)
 					if authErr != nil {
 						report["credentials"] = "error: could not reach API"
@@ -197,6 +224,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 							report["credentials"] = fmt.Sprintf("ok (HTTP %d from base URL, but auth was accepted)", authResp.StatusCode)
 						}
 					}
+{{- end}}
 				}
 			} else if cfg != nil && cfg.BaseURL == "" {
 				report["api"] = "not configured (set base_url in config file)"
@@ -224,6 +252,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			checkKeys := []struct{ key, label string }{
 				{"config", "Config"},
 				{"auth", "Auth"},
+{{- if .Auth.RequiresBrowserSession}}
+				{"browser_session_proof", "Browser Session Proof"},
+{{- end}}
 				{"api", "API"},
 				{"credentials", "Credentials"},
 			}
@@ -238,7 +269,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				case strings.HasPrefix(s, "optional"):
 					// Optional-auth CLI with no key set — informational, not a failure.
 					indicator = yellow("INFO")
-				case strings.Contains(s, "error") || strings.Contains(s, "not configured") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid"):
+				case strings.Contains(s, "error") || strings.Contains(s, "not configured") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid") || strings.Contains(s, "missing"):
 					indicator = red("FAIL")
 				case s == "not required":
 					// Public APIs: no auth needed is a healthy state, not a warning.
@@ -281,6 +312,55 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 	return cmd
 }
 
+{{- if .Auth.RequiresBrowserSession}}
+type doctorBrowserSessionProof struct {
+	APIName               string `json:"api_name"`
+	CookieDomain          string `json:"cookie_domain"`
+	ValidationMethod      string `json:"validation_method"`
+	ValidationPath        string `json:"validation_path"`
+	StatusCode            int    `json:"status_code"`
+	AuthSource            string `json:"auth_source"`
+	CredentialFingerprint string `json:"credential_fingerprint"`
+	VerifiedAt            string `json:"verified_at"`
+}
+
+func browserSessionProofStatus(cfg *config.Config, authHeader string) (bool, string) {
+	if authHeader == "" {
+		return false, "no browser session credentials configured"
+	}
+	proofPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	data, err := os.ReadFile(proofPath)
+	if err != nil {
+		return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
+	}
+	var proof doctorBrowserSessionProof
+	if err := json.Unmarshal(data, &proof); err != nil {
+		return false, "proof is not valid JSON; re-run {{.Name}}-pp-cli auth login --chrome"
+	}
+	if proof.APIName != "{{.Name}}" {
+		return false, "proof belongs to a different CLI"
+	}
+	if proof.CookieDomain != "{{.Auth.CookieDomain}}" {
+		return false, "proof belongs to a different cookie domain"
+	}
+	if proof.ValidationPath != "{{.Auth.BrowserSessionValidationPath}}" {
+		return false, "proof was captured for a different validation endpoint"
+	}
+	if authHeader != "" && proof.CredentialFingerprint != doctorFingerprintCredential(authHeader) {
+		return false, "proof does not match the currently configured browser session"
+	}
+	if proof.StatusCode < 200 || proof.StatusCode >= 300 {
+		return false, fmt.Sprintf("proof recorded HTTP %d", proof.StatusCode)
+	}
+	return true, fmt.Sprintf("%s %s verified at %s", proof.ValidationMethod, proof.ValidationPath, proof.VerifiedAt)
+}
+
+func doctorFingerprintCredential(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:8])
+}
+{{- end}}
+
 // doctorExitForFailOn returns a non-nil error when the report's worst
 // status meets or exceeds the --fail-on threshold. "error" always trips
 // when any section reports an error; "stale" also trips when the cache
@@ -294,7 +374,7 @@ func doctorExitForFailOn(failOn string, report map[string]any) error {
 	for _, v := range report {
 		s, ok := v.(string)
 		if ok {
-			if strings.Contains(s, "error") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid") {
+			if strings.Contains(s, "error") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid") || strings.Contains(s, "missing") {
 				worstError = true
 			}
 		}

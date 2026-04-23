@@ -192,3 +192,26 @@ func TestClassifyComposedMultipleEnvVarsMixed(t *testing.T) {
 		t.Errorf("COOKIE_B should be NotSet, got %q", findings[1].Status)
 	}
 }
+
+func TestClassifyBrowserSessionAlsoReportsEnvVars(t *testing.T) {
+	m := &pipeline.ToolsManifest{
+		Auth: pipeline.ManifestAuth{
+			Type:                   "cookie",
+			EnvVars:                []string{"PRODUCT_SESSION"},
+			RequiresBrowserSession: true,
+		},
+	}
+	findings := Classify("product", m, envFrom(map[string]string{"PRODUCT_SESSION": "session=value"}))
+	if len(findings) != 2 {
+		t.Fatalf("want env var finding plus browser-session proof finding, got %d", len(findings))
+	}
+	if findings[0].EnvVar != "PRODUCT_SESSION" || findings[0].Status != StatusOK {
+		t.Fatalf("want first finding to report env var status, got %+v", findings[0])
+	}
+	if findings[1].Status != StatusUnknown {
+		t.Fatalf("want browser-session proof finding to remain unknown, got %+v", findings[1])
+	}
+	if findings[1].Reason == "" {
+		t.Fatal("browser-session proof finding should explain the required doctor check")
+	}
+}

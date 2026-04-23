@@ -2,12 +2,17 @@ package generator
 
 import (
 	"encoding/json"
+	"go/parser"
+	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/internal/browsersniff"
 	"github.com/mvanhorn/cli-printing-press/internal/graphql"
 	"github.com/mvanhorn/cli-printing-press/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/internal/openapi"
@@ -31,9 +36,9 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		// +1 for internal/cli/feedback.go (HeyGen-style in-band agent feedback channel)
 		// +1 for internal/store/schema_version_test.go (PRAGMA user_version gate, discrawl-inspired)
 		// +2 for internal/cli/which.go + which_test.go (capability-to-command resolver)
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 42},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 46},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 44},
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 43},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 48},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 45},
 	}
 
 	for _, tt := range tests {
@@ -307,7 +312,7 @@ func TestGenerateAgentContextCommand(t *testing.T) {
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(out, &payload), "agent-context must emit valid JSON")
-	assert.Equal(t, "1", payload["schema_version"], "schema_version must be present and start at 1")
+	assert.Equal(t, "2", payload["schema_version"], "schema_version must be present")
 	assert.Contains(t, payload, "cli")
 	assert.Contains(t, payload, "auth")
 	assert.Contains(t, payload, "commands")
@@ -450,6 +455,278 @@ func TestGenerateWithNoAuth(t *testing.T) {
 	require.NoError(t, gen.Generate())
 	require.NoError(t, gen.Validate())
 	assert.NoFileExists(t, filepath.Join(outputDir, naming.ValidationBinary("noauth")))
+}
+
+func TestGenerateBrowserChromeTransport(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:       "websurface",
+		Version:    "0.1.0",
+		BaseURL:    "https://www.example.com",
+		SpecSource: "sniffed",
+		Auth:       spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/websurface-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"posts": {
+				Description: "Browse posts",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/",
+						Description: "List posts",
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "websurface-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	gomod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
+	require.NoError(t, err)
+	assert.Contains(t, string(gomod), "go 1.25")
+	assert.Contains(t, string(gomod), "github.com/enetx/surf")
+
+	clientGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(clientGo), `"github.com/enetx/surf"`)
+	assert.Contains(t, string(clientGo), "Impersonate()")
+	assert.Contains(t, string(clientGo), "Chrome()")
+	assert.NotContains(t, string(clientGo), "ForceHTTP3()")
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(readme), "Chrome-compatible HTTP transport")
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGenerateBrowserChromeH3Transport(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:          "websurfaceh3",
+		Version:       "0.1.0",
+		BaseURL:       "https://www.example.com",
+		HTTPTransport: spec.HTTPTransportBrowserChromeH3,
+		Auth:          spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/websurfaceh3-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"posts": {
+				Description: "Browse posts",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/",
+						Description: "List posts",
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "websurfaceh3-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	clientGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(clientGo), `"github.com/enetx/surf"`)
+	assert.Contains(t, string(clientGo), "ForceHTTP3()")
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGenerateHTMLExtractionEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/docs/page":
+			_, _ = w.Write([]byte(`<html><head><title>Docs</title></head><body><a href="child">Child page</a></body></html>`))
+		case "/makers":
+			_, _ = w.Write([]byte(`<html><head><title>Makers</title></head><body><a href="/@alice">Alice</a></body></html>`))
+		default:
+			_, _ = w.Write([]byte(`<html>
+			<head><title>Product Hunt</title><meta name="description" content="New products"></head>
+			<body>
+				<a href="/products/speakon">1. SpeakON</a>
+				<a href="/products/instant-db">2. InstantDB</a>
+				<a href="/about">About</a>
+			</body>
+		</html>`))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	apiSpec := &spec.APISpec{
+		Name:    "webhtml",
+		Version: "0.1.0",
+		BaseURL: server.URL,
+		Auth:    spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/webhtml-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"posts": {
+				Description: "Browse posts",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:         "GET",
+						Path:           "/",
+						Description:    "List posts from HTML",
+						ResponseFormat: spec.ResponseFormatHTML,
+						HTMLExtract: &spec.HTMLExtract{
+							Mode:         spec.HTMLExtractModeLinks,
+							LinkPrefixes: []string{"/products"},
+							Limit:        10,
+						},
+						Response: spec.ResponseDef{Type: "array", Item: "html_link"},
+					},
+				},
+			},
+			"docs": {
+				Description: "Browse docs",
+				Endpoints: map[string]spec.Endpoint{
+					"page": {
+						Method:         "GET",
+						Path:           "/docs/page",
+						Description:    "Fetch docs page links",
+						ResponseFormat: spec.ResponseFormatHTML,
+						HTMLExtract: &spec.HTMLExtract{
+							Mode:         spec.HTMLExtractModeLinks,
+							LinkPrefixes: []string{"/docs"},
+							Limit:        10,
+						},
+						Response: spec.ResponseDef{Type: "array", Item: "html_link"},
+					},
+				},
+			},
+			"makers": {
+				Description: "Browse makers",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:         "GET",
+						Path:           "/makers",
+						Description:    "Fetch maker links",
+						ResponseFormat: spec.ResponseFormatHTML,
+						HTMLExtract: &spec.HTMLExtract{
+							Mode:         spec.HTMLExtractModeLinks,
+							LinkPrefixes: []string{"/@"},
+							Limit:        10,
+						},
+						Response: spec.ResponseDef{Type: "array", Item: "html_link"},
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "webhtml-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	require.FileExists(t, filepath.Join(outputDir, "internal", "cli", "html_extract.go"))
+	gomod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
+	require.NoError(t, err)
+	assert.Contains(t, string(gomod), "golang.org/x/net")
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	binaryPath := filepath.Join(outputDir, "webhtml-pp-cli")
+	runGoCommand(t, outputDir, "build", "-o", binaryPath, "./cmd/webhtml-pp-cli")
+
+	cmd := exec.Command(binaryPath, "posts", "list", "--json")
+	cmd.Env = append(os.Environ(), "WEBHTML_BASE_URL="+server.URL)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	var envelope struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(out, &envelope), string(out))
+	links := envelope.Results
+	require.Len(t, links, 2)
+	assert.Equal(t, "SpeakON", links[0]["name"])
+	assert.Equal(t, "speakon", links[0]["slug"])
+	assert.Equal(t, float64(1), links[0]["rank"])
+
+	cmd = exec.Command(binaryPath, "posts", "list", "--dry-run", "--json")
+	cmd.Env = append(os.Environ(), "WEBHTML_BASE_URL="+server.URL)
+	out, err = cmd.Output()
+	require.NoError(t, err, string(out))
+	var dryRun map[string]any
+	require.NoError(t, json.Unmarshal(out, &dryRun), string(out))
+	if dryRun["dry_run"] != true {
+		results, _ := dryRun["results"].(map[string]any)
+		assert.Equal(t, true, results["dry_run"])
+	}
+
+	cmd = exec.Command(binaryPath, "docs", "page", "--json")
+	cmd.Env = append(os.Environ(), "WEBHTML_BASE_URL="+server.URL)
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoError(t, json.Unmarshal(out, &envelope), string(out))
+	require.Len(t, envelope.Results, 1)
+	assert.Equal(t, server.URL+"/docs/child", envelope.Results[0]["url"])
+
+	cmd = exec.Command(binaryPath, "makers", "list", "--json")
+	cmd.Env = append(os.Environ(), "WEBHTML_BASE_URL="+server.URL)
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoError(t, json.Unmarshal(out, &envelope), string(out))
+	require.Len(t, envelope.Results, 1)
+	assert.Equal(t, server.URL+"/@alice", envelope.Results[0]["url"])
+	assert.Equal(t, "alice", envelope.Results[0]["slug"])
+}
+
+func TestGenerateStandardTransportForOfficialAPI(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:       "officialapi",
+		Version:    "0.1.0",
+		BaseURL:    "https://api.example.com",
+		SpecSource: "official",
+		Auth:       spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/officialapi-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/items",
+						Description: "List items",
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "officialapi-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	gomod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
+	require.NoError(t, err)
+	assert.Contains(t, string(gomod), "go 1.23")
+	assert.NotContains(t, string(gomod), "github.com/enetx/surf")
+
+	clientGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(clientGo), `"github.com/enetx/surf"`)
 }
 
 func TestGenerateWithOwnerField(t *testing.T) {
@@ -1108,7 +1385,7 @@ func TestBuildPromotedCommands(t *testing.T) {
 		assert.Empty(t, promoted)
 	})
 
-	t.Run("prefers GET without positional params for promoted command", func(t *testing.T) {
+	t.Run("multi-endpoint resources are not promoted even when they have a list endpoint", func(t *testing.T) {
 		t.Parallel()
 		s := &spec.APISpec{
 			Name:    "test",
@@ -1125,9 +1402,55 @@ func TestBuildPromotedCommands(t *testing.T) {
 			},
 		}
 		promoted := buildPromotedCommands(s)
-		require.Len(t, promoted, 1)
-		assert.Equal(t, "items", promoted[0].PromotedName)
-		assert.Equal(t, "list", promoted[0].EndpointName, "should prefer the list endpoint (no positional params)")
+		assert.Empty(t, promoted, "multi-endpoint resources stay nested so unknown subcommands cannot run a promoted parent action")
+	})
+
+	t.Run("deterministically skips multi-endpoint resources", func(t *testing.T) {
+		t.Parallel()
+		s := &spec.APISpec{
+			Name:    "test",
+			Version: "0.1.0",
+			BaseURL: "https://api.example.com",
+			Resources: map[string]spec.Resource{
+				"widgets": {
+					Endpoints: map[string]spec.Endpoint{
+						"search": {Method: "GET", Path: "/widgets/search", Description: "Search widgets"},
+						"list":   {Method: "GET", Path: "/widgets", Description: "List widgets"},
+					},
+				},
+			},
+		}
+		for i := 0; i < 20; i++ {
+			promoted := buildPromotedCommands(s)
+			assert.Empty(t, promoted)
+		}
+	})
+
+	t.Run("deterministically orders promoted resources", func(t *testing.T) {
+		t.Parallel()
+		s := &spec.APISpec{
+			Name:    "test",
+			Version: "0.1.0",
+			BaseURL: "https://api.example.com",
+			Resources: map[string]spec.Resource{
+				"widgets": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {Method: "GET", Path: "/widgets", Description: "List widgets"},
+					},
+				},
+				"accounts": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {Method: "GET", Path: "/accounts", Description: "List accounts"},
+					},
+				},
+			},
+		}
+		for i := 0; i < 20; i++ {
+			promoted := buildPromotedCommands(s)
+			require.Len(t, promoted, 2)
+			assert.Equal(t, "accounts", promoted[0].ResourceName)
+			assert.Equal(t, "widgets", promoted[1].ResourceName)
+		}
 	})
 
 	t.Run("single-endpoint POST resource IS promoted (e.g. login, logout, register)", func(t *testing.T) {
@@ -1262,10 +1585,11 @@ func TestGeneratedOutput_PromotedCommandCompiles(t *testing.T) {
 	gen := New(apiSpec, outputDir)
 	require.NoError(t, gen.Generate())
 
-	// Promoted files SHOULD exist — they provide user-friendly shortcuts for resource groups.
-	// When promoted commands exist, resource parents are hidden from --help.
+	// Single-endpoint resources get promoted shortcuts; multi-endpoint resources
+	// stay nested so unknown subcommands cannot run a parent action.
 	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "promoted_steam-user.go"))
-	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "promoted_items.go"))
+	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "promoted_items.go"))
+	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "items.go"))
 	// API discovery command should also be generated
 	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "api_discovery.go"))
 
@@ -1695,11 +2019,14 @@ func TestGenerate_CookieAuthUsesBrowserTemplate(t *testing.T) {
 		Version: "0.1.0",
 		BaseURL: "https://app.example.com",
 		Auth: spec.AuthConfig{
-			Type:         "cookie",
-			Header:       "Cookie",
-			In:           "cookie",
-			CookieDomain: ".example.com",
-			EnvVars:      []string{"COOKIEAPP_COOKIES"},
+			Type:                           "cookie",
+			Header:                         "Cookie",
+			In:                             "cookie",
+			CookieDomain:                   ".example.com",
+			EnvVars:                        []string{"COOKIEAPP_COOKIES"},
+			RequiresBrowserSession:         true,
+			BrowserSessionValidationPath:   "/api/items",
+			BrowserSessionValidationMethod: "GET",
 		},
 		Config: spec.ConfigSpec{
 			Format: "toml",
@@ -1732,6 +2059,16 @@ func TestGenerate_CookieAuthUsesBrowserTemplate(t *testing.T) {
 	assert.Contains(t, content, "does not support --profile")
 	assert.Contains(t, content, ".example.com")
 	assert.Contains(t, content, "continuing without auto-detection")
+	assert.Contains(t, content, "validateAndWriteBrowserSessionProof")
+	assert.Contains(t, content, "validateAndWriteBrowserSessionProofWithRetry")
+	assert.Contains(t, content, "browser-session-proof.json")
+	assert.Contains(t, content, "newAuthRefreshCmd")
+	assert.Contains(t, content, "auth refresh")
+	assert.Contains(t, content, "openBrowserForCookieRefresh")
+	assert.Contains(t, content, "waitForCookieRefreshBrowser")
+	assert.Contains(t, content, "Complete any login or browser challenge in Chrome")
+	assert.NotContains(t, content, "No browser runtime found.")
+	assert.NotContains(t, content, "newAuthRefreshQueriesCmd")
 	// Should NOT contain simple token template indicators
 	assert.NotContains(t, content, "set-token")
 
@@ -1746,9 +2083,248 @@ func TestGenerate_CookieAuthUsesBrowserTemplate(t *testing.T) {
 	require.NoError(t, err)
 	doctorContent := string(doctorGo)
 	assert.Contains(t, doctorContent, "auth login --chrome")
+	assert.Contains(t, doctorContent, "browser_session_proof")
 
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGenerate_UserAgentOverrideGatedByBrowserTransport(t *testing.T) {
+	t.Parallel()
+
+	baseSpec := func(name string) *spec.APISpec {
+		return &spec.APISpec{
+			Name:    name,
+			Version: "0.1.0",
+			BaseURL: "https://api.example.com",
+			Auth:    spec.AuthConfig{Type: "none"},
+			Config: spec.ConfigSpec{
+				Format: "toml",
+				Path:   "~/.config/" + name + "-pp-cli/config.toml",
+			},
+			Resources: map[string]spec.Resource{
+				"items": {
+					Description: "Manage items",
+					Endpoints: map[string]spec.Endpoint{
+						"list": {Method: "GET", Path: "/items", Description: "List items"},
+					},
+				},
+			},
+		}
+	}
+
+	standardDir := filepath.Join(t.TempDir(), "standard-pp-cli")
+	standardSpec := baseSpec("standard")
+	require.NoError(t, New(standardSpec, standardDir).Generate())
+	standardClient, err := os.ReadFile(filepath.Join(standardDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(standardClient), `req.Header.Set("User-Agent", "standard-pp-cli/0.1.0")`)
+
+	browserDir := filepath.Join(t.TempDir(), "browser-pp-cli")
+	browserSpec := baseSpec("browser")
+	browserSpec.HTTPTransport = spec.HTTPTransportBrowserChrome
+	require.NoError(t, New(browserSpec, browserDir).Generate())
+	browserClient, err := os.ReadFile(filepath.Join(browserDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(browserClient), `req.Header.Set("User-Agent"`)
+	browserAuth, err := os.ReadFile(filepath.Join(browserDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(browserAuth), "newAuthRefreshCmd")
+}
+
+func TestGenerateObjectBodyDefaultsAreParsedAsJSON(t *testing.T) {
+	t.Parallel()
+
+	outputDir := filepath.Join(t.TempDir(), "graphqlbody-pp-cli")
+	apiSpec := &spec.APISpec{
+		Name:          "graphqlbody",
+		Description:   "GraphQL body API",
+		Version:       "0.1.0",
+		BaseURL:       "https://www.example.com",
+		HTTPTransport: spec.HTTPTransportBrowserChromeH3,
+		Auth:          spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/graphqlbody-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"graphql": {
+				Description: "GraphQL BFF operations",
+				Endpoints: map[string]spec.Endpoint{
+					"posts_today": {
+						Method:      "POST",
+						Path:        "/frontend/graphql",
+						Description: "Run GraphQL operation PostsToday",
+						Body: []spec.Param{
+							{Name: "operationName", Type: "string", Required: true, Default: "PostsToday"},
+							{Name: "variables", Type: "object", Default: map[string]any{"date": "2026-04-22"}},
+							{Name: "extensions", Type: "object", Default: map[string]any{"persistedQuery": map[string]any{"version": 1, "sha256Hash": "oldhash"}}},
+						},
+					},
+					"product_page_launches": {
+						Method:      "POST",
+						Path:        "/frontend/graphql",
+						Description: "Run GraphQL operation ProductPageLaunches",
+						Body: []spec.Param{
+							{Name: "operationName", Type: "string", Required: true, Default: "ProductPageLaunches"},
+							{Name: "variables", Type: "object", Default: map[string]any{"slug": "sample"}},
+						},
+					},
+				},
+			},
+		},
+		Types: map[string]spec.TypeDef{},
+	}
+	gen := New(apiSpec, outputDir)
+	gen.TrafficAnalysis = &browsersniff.TrafficAnalysis{GenerationHints: []string{"graphql_persisted_query"}}
+	require.NoError(t, gen.Generate())
+
+	var content string
+	err := filepath.Walk(filepath.Join(outputDir, "internal", "cli"), func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || filepath.Ext(path) != ".go" {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "bodyExtensions") {
+			content = string(data)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, content)
+	assert.Contains(t, content, `StringVar(&bodyVariables, "variables", "{\"date\":\"2026-04-22\"}"`)
+	assert.Contains(t, content, `json.Unmarshal([]byte(bodyVariables), &parsedVariables)`)
+	assert.Contains(t, content, `body["variables"] = parsedVariables`)
+	assert.Contains(t, content, `json.Unmarshal([]byte(bodyExtensions), &parsedExtensions)`)
+	assert.Contains(t, content, `body["extensions"] = parsedExtensions`)
+	_, err = parser.ParseFile(token.NewFileSet(), "graphql_posts_today.go", content, parser.ParseComments)
+	require.NoError(t, err)
+
+	authGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	authContent := string(authGo)
+	assert.NotContains(t, authContent, "newAuthRefreshCmd")
+	assert.Contains(t, authContent, "newAuthRefreshQueriesCmd")
+	assert.NotContains(t, authContent, "waitForBrowserRuntimeClearance")
+	assert.NotContains(t, authContent, "Use --chrome to read cookies")
+	assert.NotContains(t, authContent, "wait-timeout")
+}
+
+func TestGenerateGraphQLBFFUsesSemanticCommandSurface(t *testing.T) {
+	t.Parallel()
+
+	capture := &browsersniff.EnrichedCapture{
+		TargetURL: "https://www.example.com",
+		Entries: []browsersniff.EnrichedEntry{
+			graphQLBFFCaptureEntry("ProductPageLaunches", `{"slug":"sample-product"}`, "aaa111"),
+			graphQLBFFCaptureEntry("ProductPageMakers", `{"slug":"sample-product"}`, "bbb222"),
+			graphQLBFFCaptureEntry("CategoryPageQuery", `{"slug":"productivity"}`, "ccc333"),
+		},
+	}
+	apiSpec, err := browsersniff.AnalyzeCapture(capture)
+	require.NoError(t, err)
+	apiSpec.HTTPTransport = spec.HTTPTransportBrowserChromeH3
+	apiSpec.Auth = spec.AuthConfig{Type: "none"}
+	apiSpec.Config = spec.ConfigSpec{Format: "toml", Path: "~/.config/example-pp-cli/config.toml"}
+
+	outputDir := filepath.Join(t.TempDir(), "example-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.TrafficAnalysis = &browsersniff.TrafficAnalysis{GenerationHints: []string{"graphql_persisted_query"}}
+	require.NoError(t, gen.Generate())
+
+	rootGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "root.go"))
+	require.NoError(t, err)
+	rootSrc := string(rootGo)
+	assert.Contains(t, rootSrc, "rootCmd.AddCommand(newProductsCmd(&flags))")
+	assert.NotContains(t, rootSrc, "rootCmd.AddCommand(newGraphqlCmd(&flags))")
+	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "products.go"))
+	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "products_launches.go"))
+	assert.FileExists(t, filepath.Join(outputDir, "internal", "cli", "products_makers.go"))
+	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "graphql.go"))
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	binaryPath := filepath.Join(outputDir, "example-pp-cli")
+	runGoCommand(t, outputDir, "build", "-o", binaryPath, "./cmd/example-pp-cli")
+	helpOut, err := exec.Command(binaryPath, "--help").CombinedOutput()
+	require.NoError(t, err, string(helpOut))
+	assert.Contains(t, string(helpOut), "products")
+	assert.NotContains(t, string(helpOut), "graphql")
+	productsHelp, err := exec.Command(binaryPath, "products", "--help").CombinedOutput()
+	require.NoError(t, err, string(productsHelp))
+	assert.Contains(t, string(productsHelp), "launches")
+	assert.Contains(t, string(productsHelp), "makers")
+}
+
+func TestGenerateWhichFallsBackToCommandTree(t *testing.T) {
+	t.Parallel()
+
+	outputDir := filepath.Join(t.TempDir(), "whichfallback-pp-cli")
+	apiSpec := &spec.APISpec{
+		Name:        "whichfallback",
+		Description: "Which fallback API",
+		Version:     "1.0.0",
+		BaseURL:     "https://api.example.com",
+		Auth:        spec.AuthConfig{Type: "none"},
+		Config:      spec.ConfigSpec{Format: "toml", Path: "~/.config/whichfallback-pp-cli/config.toml"},
+		Resources: map[string]spec.Resource{
+			"products": {
+				Description: "Product operations",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/products",
+						Description: "List products",
+					},
+				},
+				SubResources: map[string]spec.Resource{
+					"reviews": {
+						Description: "Review operations",
+						Endpoints: map[string]spec.Endpoint{
+							"list": {
+								Method:      "GET",
+								Path:        "/products/{id}/reviews",
+								Description: "List product reviews",
+								Params: []spec.Param{
+									{Name: "id", Type: "string", Required: true, Positional: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Types: map[string]spec.TypeDef{},
+	}
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	whichGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "which.go"))
+	require.NoError(t, err)
+	whichSrc := string(whichGo)
+	assert.Contains(t, whichSrc, `Command: "products list"`)
+	assert.Contains(t, whichSrc, `Description: "List products"`)
+	assert.Contains(t, whichSrc, `Command: "products reviews list"`)
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	binaryPath := filepath.Join(outputDir, "whichfallback-pp-cli")
+	runGoCommand(t, outputDir, "build", "-o", binaryPath, "./cmd/whichfallback-pp-cli")
+	whichOut, err := exec.Command(binaryPath, "which", "reviews", "--json").CombinedOutput()
+	require.NoError(t, err, string(whichOut))
+	assert.Contains(t, string(whichOut), "products reviews list")
+}
+
+func graphQLBFFCaptureEntry(operationName, variablesJSON, hash string) browsersniff.EnrichedEntry {
+	return browsersniff.EnrichedEntry{
+		Method:              "POST",
+		URL:                 "https://www.example.com/frontend/graphql",
+		RequestHeaders:      map[string]string{"Content-Type": "application/json"},
+		RequestBody:         `{"operationName":"` + operationName + `","variables":` + variablesJSON + `,"extensions":{"persistedQuery":{"version":1,"sha256Hash":"` + hash + `"}}}`,
+		ResponseStatus:      200,
+		ResponseContentType: "application/json",
+		ResponseBody:        `{"data":{"node":{"id":"1"}}}`,
+	}
 }
 
 func TestGenerate_ComposedAuthUsesBrowserTemplate(t *testing.T) {
@@ -1953,6 +2529,44 @@ func TestMCPDescription(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGenerateMCPContextEscapesDomainStrings(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := spec.Parse(filepath.Join("..", "..", "testdata", "stytch.yaml"))
+	require.NoError(t, err)
+	apiSpec.Description = `Stytch "quoted" API \ context`
+	apiSpec.Auth.KeyURL = `https://example.test/keys?label="quoted"&path=\demo`
+
+	users := apiSpec.Resources["users"]
+	users.Description = `Manage "users" with \ backslashes`
+	apiSpec.Resources["users"] = users
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet.MCP = true
+	gen.NovelFeatures = []NovelFeature{
+		{
+			Name:        `Quote "dashboard"`,
+			Command:     `quote run --filter="active"`,
+			Description: `Shows "quoted" data from C:\tmp.`,
+			Rationale:   `Agents need "literal" strings without breaking generated Go.`,
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	mcpToolsPath := filepath.Join(outputDir, "internal", "mcp", "tools.go")
+	data, err := os.ReadFile(mcpToolsPath)
+	require.NoError(t, err)
+
+	_, err = parser.ParseFile(token.NewFileSet(), mcpToolsPath, data, parser.AllErrors)
+	require.NoError(t, err, "MCP tools source must remain valid Go when context strings contain quotes and backslashes")
+
+	src := string(data)
+	assert.Contains(t, src, `label=\"quoted\"&path=\\demo`)
+	assert.Contains(t, src, `Quote \"dashboard\"`)
+	assert.Contains(t, src, `filter=\"active\"`)
 }
 
 func TestEnvVarBuiltinFieldDedup(t *testing.T) {
