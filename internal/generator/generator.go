@@ -2328,7 +2328,29 @@ func safeTypeName(name string) string {
 	if len(result) > 0 && !unicode.IsLetter(rune(result[0])) {
 		result = "T" + result
 	}
+	if isGoKeyword(result) {
+		result = "T" + result
+	}
 	return result
+}
+
+// goKeywords is the set of reserved words from the Go language spec
+// (https://go.dev/ref/spec#Keywords). Type names that match these refuse to
+// parse as `type X struct { ... }`. Predeclared identifiers (bool, int,
+// string, error, etc.) shadow rather than fail and are intentionally
+// excluded; OpenAPI specs that use them as type names compile, just with
+// shadowed builtins inside that file.
+var goKeywords = map[string]bool{
+	"break": true, "case": true, "chan": true, "const": true, "continue": true,
+	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
+	"func": true, "go": true, "goto": true, "if": true, "import": true,
+	"interface": true, "map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true, "var": true,
+}
+
+// isGoKeyword reports whether s is a reserved word in the Go language spec.
+func isGoKeyword(s string) bool {
+	return goKeywords[s]
 }
 
 // toKebab converts PascalCase, camelCase, or mixed names to kebab-case.
