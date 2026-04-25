@@ -6,27 +6,29 @@ import (
 	"github.com/mvanhorn/cli-printing-press/internal/spec"
 )
 
-// dedupeFlagIdentifiers ensures that no two non-positional params on a single
-// endpoint share a Go identifier (flag<Camel>) or cobra flag name after
-// camelization or kebab-casing, and that no param collides with a reserved
-// generator-introduced identifier (pagination's flagAll; async's flagWait,
-// flagWaitTimeout, flagWaitInterval).
+// dedupeFlagIdentifiers ensures that no two non-positional params or body
+// fields on a single endpoint share a Go identifier (flag<Camel> /
+// body<Camel>) or cobra flag name after camelization or kebab-casing, and
+// that no entry collides with a reserved generator-introduced identifier
+// (pagination's flagAll, async's flagWait*, mutating endpoints' --stdin).
 //
-// Conflicting params have Name suffixed with _2, _3, ... until the identifier
-// and flag name are both unique. Without this, specs that use date-range
-// filter conventions (e.g., Twilio's StartTime, StartTime>, StartTime< all
-// camelize to "StartTime") or expose a literal "all" parameter on a paginated
-// endpoint (e.g., GitHub notifications colliding with pagination's --all)
-// produce duplicate `var flagX` declarations and refuse to compile.
+// Conflicting entries have IdentName populated to Name with _2, _3, ...
+// suffixed until the Go identifier and cobra flag name are both unique
+// relative to other entries on the same endpoint and to reserved generator
+// names. Without this, specs that use date-range filter conventions (e.g.,
+// Twilio's StartTime, StartTime>, StartTime< all camelize to "StartTime"),
+// expose a literal "all" parameter on a paginated endpoint (e.g., GitHub
+// notifications colliding with pagination's --all), or have query params
+// and body fields that share names produce duplicate `var flagX` / `var
+// bodyX` declarations and refuse to compile, or register the same cobra
+// flag twice and fail at runtime.
 func (g *Generator) dedupeFlagIdentifiers() {
 	if g.Spec == nil {
 		return
 	}
 	for resName, res := range g.Spec.Resources {
 		for epName, ep := range res.Endpoints {
-			idents, flags := reservedFlagNamesForEndpoint(resName, epName, ep, g.AsyncJobs)
-			ep.Params = uniquifyParamNames(ep.Params, idents, flags)
-			res.Endpoints[epName] = ep
+			res.Endpoints[epName] = dedupeEndpointIdentifiers(resName, epName, ep, g.AsyncJobs)
 		}
 		for subName, sub := range res.SubResources {
 			// Sub-resource async lookups elsewhere in the generator (see
@@ -36,9 +38,7 @@ func (g *Generator) dedupeFlagIdentifiers() {
 			// correctly. DetectAsyncJobs does not currently walk
 			// sub-resources, so this lookup is a no-op today.
 			for epName, ep := range sub.Endpoints {
-				idents, flags := reservedFlagNamesForEndpoint(subName, epName, ep, g.AsyncJobs)
-				ep.Params = uniquifyParamNames(ep.Params, idents, flags)
-				sub.Endpoints[epName] = ep
+				sub.Endpoints[epName] = dedupeEndpointIdentifiers(subName, epName, ep, g.AsyncJobs)
 			}
 			res.SubResources[subName] = sub
 		}
@@ -46,9 +46,40 @@ func (g *Generator) dedupeFlagIdentifiers() {
 	}
 }
 
-// reservedFlagNamesForEndpoint returns identifiers and flag names that the
-// command templates emit themselves and that user params therefore must not
-// shadow.
+// dedupeEndpointIdentifiers runs the param-then-body uniquification for one
+// endpoint, sharing the cobra flag-name namespace across both passes. Body
+// fields and query/path params each emit `cmd.Flags().*Var(..., flagName, ...)`
+// against the same cobra command, so collisions across the two lists must be
+// detected together.
+func dedupeEndpointIdentifiers(resKey, epName string, ep spec.Endpoint, asyncJobs map[string]AsyncJobInfo) spec.Endpoint {
+	flagIdents, flagNames := reservedFlagNamesForEndpoint(resKey, epName, ep, asyncJobs)
+
+	// Pass 1: query/path params populate the flag<Camel> namespace.
+	ep.Params = uniquifyIdentifiers(ep.Params, "flag", flagIdents, flagNames)
+
+	// Pass 2: body fields populate the body<Camel> namespace, but their cobra
+	// flag names share the namespace with everything we just registered.
+	bodyFlagNames := make(map[string]struct{}, len(flagNames)+len(ep.Params))
+	for k := range flagNames {
+		bodyFlagNames[k] = struct{}{}
+	}
+	for _, p := range ep.Params {
+		if !p.Positional {
+			bodyFlagNames[flagName(paramIdent(p))] = struct{}{}
+		}
+	}
+	ep.Body = uniquifyIdentifiers(ep.Body, "body", nil, bodyFlagNames)
+
+	return ep
+}
+
+// reservedFlagNamesForEndpoint returns identifiers and cobra flag names that
+// the command templates emit themselves and that user params or body fields
+// therefore must not shadow. The returned `idents` set is in the flag<Camel>
+// namespace (params); body<Camel> body-namespace identifiers carry no
+// reserved entries because the generator-introduced helpers (stdinBody) use
+// a different naming pattern. The `flags` set covers cobra flag names, which
+// params and body fields share.
 func reservedFlagNamesForEndpoint(resKey, epName string, ep spec.Endpoint, asyncJobs map[string]AsyncJobInfo) (idents, flags map[string]struct{}) {
 	idents = map[string]struct{}{}
 	flags = map[string]struct{}{}
@@ -64,17 +95,31 @@ func reservedFlagNamesForEndpoint(resKey, epName string, ep spec.Endpoint, async
 		flags["wait-timeout"] = struct{}{}
 		flags["wait-interval"] = struct{}{}
 	}
+	switch ep.Method {
+	case "POST", "PUT", "PATCH":
+		// command_endpoint.go.tmpl:525 emits cmd.Flags().BoolVar(&stdinBody,
+		// "stdin", ...) for mutating methods. stdinBody as a Go identifier
+		// does not pattern-match flag<X> or body<X>, so no ident reservation
+		// is needed; only the cobra flag name is shared.
+		flags["stdin"] = struct{}{}
+	}
 	return idents, flags
 }
 
-// uniquifyParamNames returns params with IdentName populated whenever a
-// param's Go identifier or cobra flag name would otherwise collide with
-// another param earlier in the list or with a reserved generator name. The
-// first occurrence of each colliding pattern keeps IdentName empty (templates
-// fall back to Name); subsequent ones get IdentName set to Name with _2, _3,
-// ... appended. Wire-side serialization always reads from Name and is never
-// mutated. Positional params are not flagged and pass through.
-func uniquifyParamNames(params []spec.Param, reservedIdents, reservedFlags map[string]struct{}) []spec.Param {
+// uniquifyIdentifiers returns params with IdentName populated whenever an
+// entry's Go identifier (identPrefix + Camel(.Name)) or cobra flag name would
+// otherwise collide with another entry earlier in the list or with a reserved
+// generator name. The first occurrence of each colliding pattern keeps
+// IdentName empty (templates fall back to Name); subsequent ones get
+// IdentName set to Name with _2, _3, ... appended. Wire-side serialization
+// always reads from Name and is never mutated. Positional params are not
+// flagged and pass through.
+//
+// identPrefix is "flag" for query/path params and "body" for request body
+// fields; the prefix selects the Go-identifier namespace. The cobra flag-name
+// namespace is shared across both prefixes, so callers seed reservedFlags
+// with names already registered by an earlier pass.
+func uniquifyIdentifiers(params []spec.Param, identPrefix string, reservedIdents, reservedFlags map[string]struct{}) []spec.Param {
 	if len(params) == 0 {
 		return params
 	}
@@ -93,7 +138,7 @@ func uniquifyParamNames(params []spec.Param, reservedIdents, reservedFlags map[s
 			out[i] = p
 			continue
 		}
-		ident := "flag" + toCamel(p.Name)
+		ident := identPrefix + toCamel(p.Name)
 		flag := flagName(p.Name)
 		if _, identTaken := usedIdents[ident]; !identTaken {
 			if _, flagTaken := usedFlags[flag]; !flagTaken {
@@ -105,7 +150,7 @@ func uniquifyParamNames(params []spec.Param, reservedIdents, reservedFlags map[s
 		}
 		for n := 2; ; n++ {
 			candidate := fmt.Sprintf("%s_%d", p.Name, n)
-			ident = "flag" + toCamel(candidate)
+			ident = identPrefix + toCamel(candidate)
 			flag = flagName(candidate)
 			_, identTaken := usedIdents[ident]
 			_, flagTaken := usedFlags[flag]
