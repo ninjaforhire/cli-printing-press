@@ -394,6 +394,15 @@ type Param struct {
 	Fields      []Param  `yaml:"fields" json:"fields"`                     // for nested objects
 	Enum        []string `yaml:"enum,omitempty" json:"enum,omitempty"`     // enum constraints for the parameter
 	Format      string   `yaml:"format,omitempty" json:"format,omitempty"` // OpenAPI format hints (date-time, email, uri, etc.)
+	// IdentName, when set, overrides Name for Go identifier and CLI flag
+	// derivation (camel/flagName). Name remains the wire-side parameter name
+	// used in URLs, JSON keys, and path substitution. Populated by the
+	// generator's flag-collision dedup pass when two params on the same
+	// endpoint would otherwise produce identical Go identifiers or CLI flag
+	// names — for example Twilio's StartTime/StartTime>/StartTime< all
+	// collapsing to "StartTime" through camelization. Most params leave this
+	// empty and template helpers fall back to Name.
+	IdentName string `yaml:"-" json:"-"`
 }
 
 type ResponseDef struct {

@@ -198,6 +198,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"mcpDescription":         mcpDescription,
 		"mcpDescriptionRich":     mcpDescriptionRich,
 		"flagName":               flagName,
+		"paramIdent":             paramIdent,
 		"safeTypeName":           safeTypeName,
 		"hasNonScalarType": func(types map[string]spec.TypeDef) bool {
 			for _, td := range types {
@@ -946,6 +947,12 @@ func (g *Generator) Generate() error {
 	if g.AsyncJobs == nil {
 		g.AsyncJobs = DetectAsyncJobs(g.Spec)
 	}
+
+	// Suffix any param whose Go identifier or cobra flag name would collide
+	// with another param on the same endpoint or with a generator-introduced
+	// reserved name (pagination's flagAll, async's flagWait*). Must run after
+	// AsyncJobs detection so async endpoints reserve the wait identifiers.
+	g.dedupeFlagIdentifiers()
 
 	// Generate single files
 	singleFiles := map[string]string{

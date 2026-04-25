@@ -14,7 +14,7 @@ import (
 func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- range .Endpoint.Params}}
 {{- if not .Positional}}
-	var flag{{camel .Name}} {{goTypeForParam .Name .Type}}
+	var flag{{camel (paramIdent .)}} {{goTypeForParam .Name .Type}}
 {{- end}}
 {{- end}}
 {{- if .Endpoint.Pagination}}
@@ -29,24 +29,24 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 {{- range .Endpoint.Params}}
 {{- if and .Required (not .Positional) (not .Default)}}
-			if !cmd.Flags().Changed("{{flagName .Name}}") && !flags.dryRun {
-				return fmt.Errorf("required flag \"%s\" not set", "{{flagName .Name}}")
+			if !cmd.Flags().Changed("{{flagName (paramIdent .)}}") && !flags.dryRun {
+				return fmt.Errorf("required flag \"%s\" not set", "{{flagName (paramIdent .)}}")
 			}
 {{- end}}
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .Enum (not .Positional) (eq .Type "string")}}
-			if cmd.Flags().Changed("{{flagName .Name}}") {
-				allowed{{camel .Name}} := []string{ {{enumLiteral .Enum}} }
-				valid{{camel .Name}} := false
-				for _, v := range allowed{{camel .Name}} {
-					if flag{{camel .Name}} == v {
-						valid{{camel .Name}} = true
+			if cmd.Flags().Changed("{{flagName (paramIdent .)}}") {
+				allowed{{camel (paramIdent .)}} := []string{ {{enumLiteral .Enum}} }
+				valid{{camel (paramIdent .)}} := false
+				for _, v := range allowed{{camel (paramIdent .)}} {
+					if flag{{camel (paramIdent .)}} == v {
+						valid{{camel (paramIdent .)}} = true
 						break
 					}
 				}
-				if !valid{{camel .Name}} {
-					fmt.Fprintf(os.Stderr, "warning: --%s %q not in allowed set %v\n", "{{flagName .Name}}", flag{{camel .Name}}, allowed{{camel .Name}})
+				if !valid{{camel (paramIdent .)}} {
+					fmt.Fprintf(os.Stderr, "warning: --%s %q not in allowed set %v\n", "{{flagName (paramIdent .)}}", flag{{camel (paramIdent .)}}, allowed{{camel (paramIdent .)}})
 				}
 			}
 {{- end}}
@@ -54,17 +54,17 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- range .Endpoint.Params}}
 {{- if and (not .Positional) (jsonStringParam .)}}
 {{- $param := .}}
-			if cmd.Flags().Changed("{{flagName $param.Name}}") {
-				var parsed{{camel $param.Name}} any
-				if err := json.Unmarshal([]byte(flag{{camel $param.Name}}), &parsed{{camel $param.Name}}); err != nil {
+			if cmd.Flags().Changed("{{flagName (paramIdent $param)}}") {
+				var parsed{{camel (paramIdent $param)}} any
+				if err := json.Unmarshal([]byte(flag{{camel (paramIdent $param)}}), &parsed{{camel (paramIdent $param)}}); err != nil {
 {{- with jsonEnumSuggestion $param $.Endpoint.Params}}
 					for _, v := range []string{ {{enumLiteral .Values}} } {
-						if flag{{camel $param.Name}} == v {
-							return fmt.Errorf("--{{flagName $param.Name}} must be valid JSON. Did you mean --{{.FlagName}} %s?", flag{{camel $param.Name}})
+						if flag{{camel (paramIdent $param)}} == v {
+							return fmt.Errorf("--{{flagName (paramIdent $param)}} must be valid JSON. Did you mean --{{.FlagName}} %s?", flag{{camel (paramIdent $param)}})
 						}
 					}
 {{- end}}
-					return fmt.Errorf("--{{flagName $param.Name}} must be valid JSON: %w", err)
+					return fmt.Errorf("--{{flagName (paramIdent $param)}} must be valid JSON: %w", err)
 				}
 			}
 {{- end}}
@@ -93,8 +93,8 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 			htmlRequestParams["{{.Name}}"] = args[{{$i}}]
 {{- end}}
 {{- if not .Positional}}
-			if flag{{camel .Name}} != {{zeroValForParam .Name .Type}} {
-				htmlRequestParams["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel .Name}})
+			if flag{{camel (paramIdent .)}} != {{zeroValForParam .Name .Type}} {
+				htmlRequestParams["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -108,7 +108,7 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 				"{{.Name}}": args[{{$i}}],
 {{- end}}
 {{- if not .Positional}}
-				"{{.Name}}": fmt.Sprintf("%v", flag{{camel .Name}}),
+				"{{.Name}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}")
@@ -119,7 +119,7 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 				"{{.Name}}": args[{{$i}}],
 {{- end}}
 {{- if not .Positional}}
-				"{{.Name}}": fmt.Sprintf("%v", flag{{camel .Name}}),
+				"{{.Name}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}")
@@ -131,8 +131,8 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 			params["{{.Name}}"] = args[{{$i}}]
 {{- end}}
 {{- if not .Positional}}
-			if flag{{camel .Name}} != {{zeroValForParam .Name .Type}} {
-				params["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel .Name}})
+			if flag{{camel (paramIdent .)}} != {{zeroValForParam .Name .Type}} {
+				params["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -218,7 +218,7 @@ func new{{camel .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 
 {{- range .Endpoint.Params}}
 {{- if not .Positional}}
-	cmd.Flags().{{cobraFlagFuncForParam .Name .Type}}(&flag{{camel .Name}}, "{{flagName .Name}}", {{defaultValForParam .}}, "{{oneline .Description}}{{enumDescriptionHint .Enum}}")
+	cmd.Flags().{{cobraFlagFuncForParam .Name .Type}}(&flag{{camel (paramIdent .)}}, "{{flagName (paramIdent .)}}", {{defaultValForParam .}}, "{{oneline .Description}}{{enumDescriptionHint .Enum}}")
 {{- end}}
 {{- end}}
 {{- if .Endpoint.Pagination}}
