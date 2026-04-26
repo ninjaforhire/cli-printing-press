@@ -3,8 +3,8 @@ package generator
 import (
 	"strings"
 
-	"github.com/mvanhorn/cli-printing-press/internal/profiler"
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/profiler"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 type WorkflowTemplateContext struct {

@@ -12,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mvanhorn/cli-printing-press/internal/browsersniff"
-	"github.com/mvanhorn/cli-printing-press/internal/graphql"
-	"github.com/mvanhorn/cli-printing-press/internal/naming"
-	"github.com/mvanhorn/cli-printing-press/internal/openapi"
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/browsersniff"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/graphql"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/openapi"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

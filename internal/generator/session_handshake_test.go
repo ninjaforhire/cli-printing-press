@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 // TestSessionHandshakeGeneration verifies the generator emits a working

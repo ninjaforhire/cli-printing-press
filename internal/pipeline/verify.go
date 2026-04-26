@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/mvanhorn/cli-printing-press/internal/artifacts"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/artifacts"
 )
 
 type Verifier struct {

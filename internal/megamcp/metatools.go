@@ -12,9 +12,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/mvanhorn/cli-printing-press/internal/naming"
-	"github.com/mvanhorn/cli-printing-press/internal/pipeline"
-	"github.com/mvanhorn/cli-printing-press/internal/version"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/version"
 )
 
 // RegisterMetaTools registers the 6 agent-facing discovery and activation tools.

@@ -1,7 +1,7 @@
 package megamcp
 
 import (
-	"github.com/mvanhorn/cli-printing-press/internal/pipeline"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 )
 
 // Re-export manifest types from pipeline to avoid duplication.

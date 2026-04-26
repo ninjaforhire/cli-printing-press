@@ -6,7 +6,7 @@ import (
 	"os"
 	"slices"
 
-	apispec "github.com/mvanhorn/cli-printing-press/internal/spec"
+	apispec "github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 // isInternalYAMLSpec returns true if data looks like an internal YAML spec

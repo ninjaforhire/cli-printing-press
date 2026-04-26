@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 // ToolsManifestFilename is the name of the tools manifest file written to each

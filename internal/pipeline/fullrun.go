@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mvanhorn/cli-printing-press/internal/llmpolish"
-	"github.com/mvanhorn/cli-printing-press/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/llmpolish"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/naming"
 	"gopkg.in/yaml.v3"
 )
 

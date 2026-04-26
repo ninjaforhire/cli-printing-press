@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mvanhorn/cli-printing-press/internal/pipeline"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 	"github.com/spf13/cobra"
 )
 

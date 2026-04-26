@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/mvanhorn/cli-printing-press/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/naming"
 )
 
 const (

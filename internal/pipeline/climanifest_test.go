@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
-	"github.com/mvanhorn/cli-printing-press/internal/version"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"

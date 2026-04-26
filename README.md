@@ -20,7 +20,7 @@ One command. Lean loop. Produces a Go CLI + MCP server that absorbs every featur
 Install the binary, then start a Claude Code session and run each command one after another:
 
 ```bash
-go install github.com/mvanhorn/cli-printing-press/cmd/printing-press@latest
+go install github.com/mvanhorn/cli-printing-press/v2/cmd/printing-press@latest
 ```
 
 ```
@@ -343,7 +343,7 @@ Each published CLI includes research manuscripts, verification proofs, and a `.p
 Install the binary (requires Go 1.22+):
 
 ```bash
-go install github.com/mvanhorn/cli-printing-press/cmd/printing-press@latest
+go install github.com/mvanhorn/cli-printing-press/v2/cmd/printing-press@latest
 ```
 
 Then install the Claude Code plugin:

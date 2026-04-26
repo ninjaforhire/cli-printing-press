@@ -2,13 +2,16 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/mvanhorn/cli-printing-press/internal/version"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/mod/modfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,7 +38,7 @@ func TestGoreleaserLdflagsTargetMatchesVersionVar(t *testing.T) {
 
 	ldflags := strings.Join(config.Builds[0].Ldflags, " ")
 	assert.Contains(t, ldflags,
-		"github.com/mvanhorn/cli-printing-press/internal/version.Version",
+		"github.com/mvanhorn/cli-printing-press/v2/internal/version.Version",
 		"goreleaser ldflags must target internal/version.Version")
 }
 
@@ -92,6 +95,52 @@ func TestMarketplaceJSONHasNoPluginVersion(t *testing.T) {
 			t.Errorf("marketplace.json plugins[%d] should not declare a version (belongs in plugin.json only)", i)
 		}
 	}
+}
+
+func TestModulePathMatchesMajorVersion(t *testing.T) {
+	// Go's Semantic Import Versioning rule (https://go.dev/ref/mod#major-version-suffixes)
+	// requires that any module at v2 or higher embed `/vN` as a suffix on its
+	// module path AND in every internal import. If the module path drifts
+	// from the source-of-truth Version constant, `go install …@latest`
+	// silently resolves to a pseudo-version derived from the highest
+	// compatible tag, and the installed binary reports the wrong version.
+	//
+	// This test is the tripwire: when release-please proposes a major bump
+	// (e.g. v2 → v3), this test fails until go.mod is also updated to the
+	// new /vN and every internal import is rewritten.
+
+	data, err := os.ReadFile("../../go.mod")
+	require.NoError(t, err)
+
+	mf, err := modfile.Parse("go.mod", data, nil)
+	require.NoError(t, err)
+	require.NotNil(t, mf.Module, "go.mod must declare a module")
+
+	major := majorVersion(t, version.Version)
+	wantSuffix := ""
+	if major >= 2 {
+		wantSuffix = fmt.Sprintf("/v%d", major)
+	}
+
+	got := mf.Module.Mod.Path
+	if wantSuffix == "" {
+		assert.NotRegexp(t, regexp.MustCompile(`/v\d+$`), got,
+			"v0/v1 modules must not have a /vN suffix")
+	} else {
+		assert.True(t, strings.HasSuffix(got, wantSuffix),
+			"version.go is at v%d but go.mod path %q is missing %q suffix — see https://go.dev/ref/mod#major-version-suffixes",
+			major, got, wantSuffix)
+	}
+}
+
+func majorVersion(t *testing.T, v string) int {
+	t.Helper()
+	parts := strings.SplitN(v, ".", 2)
+	require.NotEmpty(t, parts[0], "Version must have a major component")
+	var major int
+	_, err := fmt.Sscanf(parts[0], "%d", &major)
+	require.NoError(t, err, "Version major %q must be an integer", parts[0])
+	return major
 }
 
 func TestPRTitleWorkflowAllowsReleasePleaseScope(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 // BuildSpec assembles a valid spec.APISpec from aggregated endpoints.

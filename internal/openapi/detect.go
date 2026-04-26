@@ -3,7 +3,7 @@ package openapi
 import (
 	"bytes"
 
-	"github.com/mvanhorn/cli-printing-press/internal/graphql"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/graphql"
 )
 
 func IsOpenAPI(data []byte) bool {

@@ -3,7 +3,7 @@ package generator
 import (
 	"sort"
 
-	"github.com/mvanhorn/cli-printing-press/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
 
 // firstCommandExample returns a runnable "resource [endpoint]" path for docs

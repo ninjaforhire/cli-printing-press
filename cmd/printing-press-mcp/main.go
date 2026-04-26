@@ -8,8 +8,8 @@ import (
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/mvanhorn/cli-printing-press/internal/megamcp"
-	"github.com/mvanhorn/cli-printing-press/internal/version"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/megamcp"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/version"
 )
 
 const (

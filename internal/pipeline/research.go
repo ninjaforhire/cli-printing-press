@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	catalogfs "github.com/mvanhorn/cli-printing-press/catalog"
-	"github.com/mvanhorn/cli-printing-press/internal/catalog"
-	"github.com/mvanhorn/cli-printing-press/internal/llm"
+	catalogfs "github.com/mvanhorn/cli-printing-press/v2/catalog"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/catalog"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/llm"
 )
 
 // ResearchResult holds the output of the research phase.
