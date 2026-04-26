@@ -24,22 +24,49 @@ import (
 func TestGenerateProjectsCompile(t *testing.T) {
 	t.Parallel()
 
+	// expectedFiles is the total file count per fixture; mustInclude is
+	// the set of paths that every generated CLI must ship regardless of
+	// spec shape. Two assertions instead of one: count guards against
+	// templates silently disappearing, mustInclude guards against
+	// renames/moves that preserve the count but break consumers. When a
+	// new always-emitted template is added, bump expectedFiles for each
+	// fixture and add the path to mustInclude. When a template is
+	// renamed, only mustInclude needs updating.
+	// mustInclude lists files emitted by gen.Generate() directly. Files
+	// produced by downstream steps (tools-manifest.json from
+	// manifest-gen, workflow_verify.yaml from the publish pipeline,
+	// dogfood-results.json from dogfood) aren't in scope for this test
+	// — it only exercises the generator.
+	mustInclude := []string{
+		"go.mod",
+		"Makefile",
+		"README.md",
+		"SKILL.md",
+		"internal/cli/root.go",
+		"internal/cli/which.go",
+		"internal/cli/profile.go",
+		"internal/cli/feedback.go",
+		"internal/cli/agent_context.go",
+		"internal/cliutil/fanout.go",
+		"internal/cliutil/text.go",
+		"internal/cliutil/probe.go",
+		"internal/cliutil/cliutil_test.go",
+		"internal/client/client.go",
+		"internal/config/config.go",
+	}
+
 	tests := []struct {
 		name          string
 		specPath      string
 		expectedFiles int
 	}{
-		// +3 for cliutil package: fanout.go, text.go, cliutil_test.go
-		// +1 for internal/cli/agent_context.go (Cloudflare-style runtime introspection)
-		// +1 for internal/cli/profile.go (HeyGen-style named-profile system)
-		// +1 for internal/cli/deliver.go (HeyGen-style --deliver output routing)
-		// +1 for internal/cli/feedback.go (HeyGen-style in-band agent feedback channel)
-		// +1 for internal/store/schema_version_test.go (PRAGMA user_version gate, discrawl-inspired)
-		// +2 for internal/cli/which.go + which_test.go (capability-to-command resolver)
-		// +1 for internal/store/upsert_batch_test.go (regression for issue #268: typed-table dispatch)
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 44},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 49},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 46},
+		// expectedFiles is total file count under the generated tree.
+		// Bump it AND add to mustInclude above when adding always-emitted
+		// templates. Per-spec dynamic files (per-resource command files,
+		// generated tests) account for the difference between fixtures.
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 45},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 50},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 47},
 	}
 
 	for _, tt := range tests {
@@ -52,6 +79,15 @@ func TestGenerateProjectsCompile(t *testing.T) {
 			require.NoError(t, gen.Generate())
 
 			require.Equal(t, tt.expectedFiles, countFiles(t, outputDir))
+
+			// Beyond the count, every fixture must contain these
+			// always-emitted files. Catches the rename / move case
+			// that preserves the count but breaks consumers.
+			for _, rel := range mustInclude {
+				path := filepath.Join(outputDir, rel)
+				_, err := os.Stat(path)
+				require.NoError(t, err, "must-include path missing: %s", rel)
+			}
 
 			runGoCommand(t, outputDir, "mod", "tidy")
 			runGoCommand(t, outputDir, "build", "./...")

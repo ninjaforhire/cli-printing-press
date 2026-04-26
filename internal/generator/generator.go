@@ -933,6 +933,7 @@ func (g *Generator) Generate() error {
 		"client.go.tmpl":         filepath.Join("internal", "client", "client.go"),
 		"cliutil_fanout.go.tmpl": filepath.Join("internal", "cliutil", "fanout.go"),
 		"cliutil_text.go.tmpl":   filepath.Join("internal", "cliutil", "text.go"),
+		"cliutil_probe.go.tmpl":  filepath.Join("internal", "cliutil", "probe.go"),
 		"cliutil_test.go.tmpl":   filepath.Join("internal", "cliutil", "cliutil_test.go"),
 		"types.go.tmpl":          filepath.Join("internal", "types", "types.go"),
 		"golangci.yml.tmpl":      ".golangci.yml",
