@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -137,8 +138,7 @@ func majorVersion(t *testing.T, v string) int {
 	t.Helper()
 	parts := strings.SplitN(v, ".", 2)
 	require.NotEmpty(t, parts[0], "Version must have a major component")
-	var major int
-	_, err := fmt.Sscanf(parts[0], "%d", &major)
+	major, err := strconv.Atoi(parts[0])
 	require.NoError(t, err, "Version major %q must be an integer", parts[0])
 	return major
 }
