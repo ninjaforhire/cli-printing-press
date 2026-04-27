@@ -1,5 +1,3 @@
-// Copyright 2026 trevin-chow. Licensed under Apache-2.0. See LICENSE.
-
 package cli
 
 import (
