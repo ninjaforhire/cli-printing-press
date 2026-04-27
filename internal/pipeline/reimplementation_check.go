@@ -90,6 +90,27 @@ var (
 	// that build their own raw http.Request also land here.
 	clientCallRe = regexp.MustCompile(`\b(flags\.newClient\s*\(|http\.(Get|Post|NewRequest|Do)\s*\(|c\.Do\s*\(|c\.Get\s*\(|c\.Post\s*\()`)
 
+	// siblingInternalImportRe catches any import of a package under
+	// `internal/<name>`. Go's RE2 has no negative lookahead, so the
+	// regex captures all matches and the surrounding code filters out
+	// the generator-reserved set (see hasSiblingInternalImport).
+	//
+	// Why we care: any package alongside the generated `client`,
+	// `store`, `cliutil`, etc. is almost certainly a hand-built API
+	// client (think `internal/algolia` for a CLI that fronts both a
+	// primary and a secondary API). Calls into such packages are
+	// legitimate API access; the pre-existing regex set didn't
+	// recognize them, so dogfood was producing false-positive
+	// reimplementation findings on every multi-source CLI.
+	//
+	// False positives from this signal (a non-client utility package
+	// mistakenly recognized as a client) are strictly less bad than
+	// the false negatives we get without it (a real Algolia client
+	// flagged as reimplementation).
+	//
+	// Surfaced by hackernews retro #350 finding F4.
+	siblingInternalImportRe = regexp.MustCompile(`"[^"]*/internal/([a-z][a-z0-9_]*)"`)
+
 	// trivialBodyRe catches the classic empty-stub shape used when an
 	// agent wires a Cobra command but never implements it:
 	//
@@ -326,7 +347,49 @@ func callsStoreHelper(content string, helpers map[string]bool) bool {
 }
 
 func hasClientSignal(content string) bool {
-	return clientImportRe.MatchString(content) || clientCallRe.MatchString(content)
+	return clientImportRe.MatchString(content) ||
+		clientCallRe.MatchString(content) ||
+		hasSiblingInternalImport(content)
+}
+
+// reservedInternalPackages is the set of internal package names the
+// generator emits unconditionally. An import of any of these is NOT a
+// signal of a hand-built API client — it just means the file uses a
+// generator-emitted helper. Anything else under `internal/<name>` is
+// presumed to be agent-authored API client code (e.g. `internal/algolia`
+// for a CLI that fronts both Firebase and Algolia).
+//
+// Surfaced by hackernews retro #350 finding F4.
+var reservedInternalPackages = map[string]bool{
+	"client":   true,
+	"store":    true,
+	"cliutil":  true,
+	"cache":    true,
+	"config":   true,
+	"mcp":      true,
+	"types":    true,
+	"share":    true,
+	"deliver":  true,
+	"profile":  true,
+	"feedback": true,
+	"graphql":  true,
+}
+
+// hasSiblingInternalImport reports whether the file imports a non-reserved
+// `internal/<name>` package — the signal for a hand-built secondary
+// client. The regex matches all internal imports; we filter the
+// reserved set in code because Go's RE2 has no negative lookahead.
+func hasSiblingInternalImport(content string) bool {
+	matches := siblingInternalImportRe.FindAllStringSubmatch(content, -1)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		if !reservedInternalPackages[m[1]] {
+			return true
+		}
+	}
+	return false
 }
 
 func lastPathSegment(path string) string {
