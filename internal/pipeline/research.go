@@ -268,6 +268,23 @@ func LoadResearch(pipelineDir string) (*ResearchResult, error) {
 	return &r, nil
 }
 
+// loadResearchForState reads research.json from the run directory, supporting
+// both write conventions: the printing-press skill writes to RunRoot/research.json
+// directly, while printing-press print writes to RunRoot/pipeline/research.json
+// alongside its phase artifacts. Tries the run-root path first (the dominant
+// case), falls back to pipeline-dir.
+//
+// The two-location lookup matters at promote/publish time, when downstream code
+// needs research.json to populate the published manifest's novel_features.
+// Without this fallback the publish-time read silently misses skill-flow runs
+// and ships manifests with empty novel_features (cal-com retro #334 F2).
+func loadResearchForState(state *PipelineState) (*ResearchResult, error) {
+	if r, err := LoadResearch(RunRoot(state.RunID)); err == nil {
+		return r, nil
+	}
+	return LoadResearch(state.PipelineDir())
+}
+
 // WriteNovelFeaturesBuilt updates research.json with the verified list of
 // novel features that survived the build. The original novel_features field
 // is preserved as-is (the planned list); novel_features_built records what

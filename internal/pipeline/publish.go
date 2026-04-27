@@ -204,7 +204,10 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 	}
 
 	// Carry forward metadata from the generated manifest when publish-time
-	// parsing is unavailable or lossy for the original spec format.
+	// parsing is unavailable or lossy for the original spec format. NovelFeatures
+	// is carried forward as a defensive fallback in case the loadResearchForState
+	// lookup below misses (e.g., research.json moved or absent); when both are
+	// available, research.json wins as the post-dogfood source of truth.
 	if existingData, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename)); err == nil {
 		var existing CLIManifest
 		if json.Unmarshal(existingData, &existing) == nil {
@@ -214,6 +217,7 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 			m.MCPReady = existing.MCPReady
 			m.AuthType = existing.AuthType
 			m.AuthEnvVars = existing.AuthEnvVars
+			m.NovelFeatures = existing.NovelFeatures
 		}
 	}
 
@@ -262,26 +266,35 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		m.Description = entry.Description
 	}
 
-	// Load novel features from research.json if available. When research.json
-	// can't be located (typically because state.RunID is empty in a fallback
-	// scenario, or the run's pipeline dir was GCed), emit a debug breadcrumb
-	// to stderr so the silent dropout from earlier versions is no longer
-	// silent. The breadcrumb names the path that was attempted; the caller
-	// (lock promote, publish) shows it but does not treat it as an error.
-	pipelineDir := state.PipelineDir()
-	if research, err := LoadResearch(pipelineDir); err == nil && research.NovelFeaturesBuilt != nil {
+	// Load novel features from research.json if available. Looks in both
+	// RunRoot/research.json (printing-press skill convention) and
+	// RunRoot/pipeline/research.json (printing-press print convention) — both
+	// must be attempted because the skill flow and print flow write research
+	// to different locations. When research.json has populated NovelFeaturesBuilt,
+	// it overrides the carry-forward value from the existing manifest because
+	// post-dogfood data is the source of truth. When neither location holds
+	// research.json, emit a debug breadcrumb so the silent dropout from earlier
+	// versions is no longer silent — the breadcrumb names both attempted paths;
+	// the caller (lock promote, publish) shows it but does not treat it as an error.
+	research, researchErr := loadResearchForState(state)
+	switch {
+	case researchErr != nil:
+		fmt.Fprintf(os.Stderr,
+			"debug: research.json not found at %s or %s; skipping novel_features enrichment "+
+				"(state.RunID=%q)\n",
+			filepath.Join(RunRoot(state.RunID), "research.json"),
+			filepath.Join(state.PipelineDir(), "research.json"),
+			state.RunID)
+	case research.NovelFeaturesBuilt != nil && len(*research.NovelFeaturesBuilt) > 0:
+		built := make([]NovelFeatureManifest, 0, len(*research.NovelFeaturesBuilt))
 		for _, nf := range *research.NovelFeaturesBuilt {
-			m.NovelFeatures = append(m.NovelFeatures, NovelFeatureManifest{
+			built = append(built, NovelFeatureManifest{
 				Name:        nf.Name,
 				Command:     nf.Command,
 				Description: nf.Description,
 			})
 		}
-	} else {
-		fmt.Fprintf(os.Stderr,
-			"debug: research.json not found at %s; skipping novel_features enrichment "+
-				"(state.RunID=%q)\n",
-			filepath.Join(pipelineDir, "research.json"), state.RunID)
+		m.NovelFeatures = built
 	}
 
 	return WriteCLIManifest(dir, m)
