@@ -44,6 +44,11 @@ import (
 // PerimeterX). Only fires on the doctor probe — used to distinguish "transport
 // reached the wall" from "transport failed entirely." Returns the vendor name
 // when matched, or empty string when no match.
+//
+// Markers are anchored to <title> or vendor-specific strings to avoid
+// false-positives on benign content. For example, a recipe titled "Just A
+// Moment of Pause Cookies" must NOT match the Cloudflare challenge marker;
+// only "<title>just a moment" (the actual interstitial title) does.
 func looksLikeDoctorInterstitial(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -53,11 +58,14 @@ func looksLikeDoctorInterstitial(body []byte) string {
 		limit = 8192
 	}
 	prefix := strings.ToLower(string(body[:limit]))
-	if !strings.Contains(prefix, "<") {
+	if !strings.Contains(prefix, "<title") {
+		// Every bot interstitial we recognize sets a <title>; bodies without
+		// one are body-only API responses, not challenge pages.
 		return ""
 	}
 	switch {
-	case strings.Contains(prefix, "just a moment") || strings.Contains(prefix, "challenges.cloudflare.com") ||
+	case strings.Contains(prefix, "<title>just a moment") || // CF JS challenge
+		strings.Contains(prefix, "challenges.cloudflare.com") || // CF Turnstile
 		(strings.Contains(prefix, "attention required") && strings.Contains(prefix, "cloudflare")):
 		return "Cloudflare"
 	case strings.Contains(prefix, "akamai") && (strings.Contains(prefix, "request unsuccessful") || strings.Contains(prefix, "access denied")):
@@ -67,7 +75,7 @@ func looksLikeDoctorInterstitial(body []byte) string {
 		return "Vercel"
 	case strings.Contains(prefix, "request blocked") && strings.Contains(prefix, "aws waf"):
 		return "AWS WAF"
-	case strings.Contains(prefix, "datadome"):
+	case strings.Contains(prefix, "datadome") && (strings.Contains(prefix, "blocked") || strings.Contains(prefix, "captcha") || strings.Contains(prefix, "challenge")):
 		return "DataDome"
 	case strings.Contains(prefix, "perimeterx") || strings.Contains(prefix, "px-captcha"):
 		return "PerimeterX"
@@ -204,27 +212,26 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					// Step 1: Basic reachability via the configured transport.
 					reachBody, reachErr := c.Get("/", nil)
 					var reachAPIErr *client.APIError
-					var reachStatus int
 					switch {
 					case reachErr == nil:
 						// 2xx response — clearly reachable. Still inspect the
 						// body for a known interstitial; some bot walls return
 						// 200 with a JS challenge page.
 						if vendor := looksLikeDoctorInterstitial(reachBody); vendor != "" {
-							report["api"] = fmt.Sprintf("blocked by %s interstitial -- the configured transport reached the wall. Try a different network, wait for the IP-level rate limit to clear, or check that the browser-chrome transport is bound correctly.", vendor)
+							report["api"] = fmt.Sprintf("blocked by %s interstitial — the configured transport reached the wall. Try a different network, wait for the IP-level rate limit to clear, or check that the browser-chrome transport is bound correctly.", vendor)
 						} else {
 							report["api"] = "reachable"
 						}
 					case errors.As(reachErr, &reachAPIErr):
 						// Non-2xx from the server. The network reached, the
-						// server responded -- that's "reachable" for our
+						// server responded — that's "reachable" for our
 						// purposes. Inspect the response body for a known
 						// interstitial first; otherwise note the status.
-						reachStatus = reachAPIErr.StatusCode
+						status := reachAPIErr.StatusCode
 						if vendor := looksLikeDoctorInterstitial([]byte(reachAPIErr.Body)); vendor != "" {
-							report["api"] = fmt.Sprintf("blocked by %s interstitial (HTTP %d) -- the configured transport reached the wall.", vendor, reachStatus)
+							report["api"] = fmt.Sprintf("blocked by %s interstitial (HTTP %d) — the configured transport reached the wall.", vendor, status)
 						} else {
-							report["api"] = fmt.Sprintf("reachable (HTTP %d at /)", reachStatus)
+							report["api"] = fmt.Sprintf("reachable (HTTP %d at /)", status)
 						}
 					default:
 						// Network-level failure: DNS, connection refused, TLS,
@@ -236,7 +243,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					// Step 2: Validate credentials with an authenticated probe.
 					authHeader := cfg.AuthHeader()
 					if authHeader == "" {
-						// No auth configured -- skip credential validation
+						// No auth configured — skip credential validation
 {{- if .Auth.RequiresBrowserSession}}
 					} else if proofOK, proofDetail := browserSessionProofStatus(cfg, authHeader); proofOK {
 						report["credentials"] = "valid"
@@ -284,13 +291,13 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 								// is configured in the spec. Many APIs return 401/403 from a
 								// bare versioned root regardless of token validity (the path
 								// isn't routed but the gateway still demands credentials).
-								// Don't claim invalid without certainty -- set verify_path to
+								// Don't claim invalid without certainty — set verify_path to
 								// a known-good authenticated GET (e.g. /me, /v1/account, /user)
 								// for a definitive verdict.
 								report["credentials"] = fmt.Sprintf("inconclusive (HTTP %d from base URL — set auth.verify_path in spec for a definitive probe)", authAPIErr.StatusCode)
 {{- end}}
 							default:
-								// Non-auth HTTP error (404, 500, etc.) -- don't blame credentials
+								// Non-auth HTTP error (404, 500, etc.) — don't blame credentials
 								report["credentials"] = fmt.Sprintf("ok (HTTP %d from %s, but auth was accepted)", authAPIErr.StatusCode, verifyPath)
 							}
 						default:

@@ -674,7 +674,10 @@ func TestGenerateHTMLExtractionEndpoint(t *testing.T) {
 		case "/docs/page":
 			_, _ = w.Write([]byte(`<html><head><title>Docs</title></head><body><a href="child">Child page</a></body></html>`))
 		case "/makers":
-			_, _ = w.Write([]byte(`<html><head><title>Makers</title></head><body><a href="/@alice">Alice</a></body></html>`))
+			// Lazy-load fixture: anchor's <img> has a placeholder src + real
+			// data-src (Pinterest/NYT Cooking pattern). firstImageSrc must
+			// prefer data-src over src.
+			_, _ = w.Write([]byte(`<html><head><title>Makers</title></head><body><a href="/@alice"><img src="data:image/gif;base64,placeholder" data-src="/img/alice-real.jpg" alt="Alice">Alice</a><a href="/@bob"><img srcset="/img/bob-1x.jpg 1x, /img/bob-2x.jpg 2x" alt="Bob">Bob</a></body></html>`))
 		default:
 			// Anchor 1 wraps its image in <noscript> (Dotdash/Meredith pattern).
 			// nodeTextSuppressing must skip the noscript subtree so "<img src=...>"
@@ -822,9 +825,22 @@ func TestGenerateHTMLExtractionEndpoint(t *testing.T) {
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	require.NoError(t, json.Unmarshal(out, &envelope), string(out))
-	require.Len(t, envelope.Results, 1)
+	require.Len(t, envelope.Results, 2)
 	assert.Equal(t, server.URL+"/@alice", envelope.Results[0]["url"])
 	assert.Equal(t, "alice", envelope.Results[0]["slug"])
+	// Lazy-load priority: data-src wins over a placeholder src. The fixture
+	// embeds a base64 1x1 gif in src and the real URL in data-src. The result
+	// must be the data-src URL, NOT the placeholder.
+	assert.Contains(t, envelope.Results[0]["image"], "alice-real.jpg",
+		"data-src should win over a placeholder src; got %v", envelope.Results[0]["image"])
+	assert.NotContains(t, envelope.Results[0]["image"], "data:image/gif",
+		"placeholder src should not be selected when data-src is present")
+	// srcset fallback: when src and data-src are absent, the first srcset URL
+	// is taken. The fixture has only `srcset="/img/bob-1x.jpg 1x, ..."`, so
+	// firstSrcsetURL should extract the 1x URL.
+	assert.Equal(t, server.URL+"/@bob", envelope.Results[1]["url"])
+	assert.Contains(t, envelope.Results[1]["image"], "bob-1x.jpg",
+		"first srcset URL should be selected when src is absent; got %v", envelope.Results[1]["image"])
 }
 
 func TestGenerateStandardTransportForOfficialAPI(t *testing.T) {
@@ -2340,6 +2356,58 @@ func TestGeneratedDoctor_AuthVerifyPathProbesEndpoint(t *testing.T) {
 	assert.Contains(t, content, `"invalid (HTTP %d) — check your credentials"`)
 	// And does NOT emit the inconclusive fallback wording
 	assert.NotContains(t, content, "inconclusive (HTTP %d from base URL")
+}
+
+func TestGeneratedDoctor_InterstitialMarkersAreTitleAnchored(t *testing.T) {
+	t.Parallel()
+
+	// looksLikeDoctorInterstitial must anchor loose Cloudflare markers to the
+	// <title> tag so a real recipe titled "Just A Moment of Pause Cookies"
+	// (or similar benign content) is not mistakenly classified as a Cloudflare
+	// challenge page. This guards against a regression where the marker list
+	// was checked against the body's lowercased prefix without title context.
+	apiSpec := &spec.APISpec{
+		Name:    "interstitialdoc",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth:    spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/interstitialdoc-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "interstitialdoc-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	doctorGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "doctor.go"))
+	require.NoError(t, err)
+	content := string(doctorGo)
+
+	// Cloudflare's loose "just a moment" marker must be anchored to <title>.
+	assert.Contains(t, content, `"<title>just a moment"`,
+		"Cloudflare 'just a moment' marker should be anchored to <title> to avoid false positives on benign content")
+	// And the bare unanchored variant must NOT appear by itself in the
+	// switch-case (the tightened version still contains "just a moment" as
+	// a substring of the anchored marker, so we check for the anchored form's
+	// presence rather than the bare form's absence).
+	// The <title-anchored gate at the top of the function is also required.
+	assert.Contains(t, content, `if !strings.Contains(prefix, "<title")`,
+		"interstitial detector should bail early when no <title> tag is present")
+	// DataDome marker must require an additional context word, not just the
+	// vendor name (which appears in legitimate analytics scripts on many
+	// sites that don't use DataDome for blocking).
+	assert.Contains(t, content, `strings.Contains(prefix, "datadome") && (strings.Contains(prefix, "blocked") || strings.Contains(prefix, "captcha") || strings.Contains(prefix, "challenge"))`,
+		"DataDome marker should require a context word (blocked/captcha/challenge) alongside the vendor name")
 }
 
 func TestGeneratedDoctor_NoVerifyPathSoftens401(t *testing.T) {

@@ -1238,18 +1238,11 @@ func (g *Generator) renderResourceCommands(promotedResourceNames map[string]bool
 }
 
 func (g *Generator) renderAuthFiles() error {
-	// Skip auth.go entirely when the spec declares auth.type:none AND no
-	// AuthorizationURL (OAuth) AND no GraphQL persisted-query refresh state.
-	// Public-data CLIs (no-auth recipe sites, weather feeds, score feeds) that
-	// shipped a generic auth set-token / status / logout subcommand were
-	// emitting dead UI -- the commands existed but did nothing useful, and
-	// agents that called them got no-ops. Now no auth.go is emitted; root.go
-	// gates the registration on the same condition. The scorecard's auth
-	// dimension exempts no-auth specs from the "no auth subcommand" deduction
-	// (see scoreAuth).
-	if g.Spec.Auth.Type == "none" &&
-		g.Spec.Auth.AuthorizationURL == "" &&
-		!g.hasTrafficAnalysisHint("graphql_persisted_query") {
+	// Skip auth.go entirely when the spec declares no auth surface. See
+	// shouldEmitAuth for the predicate; the matching root.go template gate
+	// (HasAuthCommand) and the scorecard's no-auth exemption (scoreAuth)
+	// must stay in sync with this same condition.
+	if !g.shouldEmitAuth() {
 		return nil
 	}
 	// Render auth command - use full OAuth2 template when authorization URL is present,
@@ -1284,6 +1277,22 @@ func (g *Generator) renderAuthFiles() error {
 	}
 
 	return nil
+}
+
+// shouldEmitAuth reports whether the generator should emit internal/cli/auth.go
+// for this spec. Auth UI is emitted when the spec describes a real auth
+// surface: a non-none auth.type, an AuthorizationURL (OAuth), or a
+// graphql_persisted_query traffic-analysis hint (browser-aware refresh).
+//
+// Public-data specs (auth.type: "none", no OAuth, no GraphQL persisted-query)
+// previously shipped a dead `auth set-token / status / logout` subcommand.
+// Now they ship without it, root.go skips the registration via
+// HasAuthCommand, and scoreAuth exempts them from the "no auth subcommand"
+// deduction. All three call sites must agree -- they call this method.
+func (g *Generator) shouldEmitAuth() bool {
+	return g.Spec.Auth.Type != "none" ||
+		g.Spec.Auth.AuthorizationURL != "" ||
+		g.hasTrafficAnalysisHint("graphql_persisted_query")
 }
 
 func (g *Generator) renderMCPEntrypoint() error {
@@ -1638,13 +1647,10 @@ func (g *Generator) renderRootProjectFiles(promotedCommands []PromotedCommand, p
 		overflow = len(shownNovel) - maxHighlightLines
 		shownNovel = shownNovel[:maxHighlightLines]
 	}
-	// HasAuthCommand: true when renderAuthFiles emitted auth.go. Mirrors the
-	// same condition used by renderAuthFiles to skip emission for no-auth
-	// specs. The template uses this to gate the rootCmd.AddCommand(newAuthCmd)
-	// registration so the root binary doesn't reference an undefined symbol.
-	hasAuthCommand := g.Spec.Auth.Type != "none" ||
-		g.Spec.Auth.AuthorizationURL != "" ||
-		g.hasTrafficAnalysisHint("graphql_persisted_query")
+	// HasAuthCommand mirrors shouldEmitAuth. The template uses it to gate
+	// rootCmd.AddCommand(newAuthCmd) so the root binary does not reference an
+	// undefined symbol when auth.go was skipped.
+	hasAuthCommand := g.shouldEmitAuth()
 
 	rootData := struct {
 		*spec.APISpec

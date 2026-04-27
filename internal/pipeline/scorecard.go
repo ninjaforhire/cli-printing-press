@@ -300,10 +300,19 @@ func scoreAuth(dir string) int {
 	// No-auth exemption: when the generator decided this spec requires no
 	// auth surface, internal/cli/auth.go is not emitted. (Specs declaring
 	// auth.type: none with no AuthorizationURL and no graphql_persisted_query
-	// hint take this path; see Generator.renderAuthFiles.) Penalizing such
+	// hint take this path; see Generator.shouldEmitAuth.) Penalizing such
 	// CLIs for "missing auth subcommand" or "no env vars" is wrong --
 	// they correctly reflect a no-auth spec. Award full credit and let the
 	// auth-bearing dimensions on auth-bearing CLIs speak for themselves.
+	//
+	// Note: readFileContent returns "" for both "file does not exist" and
+	// "file exists but is empty." We rely on the generator never emitting an
+	// empty auth.go -- every auth template (auth.go.tmpl, auth_simple.go.tmpl,
+	// auth_browser.go.tmpl) produces a non-empty file with at least the cobra
+	// command stub. If a future code path emits an empty auth.go as a
+	// placeholder, this exemption would fire incorrectly; the safer signal
+	// is os.Stat for file existence, but the empty-content check matches
+	// today's behavior with one fewer syscall.
 	if authContent == "" {
 		return 10
 	}

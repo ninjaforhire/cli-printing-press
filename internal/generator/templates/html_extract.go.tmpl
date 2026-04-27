@@ -304,12 +304,32 @@ func nodeTextSuppressing(n *xhtml.Node) string {
 	return strings.Join(parts, " ")
 }
 
-// firstImageSrc returns the first non-suppressed `<img src=...>` URL inside
-// the given node's subtree, normalized against base. Suppressed subtrees
-// (noscript/script/style/template) are skipped, so an `<img>` rendered for
-// JS-disabled users does not get picked when an above-the-fold rendered
-// image exists. Returns empty string when no image is found.
+// firstImageSrc returns the URL of the first non-suppressed `<img>` inside
+// the given node's subtree, normalized against base.
+//
+// Source priority (highest first):
+//
+//  1. `data-src` — modern lazy-loading attribute; carries the real URL when
+//     `src` is a placeholder (1x1 pixel, base64 transparent gif). Most
+//     content-heavy sites that lazy-load (Pinterest, NYT Cooking, Food52)
+//     follow this pattern, so `data-src` beats `src` when both are present.
+//  2. `data-srcset` / `srcset` — first comma-separated URL. Responsive image
+//     hint lists; we take the first declared candidate for simplicity.
+//  3. `src` — final fallback for plain `<img>` tags without lazy-loading.
+//
+// Suppressed subtrees (noscript/script/style/template) are skipped, so an
+// `<img>` rendered for JS-disabled users does not get picked when an
+// above-the-fold rendered image exists.
+//
+// Limitation: returns the FIRST matching image in DOM order, with no quality
+// heuristic. Sites that put a small icon (badge, share button, profile pic)
+// before the hero image will have the icon URL surfaced. Acceptable for
+// recipe-card and product-card layouts where hero images come first;
+// document the limitation if a CLI's spec target uses an icon-first layout.
+//
+// Returns empty string when no image is found.
 func firstImageSrc(n *xhtml.Node, base string) string {
+	_ = base // base is used by the caller's normalizeHTMLURL wrapper, not here
 	if n == nil {
 		return ""
 	}
@@ -324,11 +344,27 @@ func firstImageSrc(n *xhtml.Node, base string) string {
 				return
 			}
 			if strings.EqualFold(node.Data, "img") {
-				if src := strings.TrimSpace(attrValue(node, "src")); src != "" {
+				// Priority 1: data-src (lazy-load real URL)
+				if src := strings.TrimSpace(attrValue(node, "data-src")); src != "" {
 					found = src
 					return
 				}
-				if src := strings.TrimSpace(attrValue(node, "data-src")); src != "" {
+				// Priority 2: data-srcset / srcset (first candidate)
+				if srcset := strings.TrimSpace(attrValue(node, "data-srcset")); srcset != "" {
+					if src := firstSrcsetURL(srcset); src != "" {
+						found = src
+						return
+					}
+				}
+				if srcset := strings.TrimSpace(attrValue(node, "srcset")); srcset != "" {
+					if src := firstSrcsetURL(srcset); src != "" {
+						found = src
+						return
+					}
+				}
+				// Priority 3: plain src (may be a placeholder, but the only
+				// signal available for non-lazy-loaded images)
+				if src := strings.TrimSpace(attrValue(node, "src")); src != "" {
 					found = src
 					return
 				}
@@ -343,6 +379,28 @@ func firstImageSrc(n *xhtml.Node, base string) string {
 	}
 	walk(n)
 	return found
+}
+
+// firstSrcsetURL extracts the first URL from a srcset / data-srcset attribute.
+// Srcset format is comma-separated `URL DESCRIPTOR` pairs, e.g.:
+//
+//	"https://x.com/a.jpg 1x, https://x.com/a@2x.jpg 2x"
+//
+// We take the first URL (first whitespace-separated token of the first
+// comma-separated entry). Returns empty string if the value is malformed.
+func firstSrcsetURL(srcset string) string {
+	if srcset == "" {
+		return ""
+	}
+	first := srcset
+	if i := strings.IndexByte(first, ','); i >= 0 {
+		first = first[:i]
+	}
+	first = strings.TrimSpace(first)
+	if i := strings.IndexAny(first, " \t"); i >= 0 {
+		first = first[:i]
+	}
+	return strings.TrimSpace(first)
 }
 
 var htmlWhitespace = regexp.MustCompile(`\s+`)
