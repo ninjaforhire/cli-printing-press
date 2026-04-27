@@ -3,6 +3,7 @@
 .gotmp/
 .claude/worktrees/
 /refactor/artifacts/
+/tests/artifacts/perf/
 /printing-press
 library/
 dist/
