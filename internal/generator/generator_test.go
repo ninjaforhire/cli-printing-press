@@ -676,11 +676,17 @@ func TestGenerateHTMLExtractionEndpoint(t *testing.T) {
 		case "/makers":
 			_, _ = w.Write([]byte(`<html><head><title>Makers</title></head><body><a href="/@alice">Alice</a></body></html>`))
 		default:
+			// Anchor 1 wraps its image in <noscript> (Dotdash/Meredith pattern).
+			// nodeTextSuppressing must skip the noscript subtree so "<img src=...>"
+			// markup does not leak into the link's name field. firstImageSrc must
+			// also skip the noscript image and look for a rendered <img> instead --
+			// here SpeakON has both: a noscript fallback AND a rendered img after.
+			// Anchor 2 has only a rendered <img> (no noscript fallback).
 			_, _ = w.Write([]byte(`<html>
 			<head><title>Product Hunt</title><meta name="description" content="New products"></head>
 			<body>
-				<a href="/products/speakon">1. SpeakON</a>
-				<a href="/products/instant-db">2. InstantDB</a>
+				<a href="/products/speakon"><noscript><img src="/img/speakon-fallback.jpg" alt="SpeakON"></noscript><img src="/img/speakon.jpg" alt="SpeakON">1. SpeakON</a>
+				<a href="/products/instant-db"><img src="/img/instant-db.jpg" alt="InstantDB">2. InstantDB</a>
 				<a href="/about">About</a>
 			</body>
 		</html>`))
@@ -779,6 +785,18 @@ func TestGenerateHTMLExtractionEndpoint(t *testing.T) {
 	assert.Equal(t, "SpeakON", links[0]["name"])
 	assert.Equal(t, "speakon", links[0]["slug"])
 	assert.Equal(t, float64(1), links[0]["rank"])
+	// noscript suppression: the anchor wrapped its fallback <img> in <noscript>,
+	// which the HTML5 spec parses as raw text. nodeTextSuppressing must skip
+	// the noscript subtree so the link name does not leak "<img src=..." markup.
+	assert.NotContains(t, links[0]["name"], "<img", "noscript-wrapped <img> markup must not leak into the link name")
+	assert.NotContains(t, links[0]["text"], "<img", "noscript-wrapped <img> markup must not leak into the link text")
+	// Image extraction: firstImageSrc walks the same suppression-aware tree
+	// and surfaces the first non-suppressed <img src>. The rendered image
+	// should win over the noscript fallback when both are present.
+	assert.Contains(t, links[0]["image"], "speakon.jpg", "expected rendered img URL, got %v", links[0]["image"])
+	assert.NotContains(t, links[0]["image"], "speakon-fallback.jpg", "noscript fallback must not be selected when a rendered image exists")
+	// Anchor without noscript still produces a clean image URL.
+	assert.Contains(t, links[1]["image"], "instant-db.jpg")
 
 	cmd = exec.Command(binaryPath, "posts", "list", "--dry-run", "--json")
 	cmd.Env = append(os.Environ(), "WEBHTML_BASE_URL="+server.URL)

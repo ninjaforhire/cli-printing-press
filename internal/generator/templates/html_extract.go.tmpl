@@ -31,11 +31,25 @@ type htmlExtractedPage struct {
 }
 
 type htmlLink struct {
-	Rank int    `json:"rank,omitempty"`
-	Name string `json:"name,omitempty"`
-	Text string `json:"text,omitempty"`
-	URL  string `json:"url,omitempty"`
-	Slug string `json:"slug,omitempty"`
+	Rank  int    `json:"rank,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Text  string `json:"text,omitempty"`
+	Image string `json:"image,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Slug  string `json:"slug,omitempty"`
+}
+
+// htmlRawTextTags lists the four HTML5 elements whose content is parsed as
+// raw text (not as nested elements) per the HTML spec. Walking these as if
+// they were normal element subtrees leaks raw markup -- e.g., a `<noscript>`
+// fallback containing `<img src="...">` produces literal `<img>` text in the
+// anchor's nodeText. This map is used to skip those subtrees during link-mode
+// text extraction and image discovery.
+var htmlRawTextTags = map[string]struct{}{
+	"noscript": {},
+	"script":   {},
+	"style":    {},
+	"template": {},
 }
 
 func extractHTMLResponse(raw []byte, opts htmlExtractionOptions) (json.RawMessage, error) {
@@ -133,17 +147,25 @@ func extractHTMLLink(n *xhtml.Node, opts htmlExtractionOptions) (htmlLink, bool)
 		return htmlLink{}, false
 	}
 
-	text := cleanHTMLText(nodeText(n))
+	// Use the suppression-aware walker for anchor text. Sites like Allrecipes,
+	// Food Network, and other Dotdash/Meredith properties wrap above-the-fold
+	// images in <noscript> for non-JS users; the HTML parser preserves
+	// noscript content as raw TextNode children, and a naive walk leaks
+	// "<img src=...>" markup into the result. Suppressing noscript/script/
+	// style/template subtrees in nodeTextSuppressing returns clean text.
+	text := cleanHTMLText(nodeTextSuppressing(n))
 	rank, name := splitRankedHTMLLinkText(text)
 	if name == "" {
 		name = text
 	}
+	image := normalizeHTMLURL(firstImageSrc(n, opts.BaseURL), opts.BaseURL)
 	return htmlLink{
-		Rank: rank,
-		Name: name,
-		Text: text,
-		URL:  normalized,
-		Slug: htmlLinkSlug(parsed.Path, opts.LinkPrefixes),
+		Rank:  rank,
+		Name:  name,
+		Text:  text,
+		Image: image,
+		URL:   normalized,
+		Slug:  htmlLinkSlug(parsed.Path, opts.LinkPrefixes),
 	}, true
 }
 
@@ -251,6 +273,76 @@ func nodeText(n *xhtml.Node) string {
 		}
 	})
 	return strings.Join(parts, " ")
+}
+
+// nodeTextSuppressing walks n's descendants and concatenates TextNode content,
+// skipping subtrees rooted at noscript/script/style/template elements. The
+// HTML5 spec parses content of those four elements as raw text, so a normal
+// walk leaks their literal markup (e.g., the `<img src=...>` inside a
+// `<noscript>` fallback) into the output. Used by extractHTMLLink instead of
+// nodeText to keep result fields clean.
+func nodeTextSuppressing(n *xhtml.Node) string {
+	var parts []string
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == xhtml.ElementNode {
+			if _, raw := htmlRawTextTags[strings.ToLower(node.Data)]; raw {
+				return
+			}
+		}
+		if node.Type == xhtml.TextNode {
+			parts = append(parts, node.Data)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return strings.Join(parts, " ")
+}
+
+// firstImageSrc returns the first non-suppressed `<img src=...>` URL inside
+// the given node's subtree, normalized against base. Suppressed subtrees
+// (noscript/script/style/template) are skipped, so an `<img>` rendered for
+// JS-disabled users does not get picked when an above-the-fold rendered
+// image exists. Returns empty string when no image is found.
+func firstImageSrc(n *xhtml.Node, base string) string {
+	if n == nil {
+		return ""
+	}
+	var found string
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if found != "" || node == nil {
+			return
+		}
+		if node.Type == xhtml.ElementNode {
+			if _, raw := htmlRawTextTags[strings.ToLower(node.Data)]; raw {
+				return
+			}
+			if strings.EqualFold(node.Data, "img") {
+				if src := strings.TrimSpace(attrValue(node, "src")); src != "" {
+					found = src
+					return
+				}
+				if src := strings.TrimSpace(attrValue(node, "data-src")); src != "" {
+					found = src
+					return
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			if found != "" {
+				return
+			}
+			walk(child)
+		}
+	}
+	walk(n)
+	return found
 }
 
 var htmlWhitespace = regexp.MustCompile(`\s+`)
