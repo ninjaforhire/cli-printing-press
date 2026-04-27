@@ -60,6 +60,7 @@ func Execute() error {
 	rootCmd.AddCommand(newWorkflowVerifyCmd())
 	rootCmd.AddCommand(newLockCmd())
 	rootCmd.AddCommand(newMCPAuditCmd())
+	rootCmd.AddCommand(newProbeReachabilityCmd())
 	rootCmd.AddCommand(newSchemaCmd())
 
 	return rootCmd.Execute()
