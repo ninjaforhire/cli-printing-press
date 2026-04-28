@@ -11,7 +11,6 @@
 //	manifest-gen -spec ./espn-spec.yaml -format internal -output ./out
 //
 // The tool writes tools-manifest.json to the output directory.
-// It also prints a SHA-256 checksum for use in registry.json.
 package main
 
 import (
@@ -103,15 +102,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	checksum := pipeline.ComputeToolsManifestChecksum(manifestData)
 	fmt.Fprintf(os.Stderr, "\nWrote %s (%d bytes)\n", manifestPath, len(manifestData))
-	fmt.Fprintf(os.Stderr, "Checksum: %s\n", checksum)
-	fmt.Fprintf(os.Stderr, "\nFor registry.json:\n")
-	fmt.Fprintf(os.Stderr, "  \"manifest_checksum\": %q,\n", checksum)
-	fmt.Fprintf(os.Stderr, "  \"spec_format\": %q\n", format)
-
-	// Also print the checksum to stdout for scripting.
-	fmt.Println(checksum)
+	fmt.Fprintf(os.Stderr, "Spec format: %s\n", format)
 }
 
 func loadSpec(source string) ([]byte, error) {
