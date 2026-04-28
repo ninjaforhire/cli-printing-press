@@ -295,7 +295,21 @@ func Execute() error {
 func newRootCmd(flags *rootFlags) *cobra.Command {
 	rootCmd := &cobra.Command{`
 
-	tail := strings.ReplaceAll(src[start+len(executePrefix):], "(&flags)", "(flags)")
+	// After the Execute → newRootCmd refactor, `flags` is *rootFlags
+	// rather than a struct value, so any bare `&flags` reference (passing
+	// the whole struct's address) needs to drop the `&`. We must NOT
+	// touch `&flags.someField` (taking the address of an individual
+	// field) — those still compile because field access through a
+	// pointer auto-dereferences. The earlier ReplaceAll-based approach
+	// only caught `(&flags)` (single-arg or trailing-arg callsites) and
+	// missed multi-arg shapes like `f(cmd.Context(), &flags, resources)`
+	// and `f(x, &flags)`. The regex below matches `&flags` only when the
+	// next character is something other than `.` or a word character —
+	// i.e., a comma, close-paren, semicolon, brace, etc. — which
+	// distinguishes "address of the whole struct" from "address of a
+	// field" without false positives.
+	bareFlagsRef := regexp.MustCompile(`&flags([^.\w]|$)`)
+	tail := bareFlagsRef.ReplaceAllString(src[start+len(executePrefix):], "flags$1")
 	src = src[:start] + prolog + tail
 
 	exitStart := strings.LastIndex(src, "\n\terr := rootCmd.Execute()")
