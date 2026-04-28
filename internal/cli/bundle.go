@@ -82,10 +82,11 @@ from another build pipeline.`,
 			if binaryPath == "" {
 				binaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.Name)
 			}
-			if cliBinaryPath == "" && manifest.CLIBinary != "" {
-				cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.CLIBinary)
+			cliName := pipeline.ReadCLIBinaryName(cliDir)
+			if cliBinaryPath == "" && cliName != "" {
+				cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, cliName)
 			}
-			if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, skipBuild, manifest.CLIBinary, cliBinaryPath, cliSkipBuild, goos, goarch); err != nil {
+			if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, skipBuild, cliName, cliBinaryPath, cliSkipBuild, goos, goarch); err != nil {
 				return err
 			}
 
@@ -96,6 +97,7 @@ from another build pipeline.`,
 			if err := pipeline.BuildMCPBBundle(pipeline.BundleParams{
 				CLIDir:        cliDir,
 				BinaryPath:    binaryPath,
+				CLIBinaryName: cliName,
 				CLIBinaryPath: cliBinaryPath,
 				OutputPath:    output,
 			}); err != nil {
@@ -148,11 +150,12 @@ func autoBundleForHost(cliDir string, w io.Writer) {
 		return
 	}
 	binaryPath := pipeline.StagedMCPBinaryPath(cliDir, manifest.Name)
+	cliName := pipeline.ReadCLIBinaryName(cliDir)
 	cliBinaryPath := ""
-	if manifest.CLIBinary != "" {
-		cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.CLIBinary)
+	if cliName != "" {
+		cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, cliName)
 	}
-	if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, false, manifest.CLIBinary, cliBinaryPath, false, runtime.GOOS, runtime.GOARCH); err != nil {
+	if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, false, cliName, cliBinaryPath, false, runtime.GOOS, runtime.GOARCH); err != nil {
 		fmt.Fprintf(w, "warning: %v\n", err)
 		return
 	}
@@ -160,6 +163,7 @@ func autoBundleForHost(cliDir string, w io.Writer) {
 	if err := pipeline.BuildMCPBBundle(pipeline.BundleParams{
 		CLIDir:        cliDir,
 		BinaryPath:    binaryPath,
+		CLIBinaryName: cliName,
 		CLIBinaryPath: cliBinaryPath,
 		OutputPath:    output,
 	}); err != nil {

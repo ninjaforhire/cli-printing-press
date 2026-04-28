@@ -19,13 +19,17 @@ import (
 // information so multi-platform builds don't overwrite each other.
 //
 // CLIBinaryPath is optional — when set, the bundle includes a second
-// binary at `bin/<manifest.cli_binary>` so the MCP server can shell out
-// to its companion CLI for novel-feature tools. Empty CLIBinaryPath
-// produces a single-binary bundle (the CLI must be on PATH for
-// novel-feature tools to work).
+// binary at `bin/<CLIBinaryName>` so the MCP server can shell out to its
+// companion CLI for novel-feature tools. Empty CLIBinaryPath produces a
+// single-binary bundle (the CLI must be on PATH for novel-feature tools
+// to work). CLIBinaryName must be set when CLIBinaryPath is — it names
+// the binary inside the zip; we deliberately do NOT serialize this name
+// into manifest.json because Claude Desktop's MCPB v0.3 schema
+// strictly rejects unknown top-level keys.
 type BundleParams struct {
 	CLIDir        string
 	BinaryPath    string
+	CLIBinaryName string
 	CLIBinaryPath string
 	OutputPath    string
 }
@@ -78,8 +82,8 @@ func BuildMCPBBundle(params BundleParams) error {
 		_ = zw.Close()
 		return fmt.Errorf("writing MCP binary into bundle: %w", err)
 	}
-	if params.CLIBinaryPath != "" && manifest.CLIBinary != "" {
-		if err := zipFile(zw, "bin/"+manifest.CLIBinary, params.CLIBinaryPath); err != nil {
+	if params.CLIBinaryPath != "" && params.CLIBinaryName != "" {
+		if err := zipFile(zw, "bin/"+params.CLIBinaryName, params.CLIBinaryPath); err != nil {
 			_ = zw.Close()
 			return fmt.Errorf("writing CLI binary into bundle: %w", err)
 		}

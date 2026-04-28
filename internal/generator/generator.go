@@ -132,6 +132,14 @@ type Generator struct {
 	Narrative       *ReadmeNarrative        // LLM-authored prose for README/SKILL; optional
 	AsyncJobs       map[string]AsyncJobInfo // Detected async-job endpoints, keyed by "<resource>/<endpoint>"
 
+	// ModulePath overrides the Go module import path emitted by templates that
+	// reference internal packages (`{{modulePath}}/internal/client`, etc.).
+	// Defaults to `<api>-pp-cli` when empty — matches the standalone-publish
+	// shape. Set explicitly when regenerating a CLI that lives under a
+	// different go.mod, e.g. library checkouts where the module path is the
+	// repo-prefixed full path. Read by mcp-sync from the existing go.mod.
+	ModulePath string
+
 	// Promoted-command plan, populated by Generate() before any rendering so
 	// SKILL/README templates can honor leaf promotion (and not emit phantom paths
 	// like `<cli> qr get-qrcode` for a resource the generator collapsed to `qr`).
@@ -219,9 +227,14 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 			}
 			return false
 		},
-		"exampleLine":       g.exampleLine,
-		"currentYear":       func() string { return strconv.Itoa(time.Now().Year()) },
-		"modulePath":        func() string { return naming.CLI(s.Name) },
+		"exampleLine": g.exampleLine,
+		"currentYear": func() string { return strconv.Itoa(time.Now().Year()) },
+		"modulePath": func() string {
+			if g.ModulePath != "" {
+				return g.ModulePath
+			}
+			return naming.CLI(s.Name)
+		},
 		"graphqlQueryField": graphqlQueryField,
 		"graphqlFieldSelection": func(typeName string, types map[string]spec.TypeDef) []string {
 			return graphqlFieldSelection(typeName, types)

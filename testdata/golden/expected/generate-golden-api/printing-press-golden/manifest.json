@@ -2,7 +2,6 @@
   "author": {
     "name": "CLI Printing Press"
   },
-  "cli_binary": "printing-press-golden-pp-cli",
   "compatibility": {
     "claude_desktop": ">=1.0.0",
     "platforms": [

@@ -73,6 +73,23 @@ type NovelFeatureManifest struct {
 	Description string `json:"description"`
 }
 
+// ReadCLIBinaryName reads .printing-press.json from dir and returns the
+// cli_name field. Returns empty string when the file is missing or
+// unparseable so callers can fall back to convention. Used by the MCPB
+// bundle builder, which can't store the CLI binary name in manifest.json
+// (Claude Desktop's MCPB v0.3 validator rejects unknown top-level keys).
+func ReadCLIBinaryName(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	if err != nil {
+		return ""
+	}
+	var m CLIManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	return m.CLIName
+}
+
 // WriteCLIManifest marshals m as indented JSON and writes it to
 // dir/.printing-press.json.
 func WriteCLIManifest(dir string, m CLIManifest) error {

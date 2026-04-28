@@ -65,11 +65,6 @@ type MCPBManifest struct {
 	Server          MCPBServer         `json:"server"`
 	UserConfig      map[string]MCPBVar `json:"user_config,omitempty"`
 	Compatibility   *MCPBCompat        `json:"compatibility,omitempty"`
-	// CLIBinary, when set, names the companion CLI binary shipped alongside
-	// the MCP binary in the bundle. Documentation only — the host doesn't
-	// launch it directly; the MCP binary's siblingCLIPath() helper finds it
-	// at `${__dirname}/bin/<cli_binary>` to power novel-feature tool calls.
-	CLIBinary string `json:"cli_binary,omitempty"`
 }
 
 // MCPBAuthor identifies the bundle publisher. The upstream schema accepts
@@ -175,7 +170,6 @@ func buildMCPBManifest(m CLIManifest) MCPBManifest {
 		ManifestVersion: MCPBManifestVersion,
 		Name:            m.MCPBinary,
 		DisplayName:     displayName,
-		CLIBinary:       m.CLIName,
 		// Bundle version tracks the printing-press release that produced
 		// it so Claude Desktop's update detection sees a fresh value on
 		// regeneration. A hardcoded "1.0.0" would defeat the host's
