@@ -45,19 +45,24 @@ Every printed CLI exposes two surfaces: the **CLI surface** that humans drive wi
 The runtime walker in `internal/mcp/cobratree/` mirrors the Cobra tree at server start. Default: every user-facing command becomes an MCP tool. The walker filters via three rules, in order:
 
 1. **Endpoint mirrors keep typed schemas.** A Cobra command annotated `cmd.Annotations["pp:endpoint"] = "<resource>.<endpoint>"` is registered as a typed MCP tool by the existing template (one per spec endpoint, schema derived from spec params). The walker skips these so they aren't shell-out duplicates.
-2. **Framework commands are excluded by name.** The `frameworkCommands` set in `cobratree/classify.go.tmpl` lists the canonical generator-emitted commands that exist for human/operator workflows only — `doctor`, `version`, `auth`, `profile`, `feedback`, `which`, `agent-context`, `export`, `import`, `sync`, `sql`, `search`, `workflow`, `stale`, `orphans`, `load`, `api`, `analytics`, `reconcile`, `about`, `completion`, `help`. Some (`sync`, `sql`, `search`) overlap with typed MCP tools the template registers separately; without this skip list the walker would register colliding shell-out duplicates.
+2. **Framework commands are excluded by name.** The `frameworkCommands` set in `cobratree/classify.go.tmpl` lists generator-emitted CLI commands the walker must skip. Two cases qualify:
+   - A typed MCP tool already covers the capability (the typed schema is strictly better than a shell-out): `sql`, `search`, `about`/`agent-context` (covered by typed `context`), `api` (covered by typed endpoint tools).
+   - The command is non-functional via MCP — interactive setup, shell ergonomics, trivial introspection, local-only state: `auth`, `completion`, `doctor`, `version`, `feedback`, `profile`, `which`, `help`.
 3. **Per-command opt-out via annotation.** Domain commands that should not be agent tools — interactive setup wizards, debug commands, anything that needs human-in-the-loop input — set `cmd.Annotations["mcp:hidden"] = "true"` at construction time.
+
+**Critical: store-population commands stay exposed.** `sync`, `stale`, `orphans`, `reconcile`, `load`, `export`, `import`, `workflow`, `analytics` are generator-emitted but they have real agent value, so they MUST be reachable as MCP tools. The walker registers them as shell-out tools by default (no entry in the framework set means "the runtime walker exposes it"). 
+
+Excluding `sync` while exposing the typed `sql` tool is a **broken contract** — `sql` returns empty results until something populates the store, and the only thing that does is `sync`. The same logic applies to `search` (FTS5 over the store): without `sync`, it's inert. Earlier framework-set drafts incorrectly excluded all of these as "operator commands"; the agent surfaced the bug by trying to query an empty database. The corrected rule, encoded above, is "framework-skip is for things with a better typed equivalent OR no agent value at all" — store-population doesn't fit either case.
 
 A novel domain command that maps cleanly to a single agent action gets exposed automatically. The author does not need to declare it anywhere.
 
 ### Adding a new framework command
 
-When you add a new generator-emitted top-level command that should NOT be an agent tool, you must update **two** places:
+When you add a new generator-emitted top-level command, the default is **expose it as an MCP tool** — no action needed in the walker. The runtime walker registers any user-facing Cobra command as a shell-out tool automatically.
 
-1. The template that emits the command (e.g., `internal/generator/templates/<name>.go.tmpl`).
-2. The `frameworkCommands` set in `internal/generator/templates/cobratree/classify.go.tmpl`.
+Only update `frameworkCommands` in `internal/generator/templates/cobratree/classify.go.tmpl` when the new command meets one of the two skip criteria above (typed equivalent already exists, or non-functional via MCP). Adding to `frameworkCommands` is a structural choice to *hide* a capability from agents — make it deliberately, not by reflex.
 
-Skipping step 2 silently leaks the command into every printed CLI's MCP surface as a shell-out tool. The fix is mechanical and there is no other guard — golden tests catch the resulting tool list shift, but only if a fixture exercises that command path.
+Skipping a command that should be exposed silently breaks contracts (the `sync`/`sql` example above). Exposing a command that should be hidden adds a low-value tool to the catalog but doesn't break anything. **When in doubt, leave it out of the framework set.**
 
 This is the same shape as the "When adding a capability that affects scoring" rule a few sections up: a new generator capability must update the dependent verifier or surface in the same change. Forgetting either half ships a CLI whose advertised contract diverges from what's actually emitted.
 

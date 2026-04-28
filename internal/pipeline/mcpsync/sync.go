@@ -75,6 +75,14 @@ func Sync(cliDir string, opts Options) (Result, error) {
 	if err := pipeline.WriteToolsManifest(cliDir, parsed); err != nil {
 		return Result{}, fmt.Errorf("regenerating tools-manifest.json: %w", err)
 	}
+	// Regenerate the MCPB manifest too. The schema can drift between
+	// generator releases (most recently: cli_binary was removed because
+	// Claude Desktop strict-validates v0.3 keys). mcp-sync without this
+	// step left every library CLI with a manifest that fails drag-drop
+	// install in Claude Desktop.
+	if err := pipeline.WriteMCPBManifest(cliDir); err != nil {
+		return Result{}, fmt.Errorf("regenerating manifest.json: %w", err)
+	}
 	return Result{Changed: true, Detail: "migrated MCP surface to runtime Cobra-tree mirror"}, nil
 }
 
