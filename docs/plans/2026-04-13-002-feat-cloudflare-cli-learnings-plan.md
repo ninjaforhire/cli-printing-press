@@ -214,7 +214,7 @@ Printed CLIs are one SKILL.md away from being genuinely agent-ready, but three i
 
 ## System-Wide Impact
 
-- **Interaction graph:** Only pipeline (dogfood, scorecard) and generator (templates, pipeline) are touched. No changes to `verify`, `emboss`, `publish`, `research`, `crowdsniff`, `megamcp`, or SKILL.md generation.
+- **Interaction graph:** Only pipeline (dogfood, scorecard) and generator (templates, pipeline) are touched. No changes to `verify`, `emboss`, `publish`, `research`, `crowdsniff`, or SKILL.md generation.
 - **Error propagation:** New dogfood check surfaces through existing `DogfoodReport` and `deriveDogfoodVerdict`. New scorecard dimension uses the existing `UnscoredDimensions` pattern for opt-outs.
 - **State lifecycle risks:** None - all changes are generation-time and static-analysis-time.
 - **API surface parity:** Agent-context subcommand is additive. SKILL.md (already generated) remains unchanged. Existing commands are untouched.

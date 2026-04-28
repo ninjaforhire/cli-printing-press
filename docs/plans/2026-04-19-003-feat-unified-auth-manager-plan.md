@@ -1,7 +1,7 @@
 ---
 title: "feat(cli): unified auth manager for api-key credentials"
 type: feat
-status: active
+status: superseded
 date: 2026-04-19
 ---
 

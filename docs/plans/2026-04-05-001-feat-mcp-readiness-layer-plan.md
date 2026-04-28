@@ -1,7 +1,7 @@
 ---
 title: "feat: MCP Readiness Layer — Per-Endpoint Auth Awareness and Public Library MCP Catalog"
 type: feat
-status: active
+status: completed
 date: 2026-04-05
 ---
 

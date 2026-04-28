@@ -1,7 +1,7 @@
 ---
 title: "feat(cli): auth doctor - env-var visibility across installed printed CLIs"
 type: feat
-status: active
+status: completed
 date: 2026-04-19
 ---
 
