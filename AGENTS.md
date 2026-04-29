@@ -153,6 +153,13 @@ Key terms used throughout this repo. Several have overloaded meanings — the gl
 
 **Subsystem names are fine alongside the Printing Press name.** When skills produce diagnostic output (retro findings, issue tables, work units), use component names — generator, scorer, skills, binary — to tell developers *where* to fix something. "Fix the Printing Press" is useless as an action item; "fix the scorer — it penalizes cookie auth" is actionable. The Printing Press is the system; the subsystems are how you navigate within it.
 
+**Default disambiguation conventions.** Several terms below are overloaded; when body prose uses one without qualifier, default to the local form:
+
+- "library" → local library (`~/printing-press/library/<api-slug>/`). The public library is always called out explicitly: "public library" or "public library repo."
+- "publish" → in body prose, prefer "the publish step" (pipeline) or "publish to the public library" (skill workflow) when context isn't already established.
+- "manifest" → `tools-manifest.json` (the MCP tool catalog). The other manifests (`manifest.json` for plugin metadata, `.printing-press.json` for provenance) are always called by full name.
+- "catalog" → the embedded `catalog/` in this repo. The public library's category-organized catalog of finished CLIs is "public library catalog."
+
 | Canonical term | Meaning |
 |----------------|---------|
 | **the printing press** / **the machine** | This repo's generator system — the Go binary, templates, skills, and catalog that together produce CLIs. |
@@ -163,7 +170,7 @@ Key terms used throughout this repo. Several have overloaded meanings — the gl
 | **brief** | The output of the machine's research phase (Phase 1) — a condensed doc covering API identity, competitors, data layer, and product thesis. Stored in `manuscripts/<api>/<run>/research/`. Drives all downstream decisions. |
 | **browser-sniff** | Browser-driven API discovery. The user captures live traffic via browser automation (browser-use, agent-browser) or DevTools as a HAR; the `browser-sniff` subcommand analyzes the HAR and produces an OpenAPI-compatible spec. Produces a `discovery/` manuscript with `browser-sniff-report.md`, HAR captures, and `browser-sniff-unique-paths.txt`. Use when no official spec exists or to supplement one with endpoints the docs miss. |
 | **crowd-sniff** | Discovery technique that scrapes npm, PyPI, and GitHub for unofficial API clients to learn undocumented endpoints, auth patterns, and rate limits. Produces a `discovery/` manuscript with `crowd-sniff-report.md`. Complementary to browser-sniff — community-sourced vs. browser-captured. Used when no official spec exists or to supplement one. |
-| **manuscript** | The full archive of a generation run. Contains three subdirectories: `research/` (briefs, spec analysis), `proofs/` (dogfood, verify, scorecard results), and optionally `discovery/` (browser-sniff and crowd-sniff artifacts). Stored at `~/printing-press/manuscripts/<api-slug>/<run-id>/`. |
+| **manuscript** | The full archive of a generation run. Contains three subdirectories: `research/` (briefs, spec analysis), `proofs/` (dogfood, verify, scorecard results), and optionally `discovery/` (browser-sniff and crowd-sniff artifacts). Stored at `~/printing-press/manuscripts/<api-slug>/<run-id>/`. The local library is the working copy of the latest successful run for a given API; manuscripts are immutable archives across runs — same `<api-slug>` keys, separate top-level directories. |
 | **emboss** | A second-pass improvement cycle for an already-printed CLI. Audits baseline, re-researches, identifies top improvements, rebuilds, re-verifies, reports delta. Subcommand: `printing-press emboss <api>`. Still active — not deprecated. |
 | **polish** | Targeted fix-up of a printed CLI (distinct from emboss's full cycle). Skill: `/printing-press-polish`. The retro improves the machine; polish improves the printed CLI. |
 | **retro** / **retrospective** | Post-generation analysis of *the machine itself* — not the printed CLI. Identifies systemic improvements to templates, the Go binary, skill instructions, or catalog. Output goes to `docs/retros/` and `manuscripts/<api>/<run>/proofs/`. |
@@ -186,8 +193,10 @@ Key terms used throughout this repo. Several have overloaded meanings — the gl
 | **public library repo** | The GitHub repo [`mvanhorn/printing-press-library`](https://github.com/mvanhorn/printing-press-library) — public catalog of finished CLIs organized by category. `/printing-press-publish` pushes here. |
 | **publish (pipeline)** | The pipeline step that moves a working CLI into the local library and writes the `.printing-press.json` provenance manifest. |
 | **publish (to public library repo)** | The skill-driven workflow (`/printing-press-publish`) that packages a local library CLI and creates a PR in the public library repo. |
-| **provenance** / **`.printing-press.json`** | Manifest written to each published CLI's root. Contains generation metadata: spec URL, checksum, run ID, printing-press version, timestamp. `api_name` is the canonical API identity; `cli_name` is the executable name. Makes the directory self-describing. |
-| **catalog** | Embedded YAML entries in `catalog/` describing available APIs (name, spec URL, category, tier). Baked into the binary at build time via `catalog.FS`. |
+| **provenance** / **`.printing-press.json`** | Manifest written to each published CLI's root. Contains generation metadata: spec URL, checksum, run ID, printing-press version, timestamp. `api_name` is the canonical API identity; `cli_name` is the executable name. Makes the directory self-describing. Distinct from `manifest.json` (plugin metadata) and `tools-manifest.json` (MCP tool catalog). |
+| **`manifest.json`** | Claude plugin manifest at the printed CLI root. Carries `display_name`, `description`, `homepage`, version, and other plugin-host fields. Read by Claude Desktop and other MCP-aware hosts when installing the CLI as a plugin. Distinct from `tools-manifest.json` (the MCP tool catalog) and `.printing-press.json` (provenance). |
+| **`tools-manifest.json`** | MCP tool catalog at the printed CLI root. For each tool, carries name, description, parameters, and auth metadata. The MCP server reads it at runtime to register typed tools with full schemas; the audit and scorecard pipelines consume it. "The manifest" without qualifier means this file. Distinct from `manifest.json` (plugin metadata) and `.printing-press.json` (provenance). |
+| **catalog** (embedded) | Embedded YAML entries in `catalog/` describing available APIs (name, spec URL, category, tier). Baked into the binary at build time via `catalog.FS`. Distinct from the **public library catalog**, which is the category-organized index of finished CLIs in the public library repo. |
 | **tier** | Catalog classification: `official` (vendor-maintained spec) or `community` (unofficial/reverse-engineered). Affects risk expectations. |
 | **runstate** | Mutable per-workspace state at `~/printing-press/.runstate/<scope>/`. Tracks current run and sync cursors. Distinct from manuscripts, which are immutable archives. |
 
@@ -259,17 +268,30 @@ Run `go test ./...` before considering your work done.
 
 Generated CLIs must pass 7 gates: go mod tidy, go vet, go build, binary build, --help, version, doctor.
 
-## `~/printing-press/` Layout
+## Local Artifacts (`~/printing-press/`)
 
 Generated artifacts live under the user's home directory, not in this repo.
 
-- `library/<api-slug>/` — Published CLIs (e.g., `notion`). Directory is keyed by API slug, not CLI name. The binary inside is still `<api-slug>-pp-cli`.
+- `library/<api-slug>/` — Local library: printed CLIs the generator has produced (e.g., `notion`). Directory is keyed by API slug, not CLI name. The binary inside is still `<api-slug>-pp-cli`. This is the working copy; the public library is the published-and-curated counterpart (see "Public Library" below).
 - `manuscripts/<api-slug>/` — Archived research and verification proofs, keyed by API slug (e.g., `notion`), not CLI name. One API can have multiple runs.
 - `.runstate/<scope>/` — Mutable per-workspace state (current run, sync cursors). Scoped by repo basename + hash.
 
 The API slug is derived by the generator from the spec title (`cleanSpecName`), not manually chosen. The CLI binary name is `<api-slug>-pp-cli`. Never hardcode an API slug when the generator can derive it — names with periods (cal.com, dub.co) normalize differently than you'd guess.
 
 The `-pp-` infix exists to avoid colliding with official CLIs. The binary `notion-pp-cli` can coexist with whatever `notion-cli` Notion ships themselves. The library directory is just `notion/` — the `-pp-cli` suffix only appears on binary names, not directory names.
+
+## Public Library
+
+The public library is the GitHub repo [`mvanhorn/printing-press-library`](https://github.com/mvanhorn/printing-press-library) — a curated, category-organized catalog of finished printed CLIs. Users install printed CLIs from here; this is where a CLI goes when it's ready to ship.
+
+**Local → public flow.** A successfully generated printed CLI lives in the local library. The `/printing-press-publish` skill packages a local CLI and opens a PR against the public library repo. Merging that PR is what moves the CLI from "works on this machine" to "users can install it."
+
+**Local-vs-public divergence.** The local library and public library can drift in two ways:
+
+- **Expected divergence.** Some files are intentionally rewritten by the publish step — most notably `go.mod`'s module path. The polish skill's divergence check exempts these.
+- **Unexpected divergence.** Local edits since the last publish — polish in progress, manual fixes, mcp-sync regen — that haven't been pushed. The polish skill's divergence check surfaces these so you can decide to either republish or discard the local changes.
+
+Treat the public library as the durable artifact and the local library as the working copy. When users hit a bug, they're hitting the public library's version, not whatever's currently in `~/printing-press/library/`.
 
 ## Internal Skills
 
