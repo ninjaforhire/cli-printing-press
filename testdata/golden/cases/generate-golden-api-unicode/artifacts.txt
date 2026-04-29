@@ -17,3 +17,10 @@ cafe-bistro/manifest.json
 # if the slug ever surfaces as "café-bistro-pp-cli/" again.
 cafe-bistro/cmd/cafe-bistro-pp-cli/main.go
 cafe-bistro/cmd/cafe-bistro-pp-mcp/main.go
+
+# Generated Go types: locks that sanitizeTypeName + toCamelCase fold
+# non-ASCII schema/property names to ASCII Go identifiers. The fixture
+# defines schema "CaféMenu" with property "spécialité"; this file must
+# show the ASCII-folded forms (no é, no extended bytes), proving every
+# schema-derived chokepoint actually ran ASCIIFold.
+cafe-bistro/internal/types/types.go

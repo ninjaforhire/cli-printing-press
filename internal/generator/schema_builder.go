@@ -369,6 +369,9 @@ func sqlStringLiteral(s string) string {
 }
 
 // toSnakeCase converts camelCase, PascalCase, or kebab-case to snake_case.
+// Expects ASCII input — callers are SQL identifier paths whose inputs come
+// from parsed APISpec types/fields that already passed through the
+// openapi parser's ASCIIFold chokepoints.
 func toSnakeCase(s string) string {
 	s = strings.ReplaceAll(s, ".", "_")
 	s = strings.ReplaceAll(s, "-", "_")

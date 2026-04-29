@@ -14,12 +14,18 @@ components:
       in: header
       name: X-API-Key
   schemas:
-    Menu:
+    # Schema name and one property are deliberately non-ASCII to lock in
+    # that sanitizeTypeName + toCamelCase fold to ASCII — the resulting
+    # types.go must define `type CafEMenu struct` (or similar ASCII shape)
+    # with `Specialite string` rather than retaining the accented bytes.
+    CaféMenu:
       type: object
       properties:
         id:
           type: string
         name:
+          type: string
+        spécialité:
           type: string
 paths:
   /menus:
@@ -35,4 +41,4 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Menu"
+                  $ref: "#/components/schemas/CaféMenu"

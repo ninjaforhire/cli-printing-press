@@ -2005,8 +2005,13 @@ func (g *Generator) template(tmplName string) (*template.Template, error) {
 	return tmpl, nil
 }
 
-// Template helper functions
-
+// Template helper functions.
+//
+// These run inside Go templates over parsed APISpec data, so their inputs
+// have already been ASCII-folded by the openapi/graphql parsers (which
+// route raw spec strings through naming.ASCIIFold at sanitizeTypeName,
+// toCamelCase, etc). Treat any new caller that feeds raw spec strings
+// directly into these helpers as a bug — fold first, then shape.
 func toCamel(s string) string {
 	// Strip characters that are invalid in Go identifiers
 	s = strings.TrimLeft(s, "$")
