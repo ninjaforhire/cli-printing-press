@@ -295,6 +295,37 @@ func ensureRootCmdExport(cliDir string) error {
 	if start < 0 {
 		return fmt.Errorf("root.go does not match the generated Execute shape; cannot add RootCmd export automatically")
 	}
+	// Skip prolog blocks whose supporting types/functions aren't in the
+	// existing source — older library CLIs predate suggestFlag and
+	// Deliver and would otherwise fail to build with "undefined" errors.
+	hasSuggestFlag := strings.Contains(src, "func suggestFlag(")
+	hasDeliver := strings.Contains(src, "func Deliver(") && strings.Contains(src, "deliverBuf")
+
+	suggestBlock := ""
+	if hasSuggestFlag {
+		suggestBlock = `
+	if err != nil && strings.Contains(err.Error(), "unknown flag") {
+		msg := err.Error()
+		// Extract the flag name from the error message (e.g., "unknown flag: --foob")
+		if idx := strings.Index(msg, "unknown flag: "); idx >= 0 {
+			flagStr := strings.TrimSpace(msg[idx+len("unknown flag: "):])
+			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
+				return fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
+			}
+		}
+	}`
+	}
+	deliverBlock := ""
+	if hasDeliver {
+		deliverBlock = `
+	if err == nil && flags.deliverBuf != nil {
+		if derr := Deliver(flags.deliverSink, flags.deliverBuf.Bytes(), flags.compact); derr != nil {
+			fmt.Fprintf(os.Stderr, "warning: deliver to %s:%s failed: %v\n", flags.deliverSink.Scheme, flags.deliverSink.Target, derr)
+			return derr
+		}
+	}`
+	}
+
 	prolog := `// RootCmd returns the Cobra command tree without executing it. The MCP server
 // uses this to mirror every user-facing command as an agent tool.
 func RootCmd() *cobra.Command {
@@ -307,23 +338,7 @@ func Execute() error {
 	var flags rootFlags
 	rootCmd := newRootCmd(&flags)
 
-	err := rootCmd.Execute()
-	if err != nil && strings.Contains(err.Error(), "unknown flag") {
-		msg := err.Error()
-		// Extract the flag name from the error message (e.g., "unknown flag: --foob")
-		if idx := strings.Index(msg, "unknown flag: "); idx >= 0 {
-			flagStr := strings.TrimSpace(msg[idx+len("unknown flag: "):])
-			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
-				return fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
-			}
-		}
-	}
-	if err == nil && flags.deliverBuf != nil {
-		if derr := Deliver(flags.deliverSink, flags.deliverBuf.Bytes(), flags.compact); derr != nil {
-			fmt.Fprintf(os.Stderr, "warning: deliver to %s:%s failed: %v\n", flags.deliverSink.Scheme, flags.deliverSink.Target, derr)
-			return derr
-		}
-	}
+	err := rootCmd.Execute()` + suggestBlock + deliverBlock + `
 	return err
 }
 
