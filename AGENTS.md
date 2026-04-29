@@ -324,3 +324,32 @@ Reach for this pattern when the work has the **detect mechanically + decide per-
 5. **Verification asks for zero pending, not zero findings.** "Done" means every finding is either fixed (auto-removed) or explicitly accepted with a note — not that the count is zero. Reviewers can see accepts in the ledger and judge whether each rationale holds.
 
 Compared to the alternatives: pure `TodoWrite` state is invisible to the binary and dies with the session; pure binary recompute can't track accept decisions and re-flags them every run; multi-file artifacts (cards/, ledger.md, rejections.md per the `simplify-and-refactor` skill) are heavier than warranted when each item is small and self-contained.
+
+## Skill Frontmatter: `context: fork` and `user-invocable`
+
+Two skill frontmatter fields shape how a skill participates in larger workflows. Both default to permissive behavior (shared context, user-invocable). Set them explicitly when the skill plays a non-default role.
+
+### `context: fork`
+
+Default: skills run in the caller's context. The skill sees the full parent conversation; the parent sees the skill's tool calls and output interleaved with its own work.
+
+`context: fork` gives the skill its own context window. Two consequences pull in opposite directions:
+
+- **Benefit:** the skill starts with a fresh, dedicated context — its full window is available for its own work (multi-step loops, sub-agent transcripts, large reads) rather than competing with whatever the parent has already accumulated.
+- **Cost:** the skill can't see anything from the parent's conversation. Everything it needs must come through `args`, be readable from disk, or be hardcoded.
+
+The decision rule is whether the skill is **self-contained** given its declared inputs. If args plus the filesystem cover everything the skill needs (e.g., `printing-press-polish` takes a CLI dir and reads the rest from the repo and manuscripts; `printing-press-output-review` takes a CLI dir and runs `scorecard --live-check` to gather data), `context: fork` is a clear win. If the skill needs prior tool output, conversation history, or anything else the parent has accumulated, don't fork — the skill won't have access to it and you'll end up plumbing context through args anyway.
+
+### `user-invocable`
+
+Default: `true` — the skill is discoverable as a slash command (`/skill-name`) and routes from trigger phrases in the description. Setting `user-invocable: false` makes it internal-only: only Claude can invoke it (typically via the Skill tool from another skill).
+
+Set `user-invocable: false` when the skill has no standalone meaning for a user. A user typing `/internal-skill` would get half a workflow with no input gate, no follow-up offer, no completion verdict. The actionable wrappers are the parent skills.
+
+In this family, every printing-press skill is user-invocable except `printing-press-output-review`, which runs only as a sub-step inside Phase 4.85 (main skill) and the polish diagnostic loop.
+
+### Internal-only sub-skill pattern
+
+When a workflow step has multiple parents and no standalone user meaning, extract it into a `user-invocable: false` skill that both parents invoke via the Skill tool. Single source of truth for the prompt, gate logic, and any reference docs. The framework dispatches it; nobody has to find and read sibling SKILL.md prose at runtime.
+
+The two fields compose. `context: fork` + `user-invocable: false` is the combo for self-contained internal sub-skills. `context: fork` alone (default user-invocable) is for user-facing skills with their own multi-step workflow that don't need parent context. Default frontmatter is for terse helper skills, or any skill that genuinely needs to see the parent's conversation.

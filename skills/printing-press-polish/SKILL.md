@@ -157,11 +157,20 @@ Parse findings into categories:
 
 ### Phase 4.85 — Agentic output review (Wave B)
 
-After the mechanical diagnostics above complete, run Phase 4.85 exactly as defined in the main printing-press SKILL.md (under `## Phase 4.85: Agentic Output Review`). The polish pathway uses the same Dispatch / Gate / Known blind spots contract — it's the canonical backfill path for CLIs shipped before Phase 4.85 existed. Record findings alongside the mechanical gates above so Phase 2 fixes address both.
+After the mechanical diagnostics above complete, invoke the `printing-press-output-review` sub-skill via the Skill tool. The sub-skill carries `context: fork` and owns the dispatch prompt, gate logic, and known blind spots — single source of truth shared with the main printing-press skill.
 
-Wave B gating applies: all Phase 4.85 findings are surfaced as warnings, not blockers. Fix if obvious and cheap; document with a short comment in the scorecard JSON if deferred. Non-interactive polish runs (CI, cron) follow the fail-open-with-log contract from Phase 4.85's Gate section.
+```
+Skill(
+  skill: "cli-printing-press:printing-press-output-review",
+  args: "$CLI_DIR"
+)
+```
 
-Record baseline scores: scorecard total, verify pass rate, dogfood verdict, go vet issue count, Phase 4.85 finding count.
+Parse the returned `---OUTPUT-REVIEW-RESULT---` block. `status: WARN` findings flow into the diagnostic categories above so Phase 2 fixes address both rule-based and plausibility issues. `status: SKIP` is informational — record but don't block.
+
+Wave B gating applies: all findings are warnings, never blockers. Fix if obvious and cheap; document with a short comment if deferred.
+
+Record baseline scores: scorecard total, verify pass rate, dogfood verdict, go vet issue count, output-review finding count.
 
 ## Phase 2: Fix
 
