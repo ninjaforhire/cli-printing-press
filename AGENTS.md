@@ -306,3 +306,21 @@ Skills use a `references/` directory for content that is only needed during spec
 **What stays inline:** Cardinal rules, decision matrices, phase structure, user-facing prompts — anything the agent needs at all times or to decide whether to load more.
 
 **What gets extracted:** Implementation details for conditional paths: capture tool CLI commands, delegation templates, scoring frameworks, report templates. These are loaded on-demand when the agent reaches the relevant phase gate.
+
+## Deterministic Inventory + Agent-Marked Ledger
+
+When a workflow has a checklist where detection is mechanical but each item needs per-item judgment, split the work between a binary-emitted inventory and an agent-maintained ledger. The binary owns "what's there"; the agent owns "what to do about each item." A persistent file holds both, so the work survives context flushes and the audit trail surfaces the agent's reasoning.
+
+The canonical example is `printing-press tools-audit` + `skills/printing-press/references/tools-polish.md`. The binary parses every Cobra command and emits findings (empty Short, thin Short, missing read-only annotation). The agent walks each finding, fixes most, and marks the rest `accepted` with a one-sentence rationale. The ledger persists at `<cli-dir>/.printing-press-tools-polish.json` for 24 hours.
+
+Reach for this pattern when the work has the **detect mechanically + decide per-item + persist rationale** shape. The trigger isn't a numeric item count — a 15-item list with three accept decisions across two sessions benefits, while a 200-item batch update where every item has the same fix does not. Skip it when one pass is enough, when every item has the same fix, when detection itself requires judgment, or when a `TodoWrite` task list with rationale in the description carries the whole workflow.
+
+**Structure:**
+
+1. **Binary writes the inventory.** A subcommand emits a structured snapshot file (`.<topic>-ledger.json` or similar) on every run. Each entry has stable identity fields (file, line, kind, key) and may carry agent-written `status` and `note` fields (`omitempty` so the bare audit output stays clean).
+2. **Agent annotates the ledger.** When the agent decides to keep an item as-is, it edits the ledger to set `status: "accepted"` and writes a `note`. Code fixes are *not* marked manually — the next run re-detects and the finding disappears automatically.
+3. **Re-runs preserve agent state.** The binary reads the previous ledger before writing the new one. Findings whose identity key matches inherit `status` and `note`. Findings present last run but absent now read as "resolved" in the delta line. New findings start fresh as pending.
+4. **Staleness, not history.** Ledgers age out (e.g., 24h) and are deleted. They're working state, not artifacts to preserve in version control. Add the ledger filename to the relevant repo's `.gitignore` if the cli-dir lives inside one.
+5. **Verification asks for zero pending, not zero findings.** "Done" means every finding is either fixed (auto-removed) or explicitly accepted with a note — not that the count is zero. Reviewers can see accepts in the ledger and judge whether each rationale holds.
+
+Compared to the alternatives: pure `TodoWrite` state is invisible to the binary and dies with the session; pure binary recompute can't track accept decisions and re-flags them every run; multi-file artifacts (cards/, ledger.md, rejections.md per the `simplify-and-refactor` skill) are heavier than warranted when each item is small and self-contained.

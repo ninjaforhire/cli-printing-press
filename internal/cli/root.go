@@ -61,6 +61,7 @@ func Execute() error {
 	rootCmd.AddCommand(newShipcheckCmd())
 	rootCmd.AddCommand(newLockCmd())
 	rootCmd.AddCommand(newMCPAuditCmd())
+	rootCmd.AddCommand(newToolsAuditCmd())
 	rootCmd.AddCommand(newProbeReachabilityCmd())
 	rootCmd.AddCommand(newSchemaCmd())
 	rootCmd.AddCommand(newBundleCmd())

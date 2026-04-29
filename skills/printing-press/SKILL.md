@@ -1997,7 +1997,7 @@ Use the Agent tool (general-purpose) with this prompt contract:
 Wave B policy (current):
 
 - All findings surface as `warning` — never `error`. Shipcheck proceeds regardless.
-- Findings are returned in the reviewer agent's response to its caller (main skill at shipcheck, polish-worker during polish runs). The caller logs them to the run's artifact directory (e.g., `manuscripts/<api>/<run>/proofs/phase-4.85-findings.md`) and surfaces them to the user for review. Wave B does not persist findings into `scorecard.json` — that path is reserved for Wave C if findings become blocking.
+- Findings are returned in the reviewer agent's response to its caller (main skill at shipcheck, the polish skill during polish runs). The caller logs them to the run's artifact directory (e.g., `manuscripts/<api>/<run>/proofs/phase-4.85-findings.md`) and surfaces them to the user for review. Wave B does not persist findings into `scorecard.json` — that path is reserved for Wave C if findings become blocking.
 - The user decides case by case whether to fix before shipping.
 
 **Non-interactive contract (CI, cron, batch regeneration):**
@@ -2010,7 +2010,7 @@ Wave C (separate future PR) will flip `error`-severity findings to blocking afte
 
 ### Polish skill invocation
 
-Phase 4.85 also runs during `/printing-press-polish` as the backfill path for CLIs shipped before this phase existed. Polish already dispatches verify + dogfood + scorecard via the `polish-worker` agent; Phase 4.85 runs as part of the same worker pipeline so every polish run re-reviews outputs of older CLIs without a separate campaign.
+Phase 4.85 also runs during `/printing-press-polish` as the backfill path for CLIs shipped before this phase existed. The polish skill runs verify + dogfood + scorecard inline; Phase 4.85 runs as part of the same diagnostic loop so every polish run re-reviews outputs of older CLIs without a separate campaign.
 
 ### Why agentic vs template-only
 
@@ -2148,38 +2148,32 @@ Write:
 
 ## Phase 5.5: Polish
 
-**Always runs.** Dispatch the `polish-worker` agent to run diagnostics, fix quality
-issues, and return a structured delta report. The agent is autonomous — no user
-input needed. The goal is to ship the best CLI possible, not the fastest.
+**Always runs.** Invoke the `printing-press-polish` skill to run diagnostics, fix quality issues, and return a delta. The polish skill carries `context: fork` in its frontmatter, so its diagnostic-fix-rediagnose loop runs in a forked context — diagnostic spam, fix iterations, and re-audits stay scoped to the polish session and don't pollute this generation flow. The skill is autonomous — no user input needed. The goal is to ship the best CLI possible, not the fastest.
 
-Dispatch via the Agent tool (**foreground** — must complete before promoting):
+Invoke via the Skill tool (**foreground** — must complete before promoting):
 
 ```
-Agent(
-  subagent_type: "cli-printing-press:polish-worker",
-  description: "Polish CLI quality",
-  prompt: "Polish this CLI.\nCLI_DIR: $CLI_WORK_DIR\nCLI_NAME: <api>-pp-cli\nSPEC_PATH: <same-spec>"
+Skill(
+  skill: "cli-printing-press:printing-press-polish",
+  args: "$CLI_WORK_DIR"
 )
 ```
 
-The agent runs the full diagnostic-fix-rediagnose loop and ends its response with
-a `---POLISH-RESULT---` block containing scorecard/verify before/after, fixes
-applied, and a ship recommendation.
+The polish skill runs the full diagnostic-fix-rediagnose loop including MCP tool quality polish (via `printing-press tools-audit` plus the playbook at `references/tools-polish.md`) and ends its response with a `---POLISH-RESULT---` block containing scorecard/verify/tools-audit before/after, fixes applied, and a ship recommendation.
 
-Parse the result. Display the delta to the user:
+Parse the result block. Display the delta to the user:
 
 ```
 Polish pass:
-  Verify:    86% → 93% (+7%)
-  Scorecard: 92 → 94 (+2)
+  Verify:      86% → 93% (+7%)
+  Scorecard:   92  → 94  (+2)
+  Tools-audit: 76  → 0   pending findings
   Fixed: [summary of fixes_applied from result]
 ```
 
-**Verdict override:** If the agent's `ship_recommendation` is `hold` and the
-Phase 4 verdict was `ship`, downgrade to `hold`. Release the lock without
-promoting.
+**Verdict override:** If the polish skill's `ship_recommendation` is `hold` and the Phase 4 verdict was `ship`, downgrade to `hold`. Release the lock without promoting.
 
-Write the agent's full response to:
+Write the polish skill's full response to:
 
 `$PROOFS_DIR/<stamp>-fix-<api>-pp-cli-polish.md`
 
