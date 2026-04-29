@@ -14,7 +14,16 @@ func newMCPSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp-sync <cli-dir>",
 		Short: "Migrate a printed CLI to the runtime Cobra-tree MCP surface",
-		Args:  cobra.ExactArgs(1),
+		Long: `Regenerates the MCP surface (tools.go + tools-manifest.json + manifest.json)
+from the spec, current generator templates, and any mcp-descriptions.json
+overrides. Refreshes spec-derived fields in .printing-press.json so the
+chain spec.yaml → .printing-press.json → manifest.json stays consistent.
+
+Honors PRINTING_PRESS_LIBRARY_PUBLIC: when set to a public-library
+clone, mcp-sync consults that clone's registry.json as a final fallback
+for display_name when the spec and existing manifest.json don't carry
+a usable brand name.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cliDir, err := filepath.Abs(args[0])
 			if err != nil {

@@ -88,9 +88,17 @@ func Sync(cliDir string, opts Options) (Result, error) {
 	// regeneration drops "ESPN" back to the title-cased slug ("Espn"),
 	// regressing both the MCP server identity (NewMCPServer first arg)
 	// and the bundled manifest's display_name field.
+	//
+	// Falls through to the public library's registry.json when
+	// manifest.json has no usable value (browser-sniffed CLIs that
+	// never had a manifest, or a manifest already corrupted to the
+	// slug form). The registry is the catalog source of truth for
+	// brand names.
 	if parsed.DisplayName == "" {
 		if existing := readExistingManifestDisplayName(cliDir); existing != "" {
 			parsed.DisplayName = existing
+		} else if registryName := readRegistryDisplayName(parsed.Name); registryName != "" {
+			parsed.DisplayName = registryName
 		}
 	}
 	// Apply hand-authored MCP description overrides before generating
@@ -454,6 +462,65 @@ func readExistingManifestDisplayName(cliDir string) string {
 		return ""
 	}
 	return existing.DisplayName
+}
+
+// registryDisplayNameMaxLen caps the length of registry.json's `api`
+// field when used as a display_name. The field is overloaded — most
+// entries hold a short brand name ("Cal.com", "Company GOAT") but a
+// minority hold a full descriptive sentence (recipe-goat ships ~200
+// chars). 40 fits every observed real brand name with margin.
+const registryDisplayNameMaxLen = 40
+
+// registrySchemaVersion is the registry.json schema this reader knows
+// how to parse. A future schema bump (renamed fields, restructured
+// entries) would silently mis-extract from a different shape; failing
+// closed when the version doesn't match means a stale binary degrades
+// to the HumanName fallback rather than emitting wrong values.
+const registrySchemaVersion = 1
+
+// readRegistryDisplayName looks up an API's brand name in the public
+// library's registry.json. Returns "" when the env var
+// PRINTING_PRESS_LIBRARY_PUBLIC is unset, the file is unreadable, the
+// schema_version doesn't match, the slug isn't in the registry, or
+// the api field is unusable (empty, equal to the slug, or too long
+// to plausibly be a display_name).
+//
+// Last fallback in the display_name preservation chain: spec.yaml →
+// manifest.json → registry.json → naming.HumanName. Filesystem
+// scanning belongs in skill prose; the binary trusts the env var.
+func readRegistryDisplayName(slug string) string {
+	libDir := os.Getenv("PRINTING_PRESS_LIBRARY_PUBLIC")
+	if libDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(libDir, "registry.json"))
+	if err != nil {
+		return ""
+	}
+	var registry struct {
+		SchemaVersion int `json:"schema_version"`
+		Entries       []struct {
+			Name string `json:"name"`
+			API  string `json:"api"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return ""
+	}
+	if registry.SchemaVersion != registrySchemaVersion {
+		return ""
+	}
+	for _, e := range registry.Entries {
+		if e.Name != slug {
+			continue
+		}
+		api := strings.TrimSpace(e.API)
+		if api == "" || api == slug || len(api) > registryDisplayNameMaxLen {
+			return ""
+		}
+		return api
+	}
+	return ""
 }
 
 // validateSpecNameMatchesDir refuses to migrate when spec.yaml.name

@@ -723,3 +723,199 @@ func Execute() error {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not match the generated Execute shape")
 }
+
+func TestReadRegistryDisplayName(t *testing.T) {
+	writeRegistry := func(t *testing.T, libDir string, entries any) {
+		t.Helper()
+		body := map[string]any{"schema_version": 1, "entries": entries}
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(libDir, "registry.json"), data, 0o644))
+	}
+
+	t.Run("env unset returns empty", func(t *testing.T) {
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", "")
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+
+	t.Run("env set but file missing returns empty", func(t *testing.T) {
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", t.TempDir())
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+
+	t.Run("malformed JSON returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(libDir, "registry.json"), []byte("not json"), 0o644))
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+
+	t.Run("slug not in registry returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "wikipedia", "api": "Wikipedia"},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+
+	t.Run("api equal to slug returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "agent-capture", "api": "agent-capture"},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("agent-capture"))
+	})
+
+	t.Run("api too long returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "recipe-goat", "api": "Cross-site recipe aggregator (37 trusted sites: King Arthur, Serious Eats, Smitten Kitchen, AllRecipes, Food52, BBC Food, EatingWell, Food Network, and 29 more) + USDA FoodData Central"},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("recipe-goat"))
+	})
+
+	t.Run("usable api returns it", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "wikipedia", "api": "Wikipedia"},
+			{"name": "cal-com", "api": "Cal.com"},
+			{"name": "company-goat", "api": "Company GOAT"},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "Cal.com", readRegistryDisplayName("cal-com"))
+		assert.Equal(t, "Wikipedia", readRegistryDisplayName("wikipedia"))
+		assert.Equal(t, "Company GOAT", readRegistryDisplayName("company-goat"))
+	})
+
+	t.Run("whitespace-only api returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "wikipedia", "api": "  \t\n"},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("wikipedia"))
+	})
+
+	t.Run("api whitespace is trimmed", func(t *testing.T) {
+		libDir := t.TempDir()
+		writeRegistry(t, libDir, []map[string]string{
+			{"name": "wikipedia", "api": "  Wikipedia  "},
+		})
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "Wikipedia", readRegistryDisplayName("wikipedia"))
+	})
+
+	t.Run("unknown schema_version returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		body := map[string]any{
+			"schema_version": 2, // future schema, this binary doesn't understand
+			"entries": []map[string]string{
+				{"name": "cal-com", "api": "Cal.com"},
+			},
+		}
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(libDir, "registry.json"), data, 0o644))
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+
+	t.Run("missing schema_version returns empty", func(t *testing.T) {
+		libDir := t.TempDir()
+		body := map[string]any{
+			// schema_version omitted; defaults to 0, which doesn't match.
+			"entries": []map[string]string{
+				{"name": "cal-com", "api": "Cal.com"},
+			},
+		}
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(libDir, "registry.json"), data, 0o644))
+		t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+		assert.Equal(t, "", readRegistryDisplayName("cal-com"))
+	})
+}
+
+// TestSyncFallsThroughToRegistryDisplayName exercises the new branch
+// in Sync's preservation block end-to-end: spec.yaml without
+// display_name, manifest.json with no usable value, registry.json
+// with a brand name. Asserts the registry value lands in
+// .printing-press.json so subsequent WriteMCPBManifest carries it
+// into the published manifest.
+func TestSyncFallsThroughToRegistryDisplayName(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:    "testbrand",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"TESTBRAND_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/testbrand-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+	cliDir := filepath.Join(t.TempDir(), "testbrand")
+	gen := generator.New(apiSpec, cliDir)
+	require.NoError(t, gen.Generate())
+	require.NoError(t, pipeline.WriteManifestForGenerate(pipeline.GenerateManifestParams{
+		APIName:   apiSpec.Name,
+		OutputDir: cliDir,
+		Spec:      apiSpec,
+	}))
+	specData, err := yaml.Marshal(apiSpec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "spec.yaml"), specData, 0o644))
+
+	// Force manifest.json's display_name to empty so the manifest-side
+	// preservation step rejects it and falls through to the registry.
+	// Without this, the generator's HumanName-derived "Testbrand" would
+	// be preserved and the registry path never gets exercised.
+	manifestPath := filepath.Join(cliDir, pipeline.MCPBManifestFilename)
+	mcpbData, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+	var mcpb pipeline.MCPBManifest
+	require.NoError(t, json.Unmarshal(mcpbData, &mcpb))
+	mcpb.DisplayName = ""
+	modifiedData, err := json.Marshal(mcpb)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, modifiedData, 0o644))
+
+	// Set up the public library with a registry.json the fallback can read.
+	libDir := t.TempDir()
+	registry := map[string]any{
+		"schema_version": 1,
+		"entries": []map[string]string{
+			{"name": "testbrand", "api": "TestBrand!"},
+		},
+	}
+	registryData, err := json.Marshal(registry)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(libDir, "registry.json"), registryData, 0o644))
+	t.Setenv("PRINTING_PRESS_LIBRARY_PUBLIC", libDir)
+
+	_, err = Sync(cliDir, Options{})
+	require.NoError(t, err)
+
+	// .printing-press.json must reflect the registry-derived value;
+	// the broken alternative is silently regressing to "Testbrand".
+	provData, err := os.ReadFile(filepath.Join(cliDir, pipeline.CLIManifestFilename))
+	require.NoError(t, err)
+	var prov pipeline.CLIManifest
+	require.NoError(t, json.Unmarshal(provData, &prov))
+	assert.Equal(t, "TestBrand!", prov.DisplayName)
+}
