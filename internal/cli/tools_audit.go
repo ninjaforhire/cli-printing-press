@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 	"github.com/spf13/cobra"
 )
 
@@ -22,19 +23,11 @@ const (
 	statusAccepted    = "accepted"
 	suspiciousMaxLen  = 30
 	suspiciousMinWord = 4
-
-	// MCP tool descriptions need richer text than Cobra Shorts. Agents
-	// pick from a tool catalog without the context a human gets from
-	// --help, so spec-derived summaries like "Create a tag" or "List
-	// items" — fine for OpenAPI doc rendering — leave the agent guessing
-	// what fields to pass and what comes back. The thresholds here are
-	// floor values: 60 chars / 8 words is roughly two short clauses,
-	// enough to convey the action plus one parameter or return shape.
-	mcpDescMinLen   = 60
-	mcpDescMinWords = 8
-
-	manifestFile = "tools-manifest.json"
 )
+
+// MCP description thresholds (pipeline.MCPDescMinLen, MCPDescMinWords,
+// IsThinMCPDescription) live in pipeline so the scorecard applies the
+// same predicate as the audit.
 
 // frameworkCommands mirrors cobratree/classify.go.tmpl. The runtime
 // walker skips these names entirely — they're never registered as MCP
@@ -217,18 +210,6 @@ func auditCobraSource(cliDir string) ([]ToolsAuditFinding, error) {
 	return findings, nil
 }
 
-// toolsManifest is the subset of <cli-dir>/tools-manifest.json the
-// audit reads. The full manifest carries more fields (params, method,
-// path, transport metadata) but only Name and Description matter here.
-type toolsManifest struct {
-	Tools []toolsManifestEntry `json:"tools"`
-}
-
-type toolsManifestEntry struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
 // auditMCPManifest reads tools-manifest.json and flags MCP tool
 // descriptions that fall below the agent-grade bar. The manifest is
 // the source of truth for typed endpoint tools' descriptions; for
@@ -236,13 +217,8 @@ type toolsManifestEntry struct {
 // auditCommandFields path covers them. Returns nil silently if the
 // manifest is missing (older CLIs predate it) or malformed.
 func auditMCPManifest(cliDir string) []ToolsAuditFinding {
-	path := filepath.Join(cliDir, manifestFile)
-	data, err := os.ReadFile(path)
+	m, err := pipeline.ReadToolsManifest(cliDir)
 	if err != nil {
-		return nil
-	}
-	var m toolsManifest
-	if err := json.Unmarshal(data, &m); err != nil {
 		return nil
 	}
 	var findings []ToolsAuditFinding
@@ -254,27 +230,16 @@ func auditMCPManifest(cliDir string) []ToolsAuditFinding {
 		case t.Description == "":
 			findings = append(findings, ToolsAuditFinding{
 				Kind: "empty-mcp-description", Command: t.Name,
-				File: manifestFile, Evidence: "(empty)",
+				File: pipeline.ToolsManifestFilename, Evidence: "(empty)",
 			})
-		case thinMCPDescription(t.Description):
+		case pipeline.IsThinMCPDescription(t.Description):
 			findings = append(findings, ToolsAuditFinding{
 				Kind: "thin-mcp-description", Command: t.Name,
-				File: manifestFile, Evidence: t.Description,
+				File: pipeline.ToolsManifestFilename, Evidence: t.Description,
 			})
 		}
 	}
 	return findings
-}
-
-// thinMCPDescription flags descriptions that are both short and
-// low-word-count — the "Create a tag" / "List items" shape that's
-// fine for OpenAPI documentation and inadequate for agents. Either
-// dimension alone is acceptable: a precise 50-char one-liner with 9
-// words can be agent-grade, and a 65-char description packed with
-// jargon may still be too thin in word count. Both signals firing is
-// the suspect pattern.
-func thinMCPDescription(s string) bool {
-	return len(s) < mcpDescMinLen && len(strings.Fields(s)) < mcpDescMinWords
 }
 
 type commandFields struct {

@@ -27,6 +27,14 @@ func newMCPSyncCmd() *cobra.Command {
 				}
 				return &ExitError{Code: ExitPublishError, Err: err}
 			}
+			for _, name := range result.UnmatchedOverrideKeys {
+				// Surface override-file keys that didn't match any endpoint.
+				// Common causes: typo in mcp-descriptions.json, stale key
+				// after a resource/endpoint rename. Stderr-warn so the user
+				// notices but the sync still succeeds — tools-audit will
+				// flag any thin description that wasn't overridden.
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: mcp-descriptions.json key %q does not match any tool in the spec\n", name)
+			}
 			if result.Changed {
 				fmt.Fprintf(cmd.OutOrStdout(), "migrated MCP surface in %s\n", cliDir)
 			} else {

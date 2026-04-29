@@ -10,6 +10,105 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestIsThinMCPDescription(t *testing.T) {
+	tests := []struct {
+		name string
+		desc string
+		want bool
+	}{
+		{"empty is thin", "", true},
+		{"whitespace is thin", "   ", true},
+		{"short and few words", "Get a tag", true}, // 9 chars / 3 words → both trip
+		{"both signals trip on short low-word string", "verylongidentifier verylongidentifier", true},                                        // 37 chars / 2 words → both below thresholds
+		{"long enough chars passes even if few words", "verylongidentifier verylongidentifier verylongidentifier verylongidentifier", false}, // 73 chars / 4 words → length passes
+		{"enough words passes even if short", "Create a new tag in the user workspace", false},                                               // 38 chars / 8 words → words passes
+		{"genuinely rich passes", "Create a new tag in the workspace. Required: name. Returns id and slug.", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsThinMCPDescription(tt.desc); got != tt.want {
+				t.Errorf("IsThinMCPDescription(%q) = %v, want %v", tt.desc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScoreMCPDescriptionQuality(t *testing.T) {
+	mk := func(t *testing.T, descs []string) string {
+		t.Helper()
+		dir := t.TempDir()
+		tools := make([]map[string]any, 0, len(descs))
+		for i, d := range descs {
+			tools = append(tools, map[string]any{
+				"name":        "tool_" + string(rune('a'+i)),
+				"description": d,
+			})
+		}
+		manifest := map[string]any{"tools": tools}
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tools-manifest.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	t.Run("missing manifest is unscored", func(t *testing.T) {
+		dir := t.TempDir()
+		score, scored := scoreMCPDescriptionQuality(dir)
+		if scored {
+			t.Errorf("expected unscored, got scored=%d", score)
+		}
+	})
+
+	t.Run("empty tools list is unscored", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "tools-manifest.json"), []byte(`{"tools":[]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		score, scored := scoreMCPDescriptionQuality(dir)
+		if scored {
+			t.Errorf("expected unscored, got scored=%d", score)
+		}
+	})
+
+	rich := "Create a new tag in the workspace. Required: name. Returns id and slug."
+	thin := "Create a tag"
+
+	cases := []struct {
+		name  string
+		descs []string
+		want  int
+	}{
+		{"all rich -> 10", []string{rich, rich, rich, rich, rich}, 10},
+		{"4% thin -> 9", appendN([]string{thin}, rich, 24), 9},
+		{"10% thin -> 7", appendN([]string{thin}, rich, 9), 7},
+		{"25% thin -> 5", []string{rich, rich, rich, thin}, 5},
+		{"40% thin -> 3", []string{rich, rich, rich, thin, thin}, 3},
+		{"100% thin -> 0", []string{thin, thin, thin, thin, thin}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := mk(t, c.descs)
+			score, scored := scoreMCPDescriptionQuality(dir)
+			if !scored || score != c.want {
+				t.Errorf("score=%d scored=%v, want %d/true", score, scored, c.want)
+			}
+		})
+	}
+}
+
+func appendN(prefix []string, val string, n int) []string {
+	out := make([]string, 0, len(prefix)+n)
+	out = append(out, prefix...)
+	for range n {
+		out = append(out, val)
+	}
+	return out
+}
+
 func TestScoreDeadCode(t *testing.T) {
 	t.Run("penalizes dead flags and helper functions", func(t *testing.T) {
 		dir := t.TempDir()
@@ -514,7 +613,7 @@ func runLinks() string {
 		pipelineDir := t.TempDir()
 		sc, err := RunScorecard(dir, pipelineDir, "", nil)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []string{"mcp_token_efficiency", "mcp_remote_transport", "mcp_tool_design", "mcp_surface_strategy", "cache_freshness", "path_validity", "auth_protocol", "live_api_verification"}, sc.UnscoredDimensions)
+		assert.ElementsMatch(t, []string{"mcp_description_quality", "mcp_token_efficiency", "mcp_remote_transport", "mcp_tool_design", "mcp_surface_strategy", "cache_freshness", "path_validity", "auth_protocol", "live_api_verification"}, sc.UnscoredDimensions)
 		assert.NotContains(t, sc.GapReport, "path_validity scored 0/10 - needs improvement")
 		assert.NotContains(t, sc.GapReport, "auth_protocol scored 0/10 - needs improvement")
 	})
@@ -905,7 +1004,7 @@ func runLinks() string {
 		body := string(data)
 		assert.True(t, strings.Contains(body, `"path_validity":0`))
 		assert.True(t, strings.Contains(body, `"auth_protocol":0`))
-		assert.True(t, strings.Contains(body, `"unscored_dimensions":["mcp_token_efficiency","mcp_remote_transport","mcp_tool_design","mcp_surface_strategy","cache_freshness","path_validity","auth_protocol","live_api_verification"]`))
+		assert.True(t, strings.Contains(body, `"unscored_dimensions":["mcp_description_quality","mcp_token_efficiency","mcp_remote_transport","mcp_tool_design","mcp_surface_strategy","cache_freshness","path_validity","auth_protocol","live_api_verification"]`))
 	})
 }
 

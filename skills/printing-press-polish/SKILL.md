@@ -179,7 +179,14 @@ Parse findings into categories:
 | Go vet issues | go vet | Any output |
 | Output entity warnings | scorecard JSON | `live_check.features[].warnings` — raw HTML entities in human output |
 | Output plausibility | Phase 4.85 | Findings from the agentic output review |
-| MCP tool quality | tools-audit | Empty Short, thin Short, missing read-only annotations |
+| MCP tool quality | tools-audit | Empty Short, thin Short, missing read-only annotations, thin MCP descriptions |
+
+**Environmental failures vs. CLI defects.** Some Phase 1 outputs surface failures that aren't real CLI bugs and should not block ship:
+
+- `scorecard --live-check` reporting `SQLITE_BUSY`, network timeouts, `401` from a mock or expired token, or HTTP errors that depend on the test workspace's permissions/state — these are test-environment issues, not CLI defects.
+- `verify` mock-harness flakes on commands with binary output (e.g., `qr` returning a PNG that the substring matcher can't validate) or commands with optional positional args where dry-run output legitimately doesn't contain the verify probe string.
+
+Classify these as environmental in `skipped_findings` with the specific reason; do not spend Phase 2 cycles trying to "fix" them. The polish skill's ship logic already excludes live-check failures from gating, but the agent should still annotate them so reviewers can see they were considered and dismissed deliberately.
 
 ### Phase 4.85 — Agentic output review (Wave B)
 
@@ -205,6 +212,18 @@ Fix in priority order. After each priority level, update the lock heartbeat:
 ```bash
 printing-press lock update --cli "$CLI_NAME" --phase polish 2>/dev/null
 ```
+
+### Priority 0: MCP surface migration (legacy CLIs)
+
+If Phase 1's `dogfood` reported `MCP Surface: FAIL` with a parity mismatch, the CLI was generated before the runtime cobratree walker existed and is still on the static `internal/mcp/tools.go` surface. The fix is mechanical:
+
+```bash
+printing-press mcp-sync "$CLI_DIR"
+```
+
+That migrates the MCP surface to the runtime walker, regenerates `tools-manifest.json` and `internal/mcp/tools.go`, and applies any `mcp-descriptions.json` overrides. Re-run `dogfood` after; the parity gate flips to PASS. This is a known migration path for every CLI generated before the cobratree landed; running it on a CLI already on the runtime walker is a no-op refresh.
+
+Skip this priority on CLIs where dogfood's MCP gate is already passing.
 
 ### Priority 1: Verify failures
 
@@ -386,6 +405,17 @@ Compute the ship recommendation:
 - **`ship`**: verify >= 80%, scorecard >= 75, no critical failures, **AND** verify-skill exits 0 (no SKILL/CLI mismatches), **AND** workflow-verify is not `workflow-fail`, **AND** tools-audit shows zero pending findings (every finding fixed or explicitly accepted with rationale). The SKILL/workflow gates are hard requirements: a CLI that ships with a SKILL that lies about it (verify-skill findings) gives agents broken instructions; a CLI whose primary workflow fails verification has not actually shipped.
 - **`ship-with-gaps`**: verify >= 65%, scorecard >= 65, non-critical gaps remain, **AND** the SKILL/workflow gates above hold. Reserved for the rare case where a refactor or external-dependency blocker prevents a clean fix; the gap must be documented in the remaining issues.
 - **`hold`**: verify < 65% or scorecard < 65 or critical failures, **OR** verify-skill has unresolved findings, **OR** workflow-verify reports `workflow-fail` and the workflow is the CLI's primary value.
+
+### Push higher without gaming
+
+The ship gates are a floor, not a ceiling. After they pass, look at scorecard dimensions still below max and ask whether each gap is real or structural:
+
+1. **Find the underlying deficit, not the score.** The scorecard is a proxy for quality, not the goal itself. A README scoring 8/10 might be missing a Cookbook section or have outdated commands — that's a real, fixable gap. A `mcp_surface_strategy` scoring 2/10 on a 200-endpoint API might be flagging that the surface is mostly endpoint mirrors — also potentially fixable.
+2. **If there's a real, agent-grade improvement available, make it.** Better description, missing flag doc, weak README section, an example that doesn't reflect actual usage. The CLI gets better and the score follows.
+3. **If the deficit is structural, document and accept.** Some dimensions assume capabilities the CLI's domain doesn't have (a read-only API scored against write-workflow dimensions, a CLI with no auth scored on auth dimensions, a small API penalized on `surface_strategy` thresholds calibrated for large APIs). Note the reason in `skipped_findings` and move on.
+4. **Never add scaffolding to satisfy the scorer.** Fake commands, fake tests, fake flags, or boilerplate prose written purely to nudge a number — those degrade the CLI to satisfy the proxy. The scorer is imperfect by design (the "scoring may be imperfect" caveat in AGENTS.md applies). Trust the underlying judgment, not the number.
+
+Rule of thumb: if your fix would still be valuable if the scorecard didn't exist, do it. If the only motivation is "to push the score," don't.
 
 ## Display delta and emit result block
 

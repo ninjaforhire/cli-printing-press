@@ -42,8 +42,9 @@ Files that are NOT DO-NOT-EDIT and ARE safe to edit:
 - Hand-written novel commands (no generator header)
 - The polish skill's own targets: README.md, SKILL.md, manifest.json
 - `internal/cli/root.go` (the generator emits the scaffold but the skill mutates it during polish)
+- `mcp-descriptions.json` — the sanctioned override file for MCP tool descriptions (see `thin-mcp-description` below)
 
-`tools-manifest.json` is a special case — it's generated, but the dual-edit path documented under `thin-mcp-description` deliberately edits both manifest and `tools.go` together. The runtime registers from `tools.go`; the manifest is a parallel artifact. If `mcp-sync` regenerates the manifest, the description edits in tools.go survive. Verify this on your CLI before relying on it; if both are regenerated atomically, this is a generator-template ask, not a polish-time fix.
+`tools-manifest.json` and `internal/mcp/tools.go` are both DO-NOT-EDIT generated files. Don't edit them directly for description fixes — the override file is the path that survives regen.
 
 ### `empty-short`
 
@@ -72,18 +73,34 @@ Shell-out tool whose name matches a read-shaped pattern (`list`, `get`, `show`, 
 
 A typed endpoint tool whose `description` field in `tools-manifest.json` is empty.
 
-**Fix:** write an MCP-grade description (see criteria below) and update both:
-
-1. `tools-manifest.json` — the `description` field for the matching tool entry.
-2. `internal/mcp/tools.go` — the `mcplib.WithDescription("...")` call for the same tool. Keep the two in sync.
+**Fix:** write an MCP-grade description (see criteria below) to the override file (see "Override path" below). Do NOT edit `tools-manifest.json` or `internal/mcp/tools.go` directly — both are generated and edits get wiped on the next `mcp-sync`.
 
 ### `thin-mcp-description`
 
 A typed endpoint tool whose description is both short (<60 chars) and low-word-count (<8 words). The dominant pattern: spec-derived summaries like `"Create a tag"`, `"List domains"`, `"Update a link"` — fine for OpenAPI doc rendering, inadequate for an agent picking from a tool catalog. The agent looking at `"Create a tag"` has to guess what fields to pass, what comes back, and when to prefer this over alternatives.
 
-**Fix:** rewrite per the MCP description criteria below. Update both `tools-manifest.json` and `internal/mcp/tools.go` so the runtime and the manifest stay in sync.
+**Fix:** rewrite per the MCP description criteria below and write the new text to the override file (see "Override path" below).
 
 **Acceptance is rare here.** A 30-char description is almost never enough for a typed MCP tool. Only accept if the underlying operation is genuinely so simple that more words add no information (e.g., a synthetic ping/heartbeat tool).
+
+### Override path: `mcp-descriptions.json`
+
+Both `tools-manifest.json` and `internal/mcp/tools.go` are generated artifacts (each carries the generator's "DO NOT EDIT" header) and get rewritten on every `mcp-sync` run. The sanctioned path for replacing thin spec-derived descriptions is the `mcp-descriptions.json` sidecar at the cli-dir root. Format:
+
+```json
+{
+  "descriptions": {
+    "tags_create": "Create a new tag in the workspace. Required: name. Optional: color (hex) and parentTagId. Returns the tag's id and slug. Tags must exist before they can be assigned to links.",
+    "tags_update": "..."
+  }
+}
+```
+
+Keys are the MCP tool names exactly as they appear in `tools-manifest.json`'s `name` field (snake_case, e.g. `tags_create`, `bookings_attendees_booking-add`). Values are the new descriptions written per the MCP criteria below.
+
+After writing one or more overrides, **run `printing-press mcp-sync <cli-dir>`** to regenerate the manifest and runtime registration with the override applied. Then re-run the audit; the finding disappears because the manifest now reflects the override.
+
+The override file is hand-editable, persists across regenerations (it lives outside the generator's emit set), and survives `mcp-sync` runs. It's the only place an agent should write MCP descriptions that have to last.
 
 ## Pass 2: Evaluate every command (the load-bearing pass)
 
@@ -225,26 +242,22 @@ Annotations: map[string]string{"mcp:read-only": "true"},
 
 ### Empty / thin MCP description
 
-Two files to update for the same tool — keep them in sync.
-
-`tools-manifest.json`:
+Write to `<cli-dir>/mcp-descriptions.json`, then run `mcp-sync` to apply.
 
 ```json
 {
-  "name": "tags_create",
-  "description": "<MCP-grade description per criteria above>",
-  ...
+  "descriptions": {
+    "tags_create": "<MCP-grade description per criteria above>",
+    "tags_update": "<another override>"
+  }
 }
 ```
 
-`internal/mcp/tools.go`:
-
-```go
-mcplib.NewTool("tags_create",
-    mcplib.WithDescription("<same MCP-grade description>"),
-    ...
-)
+```bash
+printing-press mcp-sync <cli-dir>
 ```
+
+The sync regenerates `tools-manifest.json` and `internal/mcp/tools.go` with the overrides applied. Both generated files now carry the richer text; both are wiped and re-emitted from the override file on every regen, so edits persist. Re-run `tools-audit` to confirm the finding is gone.
 
 ## Ledger and resumability
 
@@ -287,7 +300,7 @@ After applying fixes, before declaring the polish complete:
 - [ ] `go build ./...` clean (annotations don't break compilation)
 - [ ] `printing-press tools-audit <cli-dir>` shows zero pending findings — every finding is either fixed (auto-removed) or explicitly accepted with a `note`
 - [ ] `printing-press dogfood --dir <cli-dir>` reports `MCP Surface: PASS`
-- [ ] If `tools-manifest.json` was edited, `tools.go` was updated to match (the runtime registers from `tools.go`; the manifest documents what was registered)
+- [ ] If `mcp-descriptions.json` was edited, `printing-press mcp-sync <cli-dir>` was run to apply the overrides into `tools-manifest.json` and `internal/mcp/tools.go`. Re-run `tools-audit` after the sync to confirm thin-mcp-description findings disappeared.
 - [ ] If commands were renamed or had their annotations restructured, smoke-test the binary by inspecting `--help` output for the affected commands
 
 The ledger file persists until it ages out (24h). Once the polish PR merges and the CLI is rebuilt, the file is no longer load-bearing — the next `tools-audit` run can start fresh.

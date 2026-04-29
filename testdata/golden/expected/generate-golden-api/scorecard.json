@@ -20,6 +20,7 @@
       "insight": 8,
       "live_api_verification": 0,
       "local_cache": 10,
+      "mcp_description_quality": 0,
       "mcp_quality": 10,
       "mcp_remote_transport": 5,
       "mcp_surface_strategy": 0,
@@ -37,6 +38,7 @@
       "workflows": 10
     },
     "unscored_dimensions": [
+      "mcp_description_quality",
       "mcp_tool_design",
       "mcp_surface_strategy",
       "path_validity",

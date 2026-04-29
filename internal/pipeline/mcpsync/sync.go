@@ -12,6 +12,7 @@ import (
 
 	"github.com/mvanhorn/cli-printing-press/v2/internal/generator"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/graphql"
+	"github.com/mvanhorn/cli-printing-press/v2/internal/mcpoverrides"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/openapi"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
@@ -33,6 +34,12 @@ var endpointAnnotationLine = regexp.MustCompile(`(?m)^\s*Annotations: map\[strin
 type Result struct {
 	Changed bool
 	Detail  string
+	// UnmatchedOverrideKeys lists keys from mcp-descriptions.json that
+	// did not correspond to any endpoint in the spec — typos, stale
+	// keys after a rename, or overrides for endpoints removed from the
+	// spec. The library returns these so the CLI layer can surface them;
+	// Sync itself does not print, keeping output formatting at the edge.
+	UnmatchedOverrideKeys []string
 }
 
 type Options struct {
@@ -86,11 +93,26 @@ func Sync(cliDir string, opts Options) (Result, error) {
 			parsed.DisplayName = existing
 		}
 	}
+	// Apply hand-authored MCP description overrides before generating
+	// any surface that consumes endpoint.Description. Both the manifest
+	// writer and the mcp_tools.go template read from this parsed spec,
+	// so a single in-place patch flows through to both. The override
+	// file is the sanctioned path for replacing thin spec-derived
+	// descriptions; direct edits to internal/mcp/tools.go and
+	// tools-manifest.json are wiped on regen because both files carry
+	// the generator's DO-NOT-EDIT header.
+	overrides, err := mcpoverrides.Load(cliDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("loading mcp description overrides: %w", err)
+	}
+	unmatched := overrides.Apply(parsed)
 	modulePath, err := readModulePath(cliDir)
 	if err != nil {
 		return Result{}, err
 	}
 	features := loadNovelFeatures(cliDir)
+	// Migration-only steps run when the surface is on the legacy
+	// template. Already-migrated CLIs skip these.
 	if !alreadyMigrated {
 		if err := ensureRootCmdExport(cliDir); err != nil {
 			return Result{}, err
@@ -109,12 +131,15 @@ func Sync(cliDir string, opts Options) (Result, error) {
 		if err := removeStaleMCPHandlersFile(cliDir, opts.Force); err != nil {
 			return Result{}, err
 		}
-		gen := generator.New(parsed, cliDir)
-		gen.NovelFeatures = features
-		gen.ModulePath = modulePath
-		if err := gen.GenerateMCPSurface(); err != nil {
-			return Result{}, fmt.Errorf("rendering MCP surface: %w", err)
-		}
+	}
+	// Surface regen runs every sync — overrides applied above must reach
+	// tools.go, and WriteToolsManifest below rewrites the manifest
+	// unconditionally, so keeping tools.go in lockstep avoids drift.
+	gen := generator.New(parsed, cliDir)
+	gen.NovelFeatures = features
+	gen.ModulePath = modulePath
+	if err := gen.GenerateMCPSurface(); err != nil {
+		return Result{}, fmt.Errorf("rendering MCP surface: %w", err)
 	}
 	if err := pipeline.WriteToolsManifest(cliDir, parsed); err != nil {
 		return Result{}, fmt.Errorf("regenerating tools-manifest.json: %w", err)
@@ -137,10 +162,11 @@ func Sync(cliDir string, opts Options) (Result, error) {
 	if err := pipeline.WriteMCPBManifest(cliDir); err != nil {
 		return Result{}, fmt.Errorf("regenerating manifest.json: %w", err)
 	}
+	detail := "migrated MCP surface to runtime Cobra-tree mirror"
 	if alreadyMigrated {
-		return Result{Changed: true, Detail: "refreshed manifest.json + tools-manifest.json from current spec/.printing-press.json"}, nil
+		detail = "refreshed MCP surface, manifest.json, and tools-manifest.json from current spec / .printing-press.json / mcp-descriptions.json"
 	}
-	return Result{Changed: true, Detail: "migrated MCP surface to runtime Cobra-tree mirror"}, nil
+	return Result{Changed: true, Detail: detail, UnmatchedOverrideKeys: unmatched}, nil
 }
 
 func loadArchivedSpec(cliDir string) (*spec.APISpec, error) {

@@ -154,17 +154,13 @@ func EnvVarPlaceholder(envVar string) string {
 }
 
 // OneLine normalizes generated descriptions for compact template and manifest
-// output.
+// output, then truncates anything longer than 120 chars. Use for callers that
+// need a compact single-line form (param descriptions in `--help`, terminal
+// summaries). For MCP tool descriptions where richer content is intentional —
+// including hand-authored mcp-descriptions.json overrides — use OneLineNormalize
+// instead, which does the same normalization without the length cap.
 func OneLine(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", " ")
-	s = strings.ReplaceAll(s, `"`, `'`)
-	s = strings.ReplaceAll(s, "\\", "")
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
-	s = strings.TrimSpace(s)
+	s = OneLineNormalize(s)
 	if len(s) > 120 {
 		cut := s[:117]
 		if idx := strings.LastIndex(cut, " "); idx > 60 {
@@ -174,6 +170,22 @@ func OneLine(s string) string {
 		}
 	}
 	return s
+}
+
+// OneLineNormalize collapses whitespace, newlines, and quotes into a
+// single-line safe form without imposing a length cap. Use for content
+// that's already curated for length (MCP tool descriptions, agent-authored
+// overrides) where truncating would defeat the purpose.
+func OneLineNormalize(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, `"`, `'`)
+	s = strings.ReplaceAll(s, "\\", "")
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return strings.TrimSpace(s)
 }
 
 // MCPDescription builds an MCP tool description with optional minority-side
@@ -200,7 +212,11 @@ func MCPDescription(desc string, noAuth bool, authType string, publicCount, tota
 		}
 	}
 
-	return OneLine(desc)
+	// MCP descriptions intentionally allow rich content (1-3 sentences naming
+	// action, params, return shape, when to prefer). Length is curated by the
+	// agent or by the spec; we do single-line normalization but not the
+	// 120-char cap that OneLine imposes for compact display.
+	return OneLineNormalize(desc)
 }
 
 func DogfoodBinary(name string) string {

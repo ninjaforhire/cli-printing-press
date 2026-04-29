@@ -90,6 +90,7 @@ func newScorecardCmd() *cobra.Command {
 			fmt.Printf("  README         %d/10\n", s.README)
 			fmt.Printf("  Doctor         %d/10\n", s.Doctor)
 			fmt.Printf("  Agent Native   %d/10\n", s.AgentNative)
+			fmt.Printf("  MCP Desc Quality %s\n", renderScore("mcp_description_quality", s.MCPDescriptionQuality, 10))
 			fmt.Printf("  Local Cache    %d/10\n", s.LocalCache)
 			fmt.Printf("  Breadth        %d/10\n", s.Breadth)
 			fmt.Printf("  Vision         %d/10\n", s.Vision)

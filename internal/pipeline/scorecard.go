@@ -43,25 +43,26 @@ type Scorecard struct {
 
 // SteinerScore breaks down the Steinberger bar into 11 dimensions, each 0-10.
 type SteinerScore struct {
-	OutputModes        int `json:"output_modes"`             // 0-10
-	Auth               int `json:"auth"`                     // 0-10
-	ErrorHandling      int `json:"error_handling"`           // 0-10
-	TerminalUX         int `json:"terminal_ux"`              // 0-10
-	README             int `json:"readme"`                   // 0-10
-	Doctor             int `json:"doctor"`                   // 0-10
-	AgentNative        int `json:"agent_native"`             // 0-10
-	MCPQuality         int `json:"mcp_quality"`              // 0-10
-	MCPTokenEff        int `json:"mcp_token_efficiency"`     // 0-10; unscored when no MCP surface
-	MCPRemoteTransport int `json:"mcp_remote_transport"`     // 0-10; unscored when no MCP surface. Rewards remote-capable servers per Anthropic's 2026-04 MCP guidance.
-	MCPToolDesign      int `json:"mcp_tool_design"`          // 0-10; unscored when no MCP surface or endpoint count below toolDesignMinEndpoints. Rewards intent-grouped tools vs. endpoint mirrors.
-	MCPSurfaceStrategy int `json:"mcp_surface_strategy"`     // 0-10; unscored unless the endpoint surface exceeds surfaceStrategyLargeThreshold or code-orchestration is explicitly used. Penalizes endpoint-mirror at scale.
-	LocalCache         int `json:"local_cache"`              // 0-10
-	CacheFreshness     int `json:"cache_freshness"`          // 0-10; unscored when the CLI has no local store
-	Breadth            int `json:"breadth"`                  // 0-10: how many commands (penalizes empty CLIs)
-	Vision             int `json:"vision"`                   // 0-10
-	Workflows          int `json:"workflows"`                // 0-10
-	Insight            int `json:"insight"`                  // 0-10
-	AgentWorkflow      int `json:"agent_workflow_readiness"` // 0-10: HeyGen-derived - async jobs, profiles, deliver, feedback
+	OutputModes           int `json:"output_modes"`             // 0-10
+	Auth                  int `json:"auth"`                     // 0-10
+	ErrorHandling         int `json:"error_handling"`           // 0-10
+	TerminalUX            int `json:"terminal_ux"`              // 0-10
+	README                int `json:"readme"`                   // 0-10
+	Doctor                int `json:"doctor"`                   // 0-10
+	AgentNative           int `json:"agent_native"`             // 0-10
+	MCPQuality            int `json:"mcp_quality"`              // 0-10
+	MCPDescriptionQuality int `json:"mcp_description_quality"`  // 0-10; unscored when no tools-manifest.json. Penalizes thin per-tool descriptions (the same threshold as `printing-press tools-audit` thin-mcp-description).
+	MCPTokenEff           int `json:"mcp_token_efficiency"`     // 0-10; unscored when no MCP surface
+	MCPRemoteTransport    int `json:"mcp_remote_transport"`     // 0-10; unscored when no MCP surface. Rewards remote-capable servers per Anthropic's 2026-04 MCP guidance.
+	MCPToolDesign         int `json:"mcp_tool_design"`          // 0-10; unscored when no MCP surface or endpoint count below toolDesignMinEndpoints. Rewards intent-grouped tools vs. endpoint mirrors.
+	MCPSurfaceStrategy    int `json:"mcp_surface_strategy"`     // 0-10; unscored unless the endpoint surface exceeds surfaceStrategyLargeThreshold or code-orchestration is explicitly used. Penalizes endpoint-mirror at scale.
+	LocalCache            int `json:"local_cache"`              // 0-10
+	CacheFreshness        int `json:"cache_freshness"`          // 0-10; unscored when the CLI has no local store
+	Breadth               int `json:"breadth"`                  // 0-10: how many commands (penalizes empty CLIs)
+	Vision                int `json:"vision"`                   // 0-10
+	Workflows             int `json:"workflows"`                // 0-10
+	Insight               int `json:"insight"`                  // 0-10
+	AgentWorkflow         int `json:"agent_workflow_readiness"` // 0-10: HeyGen-derived - async jobs, profiles, deliver, feedback
 	// Tier 2: Domain Correctness (semantic checks)
 	PathValidity          int    `json:"path_validity"`           // 0-10
 	AuthProtocol          int    `json:"auth_protocol"`           // 0-10
@@ -118,6 +119,8 @@ func scoreInfrastructureDimensions(sc *Scorecard, outputDir string) {
 	sc.Steinberger.Doctor = scoreDoctor(outputDir)
 	sc.Steinberger.AgentNative = scoreAgentNative(outputDir)
 	sc.Steinberger.MCPQuality = scoreMCPQuality(outputDir)
+	mcpDescScore, mcpDescScored := scoreMCPDescriptionQuality(outputDir)
+	recordOptionalScore(sc, &sc.Steinberger.MCPDescriptionQuality, "mcp_description_quality", mcpDescScore, mcpDescScored)
 	mcpTokenScore, mcpTokenScored := scoreMCPTokenEfficiency(outputDir)
 	recordOptionalScore(sc, &sc.Steinberger.MCPTokenEff, "mcp_token_efficiency", mcpTokenScore, mcpTokenScored)
 	remoteScore, remoteScored := scoreMCPRemoteTransport(outputDir)
@@ -673,6 +676,71 @@ func scoreMCPQuality(dir string) int {
 	return score
 }
 
+// MCPDescMinLen and MCPDescMinWords are the agent-grade-description
+// thresholds used by both `printing-press tools-audit` and the
+// scorecard's mcp_description_quality dimension. Defined here so a
+// single edit keeps both surfaces in lockstep — internal/cli imports
+// these for its thin-mcp-description check.
+const (
+	MCPDescMinLen   = 60
+	MCPDescMinWords = 8
+)
+
+// IsThinMCPDescription reports whether a description trips the
+// agent-grade floor: empty or both shorter than MCPDescMinLen AND
+// fewer words than MCPDescMinWords. Shared between the audit (cli
+// package) and the scorer so both apply identical semantics.
+func IsThinMCPDescription(desc string) bool {
+	d := strings.TrimSpace(desc)
+	if d == "" {
+		return true
+	}
+	return len(d) < MCPDescMinLen && len(strings.Fields(d)) < MCPDescMinWords
+}
+
+// scoreMCPDescriptionQuality measures how many of a CLI's typed MCP
+// tools carry agent-grade descriptions vs. terse spec-derived
+// summaries. Reads tools-manifest.json (the source of truth for typed
+// endpoint tools' descriptions at runtime) and counts entries whose
+// description trips IsThinMCPDescription — the same predicate
+// `printing-press tools-audit` uses for thin-mcp-description findings.
+//
+// Unscored when no manifest exists (legacy CLIs predating the
+// manifest schema) or when the manifest has no tools.
+//
+// Score curve favors low thin-percentage steeply; the goal is to
+// reward CLIs that have done the work to provide rich descriptions
+// rather than to give partial credit to ones that haven't. CLIs whose
+// descriptions are 50%+ thin score 0 — there's no signal to credit
+// when most of the surface is unusable to an agent.
+func scoreMCPDescriptionQuality(dir string) (score int, scored bool) {
+	m, err := ReadToolsManifest(dir)
+	if err != nil || len(m.Tools) == 0 {
+		return 0, false
+	}
+	thin := 0
+	for _, t := range m.Tools {
+		if IsThinMCPDescription(t.Description) {
+			thin++
+		}
+	}
+	pct := float64(thin) / float64(len(m.Tools))
+	switch {
+	case pct == 0:
+		return 10, true
+	case pct < 0.05:
+		return 9, true
+	case pct < 0.15:
+		return 7, true
+	case pct < 0.30:
+		return 5, true
+	case pct < 0.50:
+		return 3, true
+	default:
+		return 0, true
+	}
+}
+
 func scoreLocalCache(dir string) int {
 	clientContent := readFileContent(filepath.Join(dir, "internal", "client", "client.go"))
 	score := 0
@@ -860,6 +928,7 @@ func recomputeScorecardTotals(sc *Scorecard) {
 		sc.Steinberger.Doctor,
 		sc.Steinberger.AgentNative,
 		sc.Steinberger.MCPQuality,
+		sc.Steinberger.MCPDescriptionQuality,
 		sc.Steinberger.MCPTokenEff,
 		sc.Steinberger.MCPRemoteTransport,
 		sc.Steinberger.MCPToolDesign,
@@ -873,7 +942,7 @@ func recomputeScorecardTotals(sc *Scorecard) {
 		sc.Steinberger.AgentWorkflow,
 	)
 
-	tier1Max := scorecardTierMax(sc, 190, "mcp_token_efficiency", "cache_freshness", "mcp_remote_transport", "mcp_tool_design", "mcp_surface_strategy")
+	tier1Max := scorecardTierMax(sc, 200, "mcp_description_quality", "mcp_token_efficiency", "cache_freshness", "mcp_remote_transport", "mcp_tool_design", "mcp_surface_strategy")
 	tier1Normalized := 0
 	if tier1Max > 0 {
 		tier1Normalized = (tier1Raw * 50) / tier1Max
@@ -2305,6 +2374,7 @@ func buildGapReport(s SteinerScore, unscored []string) []string {
 		{"doctor", s.Doctor},
 		{"agent_native", s.AgentNative},
 		{"mcp_quality", s.MCPQuality},
+		{"mcp_description_quality", s.MCPDescriptionQuality},
 		{"mcp_token_efficiency", s.MCPTokenEff},
 		{"local_cache", s.LocalCache},
 		{"breadth", s.Breadth},
@@ -2435,6 +2505,7 @@ func writeScorecardMD(sc *Scorecard, pipelineDir string) error {
 		{"Doctor", "doctor", s.Doctor},
 		{"Agent Native", "agent_native", s.AgentNative},
 		{"MCP Quality", "mcp_quality", s.MCPQuality},
+		{"MCP Description Quality", "mcp_description_quality", s.MCPDescriptionQuality},
 		{"MCP Token Efficiency", "mcp_token_efficiency", s.MCPTokenEff},
 		{"Local Cache", "local_cache", s.LocalCache},
 		{"Breadth", "breadth", s.Breadth},

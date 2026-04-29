@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mvanhorn/cli-printing-press/v2/internal/mcpoverrides"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
 )
@@ -76,6 +77,24 @@ type ManifestHeader struct {
 	Value string `json:"value"`
 }
 
+// ReadToolsManifest decodes <dir>/tools-manifest.json into a
+// ToolsManifest. Returns the wrapped error from os.ReadFile when the
+// file is missing — callers that treat absence as "no manifest"
+// should check errors.Is(err, fs.ErrNotExist) at the call site.
+// Shared between WriteToolsManifest's downstream consumers (audit,
+// scorer) so the on-disk schema has a single decode site.
+func ReadToolsManifest(dir string) (*ToolsManifest, error) {
+	data, err := os.ReadFile(filepath.Join(dir, ToolsManifestFilename))
+	if err != nil {
+		return nil, err
+	}
+	var m ToolsManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", ToolsManifestFilename, err)
+	}
+	return &m, nil
+}
+
 // WriteToolsManifest generates a tools-manifest.json from a parsed API spec.
 // It iterates Resources/SubResources/Endpoints in sorted key order (matching
 // the MCP template's RegisterTools pattern) and writes deterministic JSON.
@@ -131,7 +150,7 @@ func WriteToolsManifest(dir string, parsed *spec.APISpec) error {
 			if cookieOrComposed && !endpoint.NoAuth {
 				continue
 			}
-			toolName := naming.Snake(rName) + "_" + naming.Snake(eName)
+			toolName := mcpoverrides.ToolName(rName, "", eName)
 			desc := naming.MCPDescription(endpoint.Description, endpoint.NoAuth, parsed.Auth.Type, public, total)
 			tool := buildManifestTool(toolName, desc, endpoint)
 			manifest.Tools = append(manifest.Tools, tool)
@@ -147,7 +166,7 @@ func WriteToolsManifest(dir string, parsed *spec.APISpec) error {
 				if cookieOrComposed && !endpoint.NoAuth {
 					continue
 				}
-				toolName := naming.Snake(rName) + "_" + naming.Snake(subName) + "_" + naming.Snake(eName)
+				toolName := mcpoverrides.ToolName(rName, subName, eName)
 				desc := naming.MCPDescription(endpoint.Description, endpoint.NoAuth, parsed.Auth.Type, public, total)
 				tool := buildManifestTool(toolName, desc, endpoint)
 				manifest.Tools = append(manifest.Tools, tool)
