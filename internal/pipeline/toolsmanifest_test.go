@@ -234,6 +234,58 @@ func TestWriteToolsManifest_ParamLocationClassification(t *testing.T) {
 	assert.False(t, tool.Params[3].Required)
 }
 
+// TestWriteToolsManifest_ReclassifiedPathParamKeepsPathLocation pins
+// the path location for path params that reclassifyPathParamModifiers
+// converted from positional args to flags (e.g., enum-typed path
+// params like /v2/calendars/{calendar} where calendar has
+// enum: [apple, google, office365]). Without checking PathParam
+// alongside Positional, these end up location: "query" and the
+// description-override agent can't tell they're URL-substituted.
+func TestWriteToolsManifest_ReclassifiedPathParamKeepsPathLocation(t *testing.T) {
+	dir := t.TempDir()
+	parsed := &spec.APISpec{
+		Name:    "test-api",
+		BaseURL: "https://api.test.com",
+		Auth:    spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{
+			"Calendars": {
+				Endpoints: map[string]spec.Endpoint{
+					"Disconnect": {
+						Method: "POST",
+						Path:   "/calendars/{calendar}/disconnect",
+						Params: []spec.Param{
+							{
+								Name:        "calendar",
+								Type:        "string",
+								Description: "Calendar provider",
+								Enum:        []string{"apple", "google", "office365"},
+								Default:     "apple",
+								Positional:  false, // reclassified: enum + default → flag
+								PathParam:   true,  // ...but still substituted into URL
+								Required:    false, // CLI default fills in if omitted
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, WriteToolsManifest(dir, parsed))
+
+	data, err := os.ReadFile(filepath.Join(dir, ToolsManifestFilename))
+	require.NoError(t, err)
+	var got ToolsManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	require.Len(t, got.Tools, 1)
+	require.Len(t, got.Tools[0].Params, 1)
+	calendar := got.Tools[0].Params[0]
+	assert.Equal(t, "calendar", calendar.Name)
+	assert.Equal(t, "path", calendar.Location, "reclassified path param must still be location: path")
+	assert.False(t, calendar.Required, "default fills in if omitted; agent may skip the param")
+}
+
 func TestWriteToolsManifest_AuthConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	parsed := &spec.APISpec{

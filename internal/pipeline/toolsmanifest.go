@@ -198,10 +198,18 @@ func buildManifestTool(name, description string, ep spec.Endpoint) ManifestTool 
 		Params:      make([]ManifestParam, 0, len(ep.Params)+len(ep.Body)),
 	}
 
-	// Regular params: positional → path, others → query.
+	// Regular params. A param ends up at "path" when the runtime
+	// substitutes it into the URL — that's true for both positional
+	// path args (Positional=true) AND path params reclassified into
+	// CLI flags by reclassifyPathParamModifiers (PathParam=true, e.g.,
+	// enum-typed path params like /v2/calendars/{calendar} that the CLI
+	// renders as --calendar). Without this OR, reclassified path params
+	// land in the manifest as location: "query", which misleads
+	// description-override agents reading the manifest to understand
+	// the API contract.
 	for _, p := range ep.Params {
 		loc := "query"
-		if p.Positional {
+		if p.Positional || p.PathParam {
 			loc = "path"
 		}
 		tool.Params = append(tool.Params, ManifestParam{
