@@ -16,6 +16,7 @@ import (
 	"github.com/mvanhorn/cli-printing-press/v2/internal/openapi"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 	"github.com/mvanhorn/cli-printing-press/v2/internal/spec"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -133,6 +134,18 @@ func Sync(cliDir string, opts Options) (Result, error) {
 		}
 		if err := ensureEndpointAnnotations(cliDir, parsed, features); err != nil {
 			return Result{}, err
+		}
+		// Cobratree templates (mcp_tools.go.tmpl, main_mcp.go.tmpl, etc.)
+		// use APIs added in mcp-go v0.47.0 (WithReadOnlyHintAnnotation,
+		// req.GetArguments). Older generated CLIs pin a lower version
+		// and won't compile after the surface regen below. Bump the
+		// pin in go.mod before generation so the resulting CLI builds.
+		bumpedFrom, err := ensureMCPGoMinVersion(cliDir)
+		if err != nil {
+			return Result{}, err
+		}
+		if bumpedFrom != "" {
+			fmt.Fprintf(os.Stderr, "mcp-sync: bumped mark3labs/mcp-go in go.mod from %s to %s for cobratree compatibility\n", bumpedFrom, minMCPGoVersionForCobratree)
 		}
 		// Older generator templates split MCP handlers into a separate
 		// internal/mcp/handlers.go file. The current template emits all
@@ -658,4 +671,50 @@ func writeFileAtomic(path string, data []byte) error {
 		return fmt.Errorf("replacing %s: %w", path, err)
 	}
 	return nil
+}
+
+// minMCPGoVersionForCobratree is the floor mark3labs/mcp-go version
+// the cobratree-era templates compile against. Pinned to whatever the
+// generator's go.mod template currently emits — bump both together.
+const minMCPGoVersionForCobratree = "v0.47.0"
+
+// mcpGoRequireLine matches a `github.com/mark3labs/mcp-go vX.Y.Z`
+// require directive. The version capture allows pre-release and
+// build-metadata suffixes (v0.47.0-rc1, v0.47.0+meta) — Go's semver
+// package treats them correctly.
+var mcpGoRequireLine = regexp.MustCompile(`github\.com/mark3labs/mcp-go\s+(v[0-9][^\s]*)`)
+
+// ensureMCPGoMinVersion bumps the mark3labs/mcp-go pin in go.mod to
+// minMCPGoVersionForCobratree when the existing pin is older. Returns
+// the prior version when a bump happened, the empty string when no
+// change was needed (already current, or dep absent from go.mod).
+//
+// Older library CLIs predating cobratree pin v0.26.0 or similar; the
+// migration block below regenerates MCP source against the cobratree
+// templates which call APIs (WithReadOnlyHintAnnotation, GetArguments)
+// added in v0.47.0. Without the bump the regenerated CLI fails to
+// compile and the sync silently leaves a broken state.
+func ensureMCPGoMinVersion(cliDir string) (priorVersion string, err error) {
+	gomodPath := filepath.Join(cliDir, "go.mod")
+	data, err := os.ReadFile(gomodPath)
+	if err != nil {
+		return "", fmt.Errorf("reading go.mod: %w", err)
+	}
+	matches := mcpGoRequireLine.FindSubmatch(data)
+	if matches == nil {
+		return "", nil
+	}
+	current := string(matches[1])
+	if !semver.IsValid(current) {
+		return "", nil
+	}
+	if semver.Compare(current, minMCPGoVersionForCobratree) >= 0 {
+		return "", nil
+	}
+	rewritten := mcpGoRequireLine.ReplaceAll(data,
+		[]byte("github.com/mark3labs/mcp-go "+minMCPGoVersionForCobratree))
+	if err := writeFileAtomic(gomodPath, rewritten); err != nil {
+		return "", fmt.Errorf("rewriting go.mod: %w", err)
+	}
+	return current, nil
 }

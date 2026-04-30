@@ -405,6 +405,76 @@ func TestReconcileSpecNameWithDirNoYAMLFallsThroughToValidator(t *testing.T) {
 	assert.Contains(t, err.Error(), "--force")
 }
 
+// TestEnsureMCPGoMinVersionBumpsOldPin — older library CLIs predating
+// the cobratree templates pin a v0.x version that lacks
+// WithReadOnlyHintAnnotation/GetArguments. mcp-sync bumps to the floor
+// before regenerating MCP source so the generated CLI compiles.
+func TestEnsureMCPGoMinVersionBumpsOldPin(t *testing.T) {
+	t.Parallel()
+	cliDir := t.TempDir()
+	gomod := `module example.com/foo
+
+go 1.23.0
+
+require github.com/mark3labs/mcp-go v0.26.0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "go.mod"), []byte(gomod), 0o644))
+
+	prior, err := ensureMCPGoMinVersion(cliDir)
+	require.NoError(t, err)
+	assert.Equal(t, "v0.26.0", prior, "must report the prior pin so callers can log it")
+
+	updated, err := os.ReadFile(filepath.Join(cliDir, "go.mod"))
+	require.NoError(t, err)
+	assert.Contains(t, string(updated), "github.com/mark3labs/mcp-go v0.47.0")
+	assert.NotContains(t, string(updated), "github.com/mark3labs/mcp-go v0.26.0")
+	// Surrounding directives must be preserved.
+	assert.Contains(t, string(updated), "module example.com/foo")
+	assert.Contains(t, string(updated), "go 1.23.0")
+}
+
+// TestEnsureMCPGoMinVersionNoOpAtOrAboveFloor — at or above the floor,
+// no-op even if exactly equal. Avoids spurious go.mod rewrites on
+// already-current CLIs.
+func TestEnsureMCPGoMinVersionNoOpAtOrAboveFloor(t *testing.T) {
+	t.Parallel()
+	for _, version := range []string{"v0.47.0", "v0.48.0", "v1.0.0"} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			cliDir := t.TempDir()
+			gomod := "module example.com/foo\nrequire github.com/mark3labs/mcp-go " + version + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(cliDir, "go.mod"), []byte(gomod), 0o644))
+
+			prior, err := ensureMCPGoMinVersion(cliDir)
+			require.NoError(t, err)
+			assert.Equal(t, "", prior, "must report no-rename when already at or above floor")
+
+			after, err := os.ReadFile(filepath.Join(cliDir, "go.mod"))
+			require.NoError(t, err)
+			assert.Equal(t, gomod, string(after), "go.mod must be byte-identical when no bump needed")
+		})
+	}
+}
+
+// TestEnsureMCPGoMinVersionNoOpWhenDepAbsent — a CLI without mcp-go
+// in go.mod (e.g., a CLI generated before MCP support was added)
+// must not have the dep injected. Other migration steps (or a future
+// `go mod tidy`) handle that.
+func TestEnsureMCPGoMinVersionNoOpWhenDepAbsent(t *testing.T) {
+	t.Parallel()
+	cliDir := t.TempDir()
+	gomod := "module example.com/foo\n\ngo 1.23.0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "go.mod"), []byte(gomod), 0o644))
+
+	prior, err := ensureMCPGoMinVersion(cliDir)
+	require.NoError(t, err)
+	assert.Equal(t, "", prior)
+
+	after, err := os.ReadFile(filepath.Join(cliDir, "go.mod"))
+	require.NoError(t, err)
+	assert.Equal(t, gomod, string(after))
+}
+
 // TestRemoveStaleMCPHandlersFile locks behavior for the food52 case:
 // older generator templates emitted MCP handlers in a separate
 // internal/mcp/handlers.go; the current template emits everything in
