@@ -61,9 +61,45 @@ jobs:
           version: v2.11.4
           verify: false
 
+  test-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_tests: ${{ steps.changes.outputs.needs_tests }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check whether Go tests are needed
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags --prune origin "${{ github.base_ref }}"
+          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD")
+
+          echo "Changed files:"
+          printf '  %s\n' "${changed[@]}"
+
+          needs_tests=false
+          for file in "${changed[@]}"; do
+            case "$file" in
+              .github/workflows/lint.yml|go.mod|go.sum|cmd/*|catalog/*|internal/*|scripts/*|testdata/*)
+                needs_tests=true
+                break
+                ;;
+            esac
+          done
+
+          echo "needs_tests=$needs_tests" >> "$GITHUB_OUTPUT"
+
   test-shard:
     name: test (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    needs: test-changes
+    if: needs.test-changes.outputs.needs_tests == 'true'
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -135,11 +171,19 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    needs: test-shard
+    needs:
+      - test-changes
+      - test-shard
     if: ${{ always() }}
     timeout-minutes: 5
     steps:
+      - name: Skip Go tests
+        if: needs.test-changes.outputs.needs_tests != 'true'
+        run: |
+          echo "Skipping Go tests: no Go, module, CI workflow, catalog, script, or testdata changes."
+
       - name: Check test shards
+        if: needs.test-changes.outputs.needs_tests == 'true'
         shell: bash
         run: |
           if [[ "${{ needs.test-shard.result }}" != "success" ]]; then
