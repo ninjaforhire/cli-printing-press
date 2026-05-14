@@ -199,7 +199,7 @@ func Load(configPath string) (*Config, error) {
 	}
 	verifyMode := os.Getenv("PRINTING_PRESS_VERIFY") == "1"
 {{- range .EndpointTemplateVars}}
-	if v := os.Getenv("{{envName $.Name}}_{{upper .}}"); v != "" {
+	if v := strings.TrimSpace(os.Getenv("{{endpointTemplateEnvName .}}")); v != "" {
 		cfg.TemplateVars["{{.}}"] = v
 	} else if verifyMode {
 		cfg.TemplateVars["{{.}}"] = "{{.}}_placeholder"
