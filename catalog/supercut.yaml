@@ -14,7 +14,7 @@ homepage: https://supercut.ai
 auth_key_url: https://supercut.ai/settings/api-tokens
 auth_instructions: "Open Settings -> API tokens and choose a token type. Workspace API tokens are available on all plans and unlock the item-scoped read endpoints (transcript, frame, reactions, comments). Personal API tokens require a paid workspace plan and additionally unlock the listing endpoints (/recordings/, /stacks/, /stacks/{id})."
 auth_env_vars:
-  - SUPERCUT_PLATFORM_BEARER_AUTH  # canonical: matches the securitySchemes key emitted by the vendor OpenAPI
+  - SUPERCUT_PLATFORM_BEARER_AUTH  # canonical: explicit Supercut platform bearer token
   - SUPERCUT_API_KEY               # common alias
 notes: >
   Each endpoint description in the vendor OpenAPI carries an inline HTML
