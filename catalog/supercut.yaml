@@ -6,25 +6,22 @@ spec_url: https://api.supercut.ai/api/platform/v1/openapi.json
 spec_format: json
 openapi_version: "3.0"
 tier: official
-spec_source: official
 auth_required: true
 client_pattern: rest
 http_transport: standard
 verified_date: "2026-05-21"
-homepage: https://api.supercut.ai/api/platform/v1/docs/
-auth_key_url: https://supercut.ai/settings/clips/personal-api-tokens
-auth_instructions: "Supercut issues two token types: personal API tokens (user-scoped, list and detail endpoints) and workspace API tokens (item-scoped read endpoints — transcript, frame, reactions, comments). Personal tokens require a paid workspace plan; workspace tokens are available on all plans."
+homepage: https://supercut.ai
+auth_key_url: https://supercut.ai/settings/api-tokens
+auth_instructions: "Open Settings -> API tokens and choose a token type. Workspace API tokens are available on all plans and unlock the item-scoped read endpoints (transcript, frame, reactions, comments). Personal API tokens require a paid workspace plan and additionally unlock the listing endpoints (/recordings/, /stacks/, /stacks/{id})."
 auth_env_vars:
   - SUPERCUT_PLATFORM_BEARER_AUTH  # canonical: matches the securitySchemes key emitted by the vendor OpenAPI
   - SUPERCUT_API_KEY               # common alias
 notes: >
-  Supercut Platform API (api.supercut.ai/v1). Bearer auth via Authorization header.
-  Vendor publishes a versioned OpenAPI 3.0.2 document at /api/platform/v1/openapi.json.
-  9 paths across 2 resource groups: recordings and stacks. Each endpoint description
-  includes an HTML access-pill marking which token type it accepts (personal,
-  workspace, or both). Listing endpoints (/recordings/, /stacks/, /stacks/{id})
-  are personal-token only; item read endpoints (transcript, frame, reactions,
-  comments) accept both. All endpoints are read-only GETs in this version.
+  Each endpoint description in the vendor OpenAPI carries an inline HTML
+  access-pill marking which token type(s) it accepts (personal, workspace,
+  or both). Generated CLI help text surfaces these pills verbatim, so the
+  personal-vs-workspace gate is visible at the command level. All endpoints
+  in this version are read-only GETs.
 known_alternatives:
   - name: supercut-mcp
     url: https://mcp.supercut.ai/mcp
