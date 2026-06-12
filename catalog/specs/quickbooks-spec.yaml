@@ -1,0 +1,382 @@
+openapi: "3.0.3"
+info:
+  title: QuickBooks API
+  description: |
+    QuickBooks Online (Intuit) Accounting REST API — READ-ONLY surface.
+    Exposes the raw SQL query passthrough plus entity reads (customer,
+    invoice, payment), company info, and the core financial reports
+    (Profit & Loss, Balance Sheet, AR Aging). Auth is OAuth2
+    authorization-code (3-legged) against the production Intuit company;
+    the per-company realmId resolves the implicit `{tenant}` path segment.
+  version: "1.0.0"
+  contact:
+    name: Intuit Developer
+    url: https://developer.intuit.com
+  x-display-name: QuickBooks
+  x-website: https://quickbooks.intuit.com
+  # realmId is per-company, supplied out-of-band (not via OAuth). Every QBO
+  # path is /v3/company/{tenant}/... — the generator substitutes {tenant}
+  # from QUICKBOOKS_REALM_ID at request time. See docs/SPEC-EXTENSIONS.md.
+  x-tenant-env-var: QUICKBOOKS_REALM_ID
+  x-spec-provenance:
+    source: official-docs
+    docs_url: https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/account
+    notes: >
+      Paths and operations are derived from the official Intuit QuickBooks
+      Online Accounting API reference. This is a hand-authored, read-only
+      subset sized to MIGHTY's actual consumers (payment checks, revenue
+      reporting). Intuit does not publish a single vendor OpenAPI document
+      covering this surface; the spec is community-curated from their public
+      docs. No endpoint relies on MCP tool schemas or undocumented probing.
+    confirmed_quirks:
+      - "Every path is prefixed /v3/company/{realmId}/... — realmId is the per-company tenant id, NOT part of the OAuth flow. Written here as the {tenant} placeholder resolved from QUICKBOOKS_REALM_ID."
+      - "The /query endpoint takes a QBO-SQL string in the `query` param (e.g. SELECT * FROM Customer MAXRESULTS 3). It is the only way to list/filter Invoice/Payment/Customer by field; there is no GET ?customer= filter."
+      - "minorversion query param is intentionally omitted; QBO applies its baseline version. The read fields consumed (Balance, TotalAmt, CustomerRef, DocNumber, DisplayName) and report top-level shapes are stable across minor versions, so no pin is needed for this read surface."
+      - "companyinfo path repeats the realmId: /v3/company/{realmId}/companyinfo/{realmId}. Both segments resolve from QUICKBOOKS_REALM_ID."
+
+servers:
+  - url: https://quickbooks.api.intuit.com
+    description: QuickBooks Online production API
+
+tags:
+  - name: query
+    description: Raw QBO-SQL query passthrough (Customer, Invoice, Payment, Item)
+  - name: customers
+    description: Customer entity reads
+  - name: invoices
+    description: Invoice entity reads
+  - name: payments
+    description: Payment entity reads
+  - name: company
+    description: Company information
+  - name: reports
+    description: Financial reports (P&L, Balance Sheet, AR Aging)
+
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      x-auth-env-vars:
+        - QUICKBOOKS_CLIENT_ID
+        - QUICKBOOKS_CLIENT_SECRET
+      x-auth-key-url: https://developer.intuit.com/app/developer/dashboard
+      x-auth-title: QuickBooks OAuth2 App
+      x-auth-description: >
+        Production Intuit app Client ID + Secret from the developer dashboard.
+        Add redirect URI http://localhost:8085/callback, then run
+        `quickbooks-pp-cli auth setup --launch` and `auth login` to consent
+        against the production company. realmId is supplied via QUICKBOOKS_REALM_ID.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://appcenter.intuit.com/connect/oauth2
+          tokenUrl: https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer
+          scopes:
+            com.intuit.quickbooks.accounting: Read accounting data (customers, invoices, payments, reports)
+
+  schemas:
+    QueryResponse:
+      type: object
+      description: QBO query passthrough envelope. The QueryResponse object holds the matched rows under an entity-named array (Customer, Invoice, Payment, etc.).
+      properties:
+        QueryResponse:
+          type: object
+        time:
+          type: string
+          format: date-time
+
+    Customer:
+      type: object
+      properties:
+        Id:
+          type: string
+          description: Customer id
+        DisplayName:
+          type: string
+        CompanyName:
+          type: string
+        PrimaryEmailAddr:
+          type: object
+          properties:
+            Address:
+              type: string
+        Balance:
+          type: number
+        Active:
+          type: boolean
+
+    Invoice:
+      type: object
+      properties:
+        Id:
+          type: string
+          description: Invoice id
+        DocNumber:
+          type: string
+        TxnDate:
+          type: string
+          format: date
+        DueDate:
+          type: string
+          format: date
+        TotalAmt:
+          type: number
+        Balance:
+          type: number
+        CustomerRef:
+          type: object
+          properties:
+            value:
+              type: string
+            name:
+              type: string
+
+    Payment:
+      type: object
+      properties:
+        Id:
+          type: string
+          description: Payment id
+        TxnDate:
+          type: string
+          format: date
+        TotalAmt:
+          type: number
+        CustomerRef:
+          type: object
+          properties:
+            value:
+              type: string
+            name:
+              type: string
+
+    CompanyInfo:
+      type: object
+      properties:
+        CompanyName:
+          type: string
+        LegalName:
+          type: string
+        Country:
+          type: string
+
+    Report:
+      type: object
+      description: QBO report envelope (Header, Columns, Rows). Structure varies by report type.
+      properties:
+        Header:
+          type: object
+        Columns:
+          type: object
+        Rows:
+          type: object
+
+security:
+  - oauth2:
+      - com.intuit.quickbooks.accounting
+
+paths:
+  /v3/company/{tenant}/query:
+    get:
+      operationId: query
+      summary: Run a QBO-SQL query
+      description: >
+        Execute a QuickBooks SQL query against the production company. The
+        workhorse read endpoint — use it to list or filter Customer, Invoice,
+        Payment, and Item. Example: SELECT * FROM Invoice WHERE CustomerRef = '58'.
+      tags: [query]
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: QBO-SQL statement (e.g. SELECT * FROM Customer MAXRESULTS 3)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Query results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryResponse"
+
+  /v3/company/{tenant}/customer/{customerId}:
+    x-resource-id: Id
+    get:
+      operationId: getCustomer
+      summary: Get a customer
+      description: Retrieve a single customer by id.
+      tags: [customers]
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: Customer id
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Customer record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Customer:
+                    $ref: "#/components/schemas/Customer"
+
+  /v3/company/{tenant}/invoice/{invoiceId}:
+    x-resource-id: Id
+    get:
+      operationId: getInvoice
+      summary: Get an invoice
+      description: Retrieve a single invoice by id, including balance and customer ref.
+      tags: [invoices]
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          description: Invoice id
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Invoice record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Invoice:
+                    $ref: "#/components/schemas/Invoice"
+
+  /v3/company/{tenant}/payment/{paymentId}:
+    x-resource-id: Id
+    get:
+      operationId: getPayment
+      summary: Get a payment
+      description: Retrieve a single payment by id.
+      tags: [payments]
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment id
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Payment record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Payment:
+                    $ref: "#/components/schemas/Payment"
+
+  /v3/company/{tenant}/companyinfo/{tenant}:
+    get:
+      operationId: companyInfo
+      summary: Get company info
+      description: >
+        Retrieve the connected company's profile. Used by `doctor` and as a
+        realm/auth sanity check — the response must show the production company
+        name, not the sandbox.
+      tags: [company]
+      responses:
+        "200":
+          description: Company info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  CompanyInfo:
+                    $ref: "#/components/schemas/CompanyInfo"
+
+  /v3/company/{tenant}/reports/ProfitAndLoss:
+    get:
+      operationId: profitAndLoss
+      summary: Profit and Loss report
+      description: Profit & Loss report for a date range. Powers the QBO revenue line in revenue_snapshot.
+      tags: [reports]
+      parameters:
+        - name: start_date
+          in: query
+          description: Report start date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          description: Report end date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+        - name: accounting_method
+          in: query
+          description: Cash or Accrual
+          schema:
+            type: string
+            enum: [Cash, Accrual]
+      responses:
+        "200":
+          description: Profit and Loss report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  /v3/company/{tenant}/reports/BalanceSheet:
+    get:
+      operationId: balanceSheet
+      summary: Balance Sheet report
+      description: Balance Sheet report for a date range.
+      tags: [reports]
+      parameters:
+        - name: start_date
+          in: query
+          description: Report start date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          description: Report end date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+        - name: accounting_method
+          in: query
+          description: Cash or Accrual
+          schema:
+            type: string
+            enum: [Cash, Accrual]
+      responses:
+        "200":
+          description: Balance Sheet report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  /v3/company/{tenant}/reports/AgedReceivables:
+    get:
+      operationId: agedReceivables
+      summary: AR Aging report
+      description: Aged Receivables report — outstanding customer balances bucketed by age.
+      tags: [reports]
+      parameters:
+        - name: report_date
+          in: query
+          description: As-of date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: AR Aging report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"

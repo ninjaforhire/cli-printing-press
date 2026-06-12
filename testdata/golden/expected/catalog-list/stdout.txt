@@ -37,6 +37,7 @@ other:
 payments:
   mercury              Business banking API for accounts, transactions, payments, recipients, cards, invoices, treasury, and webhooks
   plaid                Banking API for account linking, transactions, identity verification, and income
+  quickbooks           Read-only QuickBooks Online accounting API — SQL query passthrough, customer/invoice/payment reads, and core financial reports (P&L, Balance Sheet, AR Aging)
   stripe               Payment processing and financial infrastructure API
 
 productivity:

@@ -1,0 +1,25 @@
+name: quickbooks
+display_name: QuickBooks
+description: Read-only QuickBooks Online accounting API — SQL query passthrough, customer/invoice/payment reads, and core financial reports (P&L, Balance Sheet, AR Aging)
+category: payments
+spec_url: https://raw.githubusercontent.com/mvanhorn/cli-printing-press/main/catalog/specs/quickbooks-spec.yaml
+spec_format: yaml
+openapi_version: "3.0"
+tier: community
+spec_source: docs
+auth_required: true
+client_pattern: rest
+http_transport: standard
+verified_date: "2026-06-12"
+homepage: https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/account
+notes: >
+  QuickBooks Online (Intuit) Accounting API, READ-ONLY subset. API lives at
+  quickbooks.api.intuit.com; every path is /v3/company/{realmId}/... where
+  realmId is the per-company tenant id supplied via QUICKBOOKS_REALM_ID (the
+  {tenant} placeholder), not part of OAuth. Auth is OAuth2 authorization-code
+  (3-legged) — QUICKBOOKS_CLIENT_ID + QUICKBOOKS_CLIENT_SECRET from the Intuit
+  developer dashboard, browser consent against the production company, refresh
+  token persisted and auto-rotated by the generated CLI. Endpoints derived from
+  the official Intuit Accounting API docs and sized to MIGHTY's consumers
+  (Penny payment checks, Jimbo revenue snapshot). Writes stay with Penny's SDK;
+  the QBO MCP is retained for Co-Work — this CLI is the code/terminal read path.
