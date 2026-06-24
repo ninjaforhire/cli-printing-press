@@ -56,6 +56,9 @@ components:
   securitySchemes:
     oauth2:
       type: oauth2
+      # Intuit requires HTTP Basic client auth at the token + refresh endpoints
+      # (client_id:client_secret in the Authorization header, not the form body).
+      x-oauth-client-auth: basic
       x-auth-env-vars:
         - QUICKBOOKS_CLIENT_ID
         - QUICKBOOKS_CLIENT_SECRET
