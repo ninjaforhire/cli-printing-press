@@ -1886,6 +1886,58 @@ func TestGenerateOAuth2AuthorizationCodeClientRefreshUnchanged(t *testing.T) {
 		"authorization_code spec must NOT emit the client_credentials mint mutex")
 }
 
+func TestGenerateOAuth2BasicClientAuth(t *testing.T) {
+	t.Parallel()
+
+	// x-oauth-client-auth: basic must make the generated token exchange and
+	// refresh send client credentials via an HTTP Basic Authorization header
+	// (Intuit/QuickBooks), never form-body client_id/client_secret params.
+	apiSpec := &spec.APISpec{
+		Name:    "basicauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:             "bearer_token",
+			Header:           "Authorization",
+			Format:           "Bearer {token}",
+			AuthorizationURL: "https://api.example.com/oauth/authorize",
+			TokenURL:         "https://api.example.com/oauth/token",
+			ClientAuthStyle:  spec.ClientAuthStyleBasic,
+			EnvVars:          []string{"BASICAUTH_TOKEN"},
+		},
+		Config: spec.ConfigSpec{Format: "toml", Path: "~/.config/basicauth-pp-cli/config.toml"},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/items"}},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	authBytes, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	auth := string(authBytes)
+	assert.Contains(t, auth, "tokenReq.SetBasicAuth(clientID, clientSecret)",
+		"token exchange must send client credentials via HTTP Basic")
+	assert.NotContains(t, auth, "http.PostForm(tokenURL",
+		"token exchange must not form-post client credentials under Basic auth")
+	assert.NotContains(t, auth, `tokenParams.Set("client_secret"`,
+		"token exchange must not form-encode client_secret under Basic auth")
+
+	clientBytes, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	client := string(clientBytes)
+	assert.Contains(t, client, "req.SetBasicAuth(c.Config.ClientID, c.Config.ClientSecret)",
+		"refresh must send client credentials via HTTP Basic")
+	assert.NotContains(t, client, `params.Set("client_secret"`,
+		"refresh must not form-encode client_secret under Basic auth")
+
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGenerateAPIKeyAuthFormatSupportsTokenPlaceholder(t *testing.T) {
 	t.Parallel()
 

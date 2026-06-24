@@ -50,6 +50,7 @@ const (
 	extensionAuthSubtype           = "x-auth-subtype"
 	extensionOAuthDeviceFlow       = "x-oauth-device-flow"
 	extensionOAuthRefreshTokenMech = "x-oauth-refresh-token-mechanism"
+	extensionOAuthClientAuth       = "x-oauth-client-auth"
 	extensionSpeakeasyExample      = "x-speakeasy-example"
 	extensionTierRouting           = "x-tier-routing"
 	extensionTier                  = "x-tier"
@@ -1646,6 +1647,11 @@ func applyAuthOverrideExtensions(auth *spec.AuthConfig, extensions map[string]an
 	}
 	if mech := stringExtension(extensions, extensionOAuthRefreshTokenMech); mech != "" {
 		auth.RefreshTokenMechanism = mech
+	}
+	if style := stringExtension(extensions, extensionOAuthClientAuth); style != "" {
+		// Only "basic" toggles HTTP Basic client auth; EffectiveClientAuthStyle
+		// re-validates so an unknown value degrades to the form-body default.
+		auth.ClientAuthStyle = style
 	}
 	applyAuthCompanionExtension(auth, extensions)
 }

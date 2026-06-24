@@ -1100,6 +1100,14 @@ type AuthConfig struct {
 	// Used by the authorization_code flow only; ignored for other grants.
 	RefreshTokenMechanism string `yaml:"refresh_token_mechanism,omitempty" json:"refresh_token_mechanism,omitempty"`
 
+	// ClientAuthStyle selects how OAuth2 client credentials reach the token +
+	// refresh endpoints. "basic" sends them as an HTTP Basic Authorization
+	// header (RFC 6749 2.3.1, required by Intuit/QuickBooks and other strict
+	// providers); "body" (the default) form-encodes client_id/client_secret in
+	// the request body. Read via EffectiveClientAuthStyle(); authorization_code
+	// flow only.
+	ClientAuthStyle string `yaml:"client_auth_style,omitempty" json:"client_auth_style,omitempty"`
+
 	// AdditionalHeaders carries per-call credentials from non-winning sibling
 	// security schemes. Composed apiKey + OAuth (or apiKey + bearer) shapes
 	// declare both schemes in components.securitySchemes; selectSecurityScheme
@@ -1124,6 +1132,14 @@ type AdditionalAuthHeader struct {
 const (
 	RefreshTokenMechanismKindScope = "scope"
 	RefreshTokenMechanismKindQuery = "query"
+)
+
+// OAuth2 client-auth styles for the token + refresh endpoints. Body (the
+// default) form-encodes client_id/client_secret; Basic sends them as an HTTP
+// Basic Authorization header.
+const (
+	ClientAuthStyleBody  = "body"
+	ClientAuthStyleBasic = "basic"
 )
 
 // AuthSubtypeAuth0SPAInMemory marks a bearer_token spec whose access token is
@@ -1171,6 +1187,23 @@ func (a AuthConfig) ParseRefreshTokenMechanism() ParsedRefreshTokenMechanism {
 		return ParsedRefreshTokenMechanism{Kind: RefreshTokenMechanismKindQuery, Key: k, Value: v}
 	}
 	return ParsedRefreshTokenMechanism{}
+}
+
+// EffectiveClientAuthStyle returns the configured OAuth2 client-auth style,
+// defaulting to "body". Any unrecognized value degrades to "body" so an
+// authoring typo cannot silently flip the token-endpoint auth shape.
+func (a AuthConfig) EffectiveClientAuthStyle() string {
+	if strings.EqualFold(strings.TrimSpace(a.ClientAuthStyle), ClientAuthStyleBasic) {
+		return ClientAuthStyleBasic
+	}
+	return ClientAuthStyleBody
+}
+
+// UsesBasicClientAuth reports whether the OAuth2 token + refresh requests must
+// carry client credentials in an HTTP Basic Authorization header instead of the
+// form body.
+func (a AuthConfig) UsesBasicClientAuth() bool {
+	return a.EffectiveClientAuthStyle() == ClientAuthStyleBasic
 }
 
 func reservedOAuthAuthURLParam(key string) bool {

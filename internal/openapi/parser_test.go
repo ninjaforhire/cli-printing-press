@@ -4824,6 +4824,56 @@ paths:
 	}
 }
 
+func TestOpenAPIOAuthClientAuth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ext  string
+		want string
+	}{
+		{name: "absent leaves field empty", ext: "", want: ""},
+		{name: "basic (Intuit/QuickBooks shape)", ext: "basic", want: "basic"},
+		{name: "body round-trips", ext: "body", want: "body"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ext := ""
+			if tt.ext != "" {
+				ext = "      x-oauth-client-auth: \"" + tt.ext + "\"\n"
+			}
+			yamlSpec := []byte(`openapi: "3.0.3"
+info:
+  title: OAuth API
+  version: "1.0.0"
+servers:
+  - url: https://api.example.com
+components:
+  securitySchemes:
+    OAuth2:
+      type: oauth2
+` + ext + `      flows:
+        authorizationCode:
+          authorizationUrl: https://api.example.com/oauth/authorize
+          tokenUrl: https://api.example.com/oauth/token
+          scopes:
+            read: Read access
+paths:
+  /widgets:
+    get:
+      security:
+        - OAuth2: [read]
+      responses:
+        "200":
+          description: OK
+`)
+			parsed, err := Parse(yamlSpec)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, parsed.Auth.ClientAuthStyle)
+		})
+	}
+}
+
 func TestOpenAPIAuthOverrideExtensions(t *testing.T) {
 	t.Parallel()
 

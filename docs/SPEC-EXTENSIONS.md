@@ -38,6 +38,7 @@ in the same change as any new `Extensions["x-*"]` lookup in that file.
 | `x-auth-companion` | `components.securitySchemes.<name>` or `info` | `APISpec.Auth.LoginURL`, `LoginCompleteSelector`, `JWTCarrierCookie` | No |
 | `x-oauth-device-flow` | `components.securitySchemes.<name>` | `APISpec.Auth.OAuth2Grant`, `DeviceAuthorizationURL`, `TokenURL`, `Scopes`, `DefaultClientID` | No |
 | `x-oauth-refresh-token-mechanism` | `components.securitySchemes.<name>` | `APISpec.Auth.RefreshTokenMechanism` | No |
+| `x-oauth-client-auth` | `components.securitySchemes.<name>` | `APISpec.Auth.ClientAuthStyle` | No |
 | `x-resource-id` | path item | `Endpoint.IDField` | No |
 | `x-critical` | path item | `Endpoint.Critical` | No |
 | `x-tier` | path item or operation | `Endpoint.Tier` | No |
@@ -959,6 +960,45 @@ components:
           tokenUrl: https://api.example.com/oauth/token
           scopes:
             read: Read access
+```
+
+### `x-oauth-client-auth`
+
+Selects how the OAuth2 client credentials reach the token and refresh endpoints.
+The default form-encodes `client_id` and `client_secret` in the request body
+(RFC 6749 2.3.1 `client_secret_post`); `basic` sends them as an HTTP Basic
+`Authorization` header (`client_secret_basic`) instead. Intuit/QuickBooks and
+other strict providers reject body-param client auth at the token endpoint, so
+the generated `auth login` and refresh would 401 without this.
+
+Parsed field: `APISpec.Auth.ClientAuthStyle`
+
+Rules:
+
+- Optional. Only consumed by the authorization_code grant templates (token
+  exchange in `auth.go`, refresh in `client.go`); ignored for other grants and
+  non-OAuth2 auth.
+- Must be a string. Two values are recognized (case-insensitive, whitespace
+  trimmed): `basic` and `body`.
+- `basic` drops `client_id`/`client_secret` from the form body and adds
+  `SetBasicAuth(clientID, clientSecret)` to both the token and refresh requests.
+- Any unrecognized value (including an empty or absent extension) degrades to
+  the `body` default, so an authoring typo cannot silently switch the auth shape.
+
+Example:
+
+```yaml
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      x-oauth-client-auth: basic
+      flows:
+        authorizationCode:
+          authorizationUrl: https://appcenter.intuit.com/connect/oauth2
+          tokenUrl: https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer
+          scopes:
+            com.intuit.quickbooks.accounting: Read accounting data
 ```
 
 ### `x-url-name` and `x-param-url-names`

@@ -1795,6 +1795,27 @@ func TestParseRefreshTokenMechanism(t *testing.T) {
 	}
 }
 
+func TestEffectiveClientAuthStyle(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AuthConfig
+		want string
+	}{
+		{name: "empty defaults to body", cfg: AuthConfig{}, want: ClientAuthStyleBody},
+		{name: "whitespace-only defaults to body", cfg: AuthConfig{ClientAuthStyle: "   "}, want: ClientAuthStyleBody},
+		{name: "explicit body round-trips", cfg: AuthConfig{ClientAuthStyle: ClientAuthStyleBody}, want: ClientAuthStyleBody},
+		{name: "basic round-trips", cfg: AuthConfig{ClientAuthStyle: ClientAuthStyleBasic}, want: ClientAuthStyleBasic},
+		{name: "basic is case-insensitive", cfg: AuthConfig{ClientAuthStyle: "Basic"}, want: ClientAuthStyleBasic},
+		{name: "unknown value degrades to body", cfg: AuthConfig{ClientAuthStyle: "post"}, want: ClientAuthStyleBody},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.EffectiveClientAuthStyle())
+			assert.Equal(t, tt.want == ClientAuthStyleBasic, tt.cfg.UsesBasicClientAuth())
+		})
+	}
+}
+
 func TestVersionPassedThrough(t *testing.T) {
 	base := func(v string) APISpec {
 		return APISpec{

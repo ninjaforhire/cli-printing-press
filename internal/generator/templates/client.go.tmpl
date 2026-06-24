@@ -2090,17 +2090,26 @@ func (c *Client) refreshAccessToken(ctx context.Context) error {
 	params := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {c.Config.RefreshToken},
+{{- if not .Auth.UsesBasicClientAuth}}
 		"client_id":     {c.Config.ClientID},
+{{- end}}
 	}
+{{- if not .Auth.UsesBasicClientAuth}}
 	if c.Config.ClientSecret != "" {
 		params.Set("client_secret", c.Config.ClientSecret)
 	}
+{{- end}}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(params.Encode()))
 	if err != nil {
 		return fmt.Errorf("building refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+{{- if .Auth.UsesBasicClientAuth}}
+	// Strict providers (Intuit/QuickBooks) require client credentials in an HTTP
+	// Basic Authorization header at the refresh endpoint, not the form body.
+	req.SetBasicAuth(c.Config.ClientID, c.Config.ClientSecret)
+{{- end}}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("refreshing access token: %w", err)
