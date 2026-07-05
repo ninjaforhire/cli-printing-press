@@ -1,0 +1,46 @@
+name: kie
+display_name: KIE.ai
+description: AI generation gateway for 100+ models — image, video, music, and voice generation via a unified async task API (Sora, Kling, Veo, Runway, Midjourney, Flux, Hailuo, Suno, and more)
+category: ai
+spec_url: https://raw.githubusercontent.com/ninjaforhire/cli-printing-press/main/catalog/specs/kie-spec.yaml
+spec_format: yaml
+openapi_version: "3.0"
+tier: community
+spec_source: docs
+auth_required: true
+client_pattern: rest
+http_transport: standard
+base_url: https://api.kie.ai/api/v1
+homepage: https://docs.kie.ai/
+auth_key_url: https://kie.ai/api-key
+auth_instructions: "Create an account at kie.ai, go to API Keys, and copy your key. Set KIE_API_KEY in your environment."
+auth_env_vars:
+  - KIE_API_KEY
+notes: >
+  KIE.ai aggregates 100+ third-party generative AI models under one API key and
+  billing surface. All generation is async: every POST endpoint returns a taskId;
+  callers poll GET /jobs/recordInfo?taskId=<id> (or /veo/record-info for Veo)
+  until state reaches success or fail. resultJson in the status response is a
+  JSON-encoded string — callers must parse it to extract resultUrls.
+
+  Two distinct body shapes: (1) unified /jobs/createTask nests params under an
+  "input" key alongside the model slug; (2) legacy direct surfaces (veo, midjourney,
+  flux, runway) use flat top-level bodies. The spec covers both shapes.
+
+  Veo 3 is the only surface using a dedicated poll endpoint (/veo/record-info)
+  with successFlag integer semantics instead of the state string used everywhere
+  else. File upload endpoints (base64, url) produce a downloadUrl for use as
+  image_url in image-to-video and image-to-image generation requests.
+
+  Rate limit: 20 generation requests per 10 seconds, 100+ concurrent tasks.
+  Credits are consumed per generation; check balance via GET /common/credits.
+
+  This spec covers the endpoints Forge (forge/execution/integrations/kie_provider.py)
+  actually invokes. The full /market/* model registry covers Sora 2, Kling 2.x/3.0,
+  Hailuo 2.3, Seedance 2, Wan 2.7, Grok Imagine, GPT Image 2, Ideogram v3, Topaz
+  upscale, and the Suno music suite — all submitted via /jobs/createTask with the
+  appropriate model slug. See https://docs.kie.ai/ for the full model index.
+known_alternatives:
+  - name: kie-docs
+    url: https://docs.kie.ai/
+    language: docs
