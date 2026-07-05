@@ -1,0 +1,596 @@
+openapi: "3.0.3"
+info:
+  title: KIE.ai API
+  description: |
+    KIE.ai is a unified AI generation gateway providing access to 100+ models
+    across image, video, music, and voice generation. All generation follows an
+    async task model: POST a generation request → receive a taskId → poll for
+    completion. Credits are consumed per generation; query the balance via
+    GET /common/credits.
+
+    Forge uses KIE as a fallback for models without direct API adapters (Sora 2,
+    Veo 3, Hailuo, Seedream, Wan, Ideogram, etc.) and as a unified surface for
+    Midjourney and Flux when direct keys are absent.
+
+    Key surfaces:
+    - /jobs/createTask + /jobs/recordInfo — unified market-model task pipeline
+    - /veo/generate + /veo/record-info — dedicated Veo 3 surface
+    - /midjourney/generate — Midjourney image generation
+    - /flux/kontext/generate — Flux Kontext image generation
+    - /runway/generate — Runway video generation
+    - /common/credits — account credit balance
+    - /file-upload-api/* — upload assets (base64, stream, URL) for i2v/i2i inputs
+  version: "1.0.0"
+  contact:
+    name: KIE.ai Docs
+    url: https://docs.kie.ai/
+  x-display-name: KIE.ai
+  x-website: https://kie.ai
+  x-spec-provenance:
+    source: docs
+    docs_url: https://docs.kie.ai/
+    notes: >
+      Hand-authored from official KIE.ai documentation and confirmed against
+      forge/execution/integrations/kie_provider.py usage (mined 2026-07-05).
+      KIE does not publish a single vendor OpenAPI file. Request/response
+      shapes are cross-referenced from docs.kie.ai surface-specific quickstarts
+      and from live integration in the Forge codebase.
+    confirmed_quirks:
+      - "All generation is async: POST returns data.taskId; callers poll GET /jobs/recordInfo?taskId=<id> until state is 'success' or 'fail'."
+      - "The unified /jobs/createTask body nests generation params under 'input' key (e.g. {model, input: {prompt, aspect_ratio, duration}}). Legacy direct surfaces (midjourney, flux, runway, veo) use flat top-level bodies."
+      - "GET /jobs/recordInfo returns resultJson as a JSON string (not object) containing resultUrls array."
+      - "Veo uses a dedicated surface: POST /veo/generate + GET /veo/record-info. successFlag: 0=generating, 1=success (data.response.resultUrls), 2/3=failed."
+      - "Rate limit: 20 generation requests per 10 seconds, 100+ concurrent tasks."
+      - "Credits endpoint changed from /chat/credit to /common/credits per 2026-07-05 docs revision."
+
+servers:
+  - url: https://api.kie.ai/api/v1
+    description: KIE.ai production API
+
+tags:
+  - name: tasks
+    description: Unified async task pipeline for marketplace model generation
+  - name: veo
+    description: Google Veo 3 video generation (dedicated surface)
+  - name: midjourney
+    description: Midjourney image generation
+  - name: flux
+    description: Flux Kontext image generation and editing
+  - name: runway
+    description: Runway AI video generation
+  - name: credits
+    description: Account credit balance
+  - name: upload
+    description: File upload for use as generation inputs (image-to-video, image-to-image)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        KIE API key as a Bearer token. Obtain from https://kie.ai/api-key.
+        Set the KIE_API_KEY environment variable; the generated CLI sends it
+        as `Authorization: Bearer <KIE_API_KEY>`.
+      x-auth-env-vars:
+        - KIE_API_KEY
+
+  schemas:
+    TaskId:
+      type: object
+      description: Task identifier returned by all generation endpoints.
+      properties:
+        data:
+          type: object
+          properties:
+            taskId:
+              type: string
+              description: Unique task identifier; pass to poll endpoints.
+          required: [taskId]
+      required: [data]
+
+    TaskStatus:
+      type: object
+      description: |
+        Unified task status from GET /jobs/recordInfo. The `state` field uses
+        KIE vocabulary: generating, queuing, waiting, success, fail.
+        `resultJson` is a JSON-encoded string containing `resultUrls` (not an
+        inline object); callers must parse it to extract output URLs.
+      properties:
+        data:
+          type: object
+          properties:
+            taskId:
+              type: string
+            state:
+              type: string
+              enum: [generating, queuing, waiting, success, fail]
+              description: Task lifecycle state.
+            resultJson:
+              type: string
+              description: >
+                JSON string — parse to extract `resultUrls` array of output
+                media URLs. Present only when state=success.
+            progress:
+              type: integer
+              description: Progress percentage (0–100) when available.
+          required: [taskId, state]
+      required: [data]
+
+    VeoTaskStatus:
+      type: object
+      description: |
+        Veo-specific status from GET /veo/record-info. Uses `successFlag`
+        instead of `state`: 0=generating, 1=success, 2/3=failed.
+        On success, `data.response.resultUrls` contains the output video URLs.
+      properties:
+        data:
+          type: object
+          properties:
+            taskId:
+              type: string
+            successFlag:
+              type: integer
+              enum: [0, 1, 2, 3]
+              description: "0=generating, 1=success, 2=failed, 3=failed"
+            response:
+              type: object
+              properties:
+                resultUrls:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  description: Output video URLs; present when successFlag=1.
+      required: [data]
+
+    CreateTaskRequest:
+      type: object
+      description: |
+        Unified task creation body for /market/* model endpoints. The `model`
+        field is the KIE model slug (e.g. "kling-2.6/text-to-video"); `input`
+        contains generation parameters which vary by model.
+      properties:
+        model:
+          type: string
+          description: KIE model slug (e.g. "kling-2.6/text-to-video", "sora-2/text-to-video").
+        input:
+          type: object
+          description: >
+            Model-specific generation parameters. Common keys: prompt (string),
+            aspect_ratio (string e.g. "16:9", "9:16", "1:1"), duration (string
+            seconds), image_url (string, for image-to-video models).
+          additionalProperties: true
+      required: [model, input]
+
+    MidjourneyRequest:
+      type: object
+      description: Midjourney image generation request body.
+      properties:
+        prompt:
+          type: string
+          description: Text prompt describing the desired image.
+        model:
+          type: string
+          description: Midjourney model version slug (e.g. "v7"). Defaults to latest.
+          default: "v7"
+        aspect_ratio:
+          type: string
+          description: Output aspect ratio (e.g. "16:9", "1:1", "9:16").
+          default: "1:1"
+      required: [prompt]
+
+    FluxKontextRequest:
+      type: object
+      description: Flux Kontext image generation or editing request body.
+      properties:
+        prompt:
+          type: string
+          description: Text prompt for generation or editing instruction.
+        model:
+          type: string
+          description: Flux model slug (e.g. "flux-kontext-pro", "flux-kontext-max").
+          default: "flux-kontext-pro"
+        aspectRatio:
+          type: string
+          description: Output aspect ratio (e.g. "16:9", "1:1", "9:16").
+          default: "1:1"
+        outputFormat:
+          type: string
+          enum: [PNG, JPEG, WEBP]
+          default: PNG
+        image_url:
+          type: string
+          format: uri
+          description: Input image URL for image-to-image editing (optional).
+      required: [prompt]
+
+    RunwayRequest:
+      type: object
+      description: Runway AI video generation request body.
+      properties:
+        prompt:
+          type: string
+          description: Text or image prompt for video generation.
+        duration:
+          type: integer
+          description: Desired video duration in seconds.
+          default: 5
+        ratio:
+          type: string
+          description: Output resolution ratio (e.g. "1280:768", "768:1280", "1024:1024").
+          default: "1280:768"
+        image_url:
+          type: string
+          format: uri
+          description: Input image URL for image-to-video generation (optional).
+      required: [prompt]
+
+    VeoGenerateRequest:
+      type: object
+      description: |
+        Veo video generation request body. Uses a flat (non-nested) body shape,
+        unlike /jobs/createTask which nests params under `input`.
+      properties:
+        prompt:
+          type: string
+          description: Text prompt for video generation.
+        model:
+          type: string
+          enum: [veo3, veo3_fast, veo3_lite]
+          description: Veo model tier. veo3_lite is the default; veo3 is highest quality.
+          default: veo3_lite
+        aspect_ratio:
+          type: string
+          description: Output aspect ratio ("16:9", "9:16", "1:1").
+          default: "16:9"
+      required: [prompt]
+
+    UploadBase64Request:
+      type: object
+      description: File upload via base64-encoded data URI.
+      properties:
+        base64Data:
+          type: string
+          description: >
+            Data URI including MIME type prefix
+            (e.g. "data:image/jpeg;base64,<encoded>").
+        uploadPath:
+          type: string
+          description: Remote folder path for storage (e.g. "images/forge").
+          default: "images"
+        fileName:
+          type: string
+          description: Destination file name including extension.
+      required: [base64Data, fileName]
+
+    UploadUrlRequest:
+      type: object
+      description: File upload by fetching from a public URL.
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Publicly accessible URL of the source file.
+        uploadPath:
+          type: string
+          description: Remote folder path for storage.
+          default: "images"
+        fileName:
+          type: string
+          description: Destination file name including extension.
+      required: [url, fileName]
+
+    UploadResponse:
+      type: object
+      description: File upload result with the public download URL.
+      properties:
+        data:
+          type: object
+          properties:
+            downloadUrl:
+              type: string
+              format: uri
+              description: Public URL of the uploaded file; use as image_url in generation requests.
+          required: [downloadUrl]
+      required: [data]
+
+    CreditsResponse:
+      type: object
+      description: Account credit balance.
+      properties:
+        data:
+          type: number
+          format: float
+          description: Remaining credit balance as a floating-point number.
+      required: [data]
+
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        code:
+          type: integer
+
+security:
+  - bearerAuth: []
+
+paths:
+  /jobs/createTask:
+    post:
+      operationId: createTask
+      summary: Create a generation task
+      description: |
+        Submit a generation request for any /market/* model. Returns a taskId
+        immediately; poll GET /jobs/recordInfo?taskId=<id> for status and results.
+        The `model` slug identifies the endpoint (e.g. "kling-2.6/text-to-video",
+        "sora-2/text-to-video", "hailuo/2-3-image-to-video-pro").
+      tags: [tasks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+            examples:
+              kling_t2v:
+                summary: Kling 2.6 text-to-video
+                value:
+                  model: "kling-2.6/text-to-video"
+                  input:
+                    prompt: "A photo booth at a sunset beach wedding"
+                    aspect_ratio: "16:9"
+                    duration: "5"
+              hailuo_i2v:
+                summary: Hailuo 2.3 image-to-video
+                value:
+                  model: "hailuo/2-3-image-to-video-pro"
+                  input:
+                    prompt: "Guests laughing at a photo booth"
+                    image_url: "https://cdn.example.com/booth.jpg"
+                    aspect_ratio: "16:9"
+      responses:
+        "200":
+          description: Task created; use taskId to poll for status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+        "429":
+          description: Rate limit exceeded (20 requests / 10 seconds).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/recordInfo:
+    get:
+      operationId: getTaskStatus
+      summary: Poll generation task status
+      description: |
+        Poll the status of any task created via /jobs/createTask, /midjourney/generate,
+        /flux/kontext/generate, or /runway/generate. When state=success, parse
+        `resultJson` (a JSON string) to extract the `resultUrls` array of output URLs.
+      tags: [tasks]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Task identifier returned by any generation endpoint.
+      responses:
+        "200":
+          description: Task status and result metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /veo/generate:
+    post:
+      operationId: generateVeo
+      summary: Generate video with Google Veo 3
+      description: |
+        Submit a Veo video generation request on the dedicated Veo surface.
+        Uses a flat top-level body (not the `input`-nested shape of /jobs/createTask).
+        Poll status with GET /veo/record-info?taskId=<id> (not /jobs/recordInfo).
+        Models: veo3 (highest quality), veo3_fast, veo3_lite (default).
+      tags: [veo]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VeoGenerateRequest"
+            examples:
+              veo3_lite:
+                summary: Veo 3 lite (default)
+                value:
+                  prompt: "A photo booth spinning in slow motion at golden hour"
+                  model: veo3_lite
+                  aspect_ratio: "16:9"
+      responses:
+        "200":
+          description: Veo task created; poll /veo/record-info with taskId.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+
+  /veo/record-info:
+    get:
+      operationId: getVeoTaskStatus
+      summary: Poll Veo generation task status
+      description: |
+        Poll a Veo task created via POST /veo/generate. Uses `successFlag`
+        (0=generating, 1=success, 2/3=failed) instead of the `state` string
+        used by /jobs/recordInfo. Output URLs are at data.response.resultUrls
+        when successFlag=1.
+      tags: [veo]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Veo task status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VeoTaskStatus"
+
+  /midjourney/generate:
+    post:
+      operationId: generateMidjourney
+      summary: Generate images with Midjourney
+      description: |
+        Submit a Midjourney image generation request. Returns a taskId; poll
+        GET /jobs/recordInfo?taskId=<id> for completion and result image URLs.
+      tags: [midjourney]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MidjourneyRequest"
+            examples:
+              default:
+                summary: Midjourney v7 portrait
+                value:
+                  prompt: "Guests celebrating at a photo booth, cinematic lighting"
+                  model: v7
+                  aspect_ratio: "1:1"
+      responses:
+        "200":
+          description: Task created; poll /jobs/recordInfo for results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+
+  /flux/kontext/generate:
+    post:
+      operationId: generateFluxKontext
+      summary: Generate or edit images with Flux Kontext
+      description: |
+        Submit a Flux Kontext image generation or editing request. Supports
+        text-to-image and image-to-image editing (pass image_url for editing).
+        Returns a taskId; poll GET /jobs/recordInfo?taskId=<id> for results.
+      tags: [flux]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FluxKontextRequest"
+            examples:
+              text_to_image:
+                summary: Text-to-image with Flux Kontext Pro
+                value:
+                  prompt: "A modern photo booth setup at a rooftop event"
+                  model: flux-kontext-pro
+                  aspectRatio: "1:1"
+                  outputFormat: PNG
+      responses:
+        "200":
+          description: Task created; poll /jobs/recordInfo for results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+
+  /runway/generate:
+    post:
+      operationId: generateRunway
+      summary: Generate video with Runway
+      description: |
+        Submit a Runway video generation request. Supports text-to-video and
+        image-to-video (pass image_url for i2v). Returns a taskId; poll
+        GET /jobs/recordInfo?taskId=<id> for completion.
+      tags: [runway]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunwayRequest"
+            examples:
+              text_to_video:
+                summary: Runway text-to-video
+                value:
+                  prompt: "A photo booth at a wedding reception, guests laughing"
+                  duration: 5
+                  ratio: "1280:768"
+      responses:
+        "200":
+          description: Task created; poll /jobs/recordInfo for results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+
+  /common/credits:
+    get:
+      operationId: getCredits
+      summary: Get account credit balance
+      description: |
+        Returns the remaining credit balance for the authenticated KIE account.
+        The balance is returned as a bare float in `data`. Check this before
+        submitting expensive generation tasks.
+      tags: [credits]
+      responses:
+        "200":
+          description: Current credit balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditsResponse"
+
+  /file-upload-api/upload-file-base-64:
+    post:
+      operationId: uploadFileBase64
+      summary: Upload a file via base64
+      description: |
+        Upload a local file as a base64-encoded data URI. Returns a public
+        `downloadUrl` that can be passed as `image_url` in image-to-video or
+        image-to-image generation requests.
+      tags: [upload]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadBase64Request"
+      responses:
+        "200":
+          description: Upload successful; use downloadUrl in generation requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+
+  /file-upload-api/upload-file-url:
+    post:
+      operationId: uploadFileFromUrl
+      summary: Upload a file by URL
+      description: >
+        Fetch a file from a public URL and store it on KIE's CDN. Returns a
+        `downloadUrl` for use in subsequent generation requests.
+      tags: [upload]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadUrlRequest"
+      responses:
+        "200":
+          description: Upload successful; use downloadUrl in generation requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
