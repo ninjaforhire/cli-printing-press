@@ -42,6 +42,7 @@ info:
       - "Veo uses a dedicated surface: POST /veo/generate + GET /veo/record-info. successFlag: 0=generating, 1=success (data.response.resultUrls), 2/3=failed."
       - "Rate limit: 20 generation requests per 10 seconds, 100+ concurrent tasks."
       - "Credits endpoint changed from /chat/credit to /common/credits per 2026-07-05 docs revision."
+      - "UPLOAD DOMAIN DIVERGENCE (unverified): The forge kie_provider.py production consumer posts base64 uploads to a legacy domain, https://kieai.redpandaai.co/api/file-base64-upload, rather than the docs.kie.ai path at https://api.kie.ai/api/v1/file-upload-api/upload-file-base-64. Both upload endpoints in this spec follow the current official docs surface, but have not been independently confirmed as live. If upload commands 404 on api.kie.ai, fall back to the legacy kieai.redpandaai.co endpoint."
 
 servers:
   - url: https://api.kie.ai/api/v1
@@ -558,6 +559,13 @@ paths:
         Upload a local file as a base64-encoded data URI. Returns a public
         `downloadUrl` that can be passed as `image_url` in image-to-video or
         image-to-image generation requests.
+
+        NOTE — legacy domain divergence (unverified): The forge kie_provider.py
+        production consumer sends base64 uploads to
+        https://kieai.redpandaai.co/api/file-base64-upload rather than this
+        path on api.kie.ai. Both domains appear in official KIE documentation,
+        but the api.kie.ai upload path has not been independently confirmed live.
+        If this command returns 404, use the legacy endpoint directly.
       tags: [upload]
       requestBody:
         required: true
@@ -577,9 +585,13 @@ paths:
     post:
       operationId: uploadFileFromUrl
       summary: Upload a file by URL
-      description: >
+      description: |
         Fetch a file from a public URL and store it on KIE's CDN. Returns a
         `downloadUrl` for use in subsequent generation requests.
+
+        NOTE — unverified live status: This path follows the official docs.kie.ai
+        upload surface. No legacy-domain alternative is known for URL-based uploads,
+        but the endpoint has not been independently confirmed live on api.kie.ai.
       tags: [upload]
       requestBody:
         required: true
