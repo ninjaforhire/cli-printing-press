@@ -30,7 +30,13 @@ notes: >
   Veo 3 is the only surface using a dedicated poll endpoint (/veo/record-info)
   with successFlag integer semantics instead of the state string used everywhere
   else. File upload endpoints (base64, url) produce a downloadUrl for use as
-  image_url in image-to-video and image-to-image generation requests.
+  image_url in image-to-video and image-to-image generation requests. UPLOAD
+  DOMAIN DIVERGENCE: the forge kie_provider.py production consumer posts
+  base64 uploads to a legacy domain (https://kieai.redpandaai.co/api/file-base64-upload)
+  rather than the /file-upload-api/upload-file-base-64 path on api.kie.ai
+  documented in the spec. Both appear in official KIE docs; the api.kie.ai
+  upload paths have not been independently confirmed live. If upload commands
+  404, fall back to the kieai.redpandaai.co legacy endpoint.
 
   Rate limit: 20 generation requests per 10 seconds, 100+ concurrent tasks.
   Credits are consumed per generation; check balance via GET /common/credits.
