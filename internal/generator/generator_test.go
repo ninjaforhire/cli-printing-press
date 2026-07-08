@@ -19007,3 +19007,28 @@ func TestSyncWarningEmitsValidJSON(t *testing.T) {
 	// module, exercising the syncWarningJSON call site); asserting the contract
 	// here keeps the canary close to the template change.
 }
+func TestOAuth2PerCallFallbackEnvVars(t *testing.T) {
+	auth := spec.AuthConfig{
+		Type:             "bearer_token",
+		OAuth2Grant:      "authorization_code",
+		AuthorizationURL: "https://example.com/authorize",
+		TokenURL:         "https://example.com/token",
+		EnvVarSpecs: []spec.AuthEnvVar{
+			{Name: "ACME_CLIENT_ID", Kind: spec.AuthEnvVarKindPerCall},
+			{Name: "ACME_CLIENT_SECRET", Kind: spec.AuthEnvVarKindPerCall},
+			{Name: "ACME_ACCESS_TOKEN", Kind: spec.AuthEnvVarKindPerCall},
+			{Name: "ACME_REALM", Kind: spec.AuthEnvVarKindAuthFlowInput},
+		},
+	}
+	fallbacks := oauth2PerCallFallbackEnvVars(auth)
+	if len(fallbacks) != 1 || fallbacks[0].Name != "ACME_ACCESS_TOKEN" {
+		t.Fatalf("want only ACME_ACCESS_TOKEN as per-call fallback, got %+v", fallbacks)
+	}
+
+	// Client-ID/secret-only specs (QuickBooks shape) emit no fallback at all:
+	// flow inputs must never be sent as a bearer.
+	auth.EnvVarSpecs = auth.EnvVarSpecs[:2]
+	if got := oauth2PerCallFallbackEnvVars(auth); len(got) != 0 {
+		t.Fatalf("want no fallbacks for flow-input-only spec, got %+v", got)
+	}
+}

@@ -441,6 +441,23 @@ func (c *Config) AuthHeader() string {
 		return "{{.Auth.HeaderPrefix}} " + c.AccessToken
 		{{- end}}
 	}
+{{- range oauth2PerCallFallbackEnvVars .Auth}}
+	// Documented per-call bearer fallback: honored only while no minted
+	// AccessToken exists, so OAuth flow inputs can never shadow a login.
+	if c.{{resolveEnvVarField .Name}} != "" {
+		{{- if $.Auth.Format}}
+		return applyAuthFormat("{{$.Auth.Format}}", map[string]string{
+			"{{envVarPlaceholder .Name}}": c.{{resolveEnvVarField .Name}},
+			"{{.Name}}": c.{{resolveEnvVarField .Name}},
+			{{- if ne (envVarPlaceholder .Name) "token"}}
+			"token": c.{{resolveEnvVarField .Name}},
+			{{- end}}
+		})
+		{{- else}}
+		return "{{$.Auth.HeaderPrefix}} " + c.{{resolveEnvVarField .Name}}
+		{{- end}}
+	}
+{{- end}}
 	return ""
 {{- else}}
 {{- if .BearerRefresh.Enabled}}
