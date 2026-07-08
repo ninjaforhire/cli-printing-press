@@ -273,6 +273,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"authCommandShort":                   authCommandShort,
 		"authHarvestedEnvHint":               authHarvestedEnvHint,
 		"oauth2AccessTokenAuth":              oauth2AccessTokenAuth,
+		"oauth2PerCallFallbackEnvVars":       oauth2PerCallFallbackEnvVars,
 		"oauth2AuthSource":                   oauth2AuthSource,
 		"basicAuthEnvVars":                   basicAuthEnvVars,
 		"clientCredentialsEnvVars":           clientCredentialsEnvVars,
@@ -1084,14 +1085,35 @@ func oauth2AccessTokenAuth(auth spec.AuthConfig) bool {
 		return true
 	case spec.OAuth2GrantAuthorizationCode:
 		// Authorization-code specs (Intuit/QuickBooks) surface as bearer_token
-		// with client_id/client_secret env vars. Those are flow inputs, not
-		// bearers — but only when a real authorize+token endpoint pair exists;
-		// plain PAT specs default to this grant with no URLs and must keep the
+		// with client ID/secret env vars. Those are flow inputs, not bearers —
+		// but only when a real authorize+token endpoint pair exists; plain PAT
+		// specs default to this grant with no URLs and must keep the
 		// env-var-wins path.
 		return auth.AuthorizationURL != "" && auth.TokenURL != ""
 	default:
 		return false
 	}
+}
+
+// oauth2PerCallFallbackEnvVars returns the per_call request-credential env
+// vars an oauth2AccessTokenAuth spec should still honor when no minted
+// AccessToken exists (i.e. before auth login). Client-ID/secret shaped vars
+// are excluded: legacy x-auth-env-vars lists normalize those flow inputs to
+// per_call, and sending them as a bearer is exactly the token_rejected
+// failure oauth2AccessTokenAuth exists to prevent.
+func oauth2PerCallFallbackEnvVars(auth spec.AuthConfig) []spec.AuthEnvVar {
+	clientID, clientSecret := clientCredentialsNamedPair(auth.EnvVarSpecs)
+	var fallbacks []spec.AuthEnvVar
+	for _, envVar := range auth.EnvVarSpecs {
+		if envVar.EffectiveKind() != spec.AuthEnvVarKindPerCall {
+			continue
+		}
+		if envVar.Name == clientID.Name || envVar.Name == clientSecret.Name {
+			continue
+		}
+		fallbacks = append(fallbacks, envVar)
+	}
+	return fallbacks
 }
 
 func oauth2AuthSource(auth spec.AuthConfig) string {
