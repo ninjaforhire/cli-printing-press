@@ -36,6 +36,18 @@ const (
 )
 
 const (
+	ClientPatternREST          = "rest"
+	ClientPatternProxyEnvelope = "proxy-envelope"
+	ClientPatternJSONRPC       = "jsonrpc"
+)
+
+const (
+	JSONRPCEnvelopePlain = "plain"
+	JSONRPCEnvelopeMCP   = "mcp"
+	JSONRPCVersion       = "2.0"
+)
+
+const (
 	HTTPTransportStandard        = "standard"          // default for official API clients
 	HTTPTransportBrowserHTTP     = "browser-http"      // stdlib transport with HTTP/2 disabled for browser-facing web surfaces
 	HTTPTransportBrowserChrome   = "browser-chrome"    // Chrome-impersonated transport for browser-facing web surfaces (no version force; Chrome negotiates)
@@ -290,7 +302,8 @@ type APISpec struct {
 	Kind            string              `yaml:"kind,omitempty" json:"kind,omitempty"`                     // "rest" (default) or "synthetic" — synthetic CLIs aggregate multiple sources beyond the spec; dogfood's path-validity check is relaxed accordingly
 	Source          string              `yaml:"source,omitempty" json:"source,omitempty"`                 // source archetype; local-sqlite declares an operator-local SQLite source with no HTTP base URL
 	SpecSource      string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
-	ClientPattern   string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
+	ClientPattern   string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope, jsonrpc — affects generated HTTP client
+	JSONRPC         JSONRPCConfig       `yaml:"x-jsonrpc,omitempty" json:"x-jsonrpc,omitzero"`            // JSON-RPC envelope options for jsonrpc clients
 	HTTPTransport   string              `yaml:"http_transport,omitempty" json:"http_transport,omitempty"` // standard (default for official APIs), browser-http, browser-chrome, browser-chrome-h2, or browser-chrome-h3
 	RateClass       string              `yaml:"rate_class,omitempty" json:"rate_class,omitempty"`         // per-second, daily, monthly, or unlimited — affects generated sync concurrency defaults
 	HealthCheckPath string              `yaml:"health_check_path,omitempty" json:"health_check_path,omitempty"`
@@ -315,6 +328,29 @@ type APISpec struct {
 	MCP             MCPConfig           `yaml:"mcp,omitempty" json:"mcp"`                                 // MCP server generation config; when unset, small APIs (typed-endpoint count <= DefaultRemoteTransportEndpointThreshold) get stdio+http compiled in by APISpec.EffectiveMCPTransports so the same binary can serve cloud-hosted agents. Larger APIs without an explicit orchestration mode default to the Cloudflare MCP pattern during generation. Opting into http explicitly adds a --transport/--addr flag surface regardless of size.
 	Throttling      ThrottlingConfig    `yaml:"throttling,omitempty" json:"throttling"`                   // cost-based throttling config; when Enabled with a recognized Shape, the generator emits a ThrottleState (generic harness) plus a per-Shape parser that reads the API's cost bucket. Only the "shopify" Shape ships in v1.
 	Streaming       StreamingConfig     `yaml:"streaming,omitempty" json:"streaming"`                     // streaming-primary ingest config; when Transport is websocket, emits a live ws sync scaffold plus REST metadata refresh and rebase-log support.
+}
+
+type JSONRPCConfig struct {
+	Version  string `yaml:"version,omitempty" json:"version,omitempty"`
+	Envelope string `yaml:"envelope,omitempty" json:"envelope,omitempty"`
+}
+
+func (c JSONRPCConfig) EffectiveVersion() string {
+	if strings.TrimSpace(c.Version) == "" {
+		return JSONRPCVersion
+	}
+	return strings.TrimSpace(c.Version)
+}
+
+func (c JSONRPCConfig) EffectiveEnvelope() string {
+	if strings.TrimSpace(c.Envelope) == "" {
+		return JSONRPCEnvelopePlain
+	}
+	return strings.TrimSpace(c.Envelope)
+}
+
+func (c JSONRPCConfig) IsMCP() bool {
+	return c.EffectiveEnvelope() == JSONRPCEnvelopeMCP
 }
 
 type TierRoutingConfig struct {
@@ -2041,6 +2077,9 @@ type Endpoint struct {
 	// new (non-strict) exit-code policy. Populated from the path-item-level
 	// `x-critical` extension on OpenAPI specs; defaults to false.
 	Critical bool `yaml:"critical,omitempty" json:"critical,omitempty"`
+	// JSONRPCMethod is the JSON-RPC method name emitted for this operation when
+	// the API uses client_pattern: jsonrpc.
+	JSONRPCMethod string `yaml:"x-jsonrpc-method,omitempty" json:"x-jsonrpc-method,omitempty"`
 	// Walker, when present, declares this endpoint as a hierarchical child
 	// resource fetched by iterating a named parent. Used when the generator's
 	// path-param dependent-resource auto-detection would miss the link — for
@@ -3661,6 +3700,14 @@ func (s *APISpec) Validate() error {
 	if len(s.Resources) == 0 {
 		return fmt.Errorf("at least one resource is required")
 	}
+	switch s.ClientPattern {
+	case "", ClientPatternREST, ClientPatternProxyEnvelope, ClientPatternJSONRPC:
+	default:
+		return fmt.Errorf("client_pattern must be one of: rest, proxy-envelope, jsonrpc")
+	}
+	if err := validateJSONRPC(s); err != nil {
+		return err
+	}
 	switch s.HTTPTransport {
 	case "", HTTPTransportStandard, HTTPTransportBrowserHTTP, HTTPTransportBrowserChrome, HTTPTransportBrowserChromeH2, HTTPTransportBrowserChromeH3:
 	default:
@@ -3722,11 +3769,17 @@ func (s *APISpec) Validate() error {
 	if err := validateTierRouting(s); err != nil {
 		return err
 	}
-	if s.ClientPattern == "proxy-envelope" && s.HasAbsoluteRequestPath() {
+	if s.ClientPattern == ClientPatternProxyEnvelope && s.HasAbsoluteRequestPath() {
 		return fmt.Errorf("resource or endpoint base_url overrides and absolute endpoint paths are incompatible with client_pattern=proxy-envelope; the proxy POSTs every request to the spec-level BaseURL, so per-request hosts would be silently ignored")
 	}
-	if s.ClientPattern == "proxy-envelope" && s.BasePath != "" {
+	if s.ClientPattern == ClientPatternProxyEnvelope && s.BasePath != "" {
 		return fmt.Errorf("base_path is incompatible with client_pattern=proxy-envelope; the proxy routes via the envelope's Service/Path fields, not a URL-level prefix — fold the prefix into base_url instead")
+	}
+	if s.ClientPattern == ClientPatternJSONRPC && s.HasAbsoluteRequestPath() {
+		return fmt.Errorf("resource or endpoint base_url overrides and absolute endpoint paths are incompatible with client_pattern=jsonrpc; JSON-RPC POSTs every request to the spec-level BaseURL")
+	}
+	if s.ClientPattern == ClientPatternJSONRPC && s.BasePath != "" {
+		return fmt.Errorf("base_path is incompatible with client_pattern=jsonrpc; the JSON-RPC server URL comes from base_url")
 	}
 	for name, r := range s.Resources {
 		if len(r.Endpoints) == 0 && len(r.SubResources) == 0 {
@@ -4154,12 +4207,44 @@ func validateBearerRefresh(s *APISpec) error {
 	return nil
 }
 
+func validateJSONRPC(s *APISpec) error {
+	if s == nil {
+		return nil
+	}
+	if version := s.JSONRPC.EffectiveVersion(); version != JSONRPCVersion {
+		return fmt.Errorf("x-jsonrpc.version must be %q", JSONRPCVersion)
+	}
+	switch s.JSONRPC.EffectiveEnvelope() {
+	case JSONRPCEnvelopePlain, JSONRPCEnvelopeMCP:
+	default:
+		return fmt.Errorf("x-jsonrpc.envelope must be one of: plain, mcp")
+	}
+	if s.ClientPattern != ClientPatternJSONRPC {
+		return nil
+	}
+	for resourceName, resource := range s.Resources {
+		for endpointName, endpoint := range resource.Endpoints {
+			if strings.TrimSpace(endpoint.JSONRPCMethod) == "" {
+				return fmt.Errorf("resource %q endpoint %q: x-jsonrpc-method is required when client_pattern=jsonrpc", resourceName, endpointName)
+			}
+		}
+		for subresourceName, subresource := range resource.SubResources {
+			for endpointName, endpoint := range subresource.Endpoints {
+				if strings.TrimSpace(endpoint.JSONRPCMethod) == "" {
+					return fmt.Errorf("resource %q subresource %q endpoint %q: x-jsonrpc-method is required when client_pattern=jsonrpc", resourceName, subresourceName, endpointName)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func validateTierRouting(s *APISpec) error {
 	if s == nil || !s.HasTierRouting() {
 		return nil
 	}
-	if s.ClientPattern == "proxy-envelope" {
-		return fmt.Errorf("tier_routing is incompatible with client_pattern=proxy-envelope; tier routing needs per-request base URL and auth selection")
+	if s.ClientPattern == ClientPatternProxyEnvelope || s.ClientPattern == ClientPatternJSONRPC {
+		return fmt.Errorf("tier_routing is incompatible with client_pattern=%s; tier routing needs per-request base URL and auth selection", s.ClientPattern)
 	}
 	if len(s.TierRouting.Tiers) == 0 {
 		return fmt.Errorf("tier_routing.tiers is required when tier_routing is declared")

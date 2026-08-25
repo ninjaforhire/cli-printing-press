@@ -653,3 +653,19 @@ func TestCatalogFSContainsYAMLFiles(t *testing.T) {
 	}
 	assert.Greater(t, yamlCount, 0)
 }
+
+func TestCatalogEntryAcceptsJSONRPCClientPattern(t *testing.T) {
+	t.Parallel()
+
+	entry := Entry{
+		Name:          "jsonrpc-tools",
+		DisplayName:   "JSON-RPC Tools",
+		Description:   "JSON-RPC tool API",
+		Category:      "developer-tools",
+		SpecURL:       "https://example.com/openapi.yaml",
+		SpecFormat:    "yaml",
+		Tier:          "community",
+		ClientPattern: "jsonrpc",
+	}
+	require.NoError(t, entry.Validate())
+}

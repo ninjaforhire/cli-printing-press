@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-{{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
+{{- if or (eq .Auth.EffectiveOAuth2Grant "client_credentials") (eq .ClientPattern "jsonrpc")}}
 	"sync"
 {{- end}}
 	"time"
@@ -69,6 +69,10 @@ type Client struct {
 {{- if .HasTierRouting}}
 	requestTier string
 	limiters    map[string]*cliutil.AdaptiveLimiter
+{{- end}}
+{{- if eq .ClientPattern "jsonrpc"}}
+	jsonRPCMu sync.Mutex
+	jsonRPCID int64
 {{- end}}
 {{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
 	// ccMu serializes OAuth2 client_credentials token mints so concurrent
@@ -316,6 +320,29 @@ func serviceForPath(path string) string {
 	}
 {{- end}}
 	return "{{.Name}}" // default: API name slug
+}
+{{else if eq .ClientPattern "jsonrpc"}}
+type jsonRPCError struct {
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
+}
+
+type jsonRPCResponse struct {
+	Result json.RawMessage `json:"result"`
+	Error  *jsonRPCError  `json:"error"`
+}
+
+func (c *Client) nextJSONRPCID() int64 {
+	c.jsonRPCMu.Lock()
+	defer c.jsonRPCMu.Unlock()
+	c.jsonRPCID++
+	return c.jsonRPCID
+}
+
+func (c *Client) previewJSONRPCID() int64 {
+	c.jsonRPCMu.Lock()
+	defer c.jsonRPCMu.Unlock()
+	return c.jsonRPCID + 1
 }
 {{end}}
 
@@ -1127,8 +1154,12 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 {{- if .HasTierRouting}}
 	requestBaseURL := c.baseURLForRequest()
 {{- end}}
-{{- if eq .ClientPattern "proxy-envelope"}}
+{{- if or (eq .ClientPattern "proxy-envelope") (eq .ClientPattern "jsonrpc")}}
+{{- if eq .ClientPattern "jsonrpc"}}
+	// JSON-RPC: all requests are POSTed to BaseURL with a JSON-RPC envelope.
+{{- else}}
 	// Proxy-envelope: all requests are POST'd to BaseURL with a JSON envelope
+{{- end}}
 {{- if .EndpointTemplateVars}}
 	targetURL, urlErr := buildURL({{if .HasTierRouting}}requestBaseURL{{else}}c.BaseURL{{end}}, "", endpointVars)
 	if urlErr != nil {
@@ -1274,7 +1305,48 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		}
 {{- end}}
 
-{{- if eq .ClientPattern "proxy-envelope"}}
+{{- if eq .ClientPattern "jsonrpc"}}
+		arguments := map[string]any{}
+		if bodyBytes != nil {
+			if err := json.Unmarshal(bodyBytes, &arguments); err != nil {
+				return nil, 0, fmt.Errorf("parsing JSON-RPC params: %w", err)
+			}
+		}
+		for key, value := range params {
+			if value != "" {
+				arguments[key] = value
+			}
+		}
+		id := c.nextJSONRPCID()
+{{- if .JSONRPC.IsMCP}}
+		envelope := map[string]any{
+			"jsonrpc": {{printf "%q" .JSONRPC.EffectiveVersion}},
+			"id":      id,
+			"method":  "tools/call",
+			"params": map[string]any{
+				"name":      path,
+				"arguments": arguments,
+			},
+		}
+{{- else}}
+		envelope := map[string]any{
+			"jsonrpc": {{printf "%q" .JSONRPC.EffectiveVersion}},
+			"id":      id,
+			"method":  path,
+			"params":  arguments,
+		}
+{{- end}}
+		envelopeBytes, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshaling JSON-RPC envelope: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(envelopeBytes))
+		if err != nil {
+			return nil, 0, fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+{{- else if eq .ClientPattern "proxy-envelope"}}
 		// Build the proxy envelope
 		envelope := proxyEnvelope{
 			Service: serviceForPath(path),
@@ -1451,11 +1523,23 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 
 		// Success
 		if resp.StatusCode < 400 {
+{{- if eq .ClientPattern "jsonrpc"}}
+			var jsonRPC jsonRPCResponse
+			if err := json.Unmarshal(sanitizeJSONResponse(respBody), &jsonRPC); err != nil {
+				return nil, resp.StatusCode, fmt.Errorf("parsing JSON-RPC response: %w", err)
+			}
+			if jsonRPC.Error != nil {
+				return nil, resp.StatusCode, fmt.Errorf("JSON-RPC error %s: %s", string(jsonRPC.Error.Code), jsonRPC.Error.Message)
+			}
+			if jsonRPC.Result == nil {
+				return nil, resp.StatusCode, fmt.Errorf("parsing JSON-RPC response: missing result")
+			}
+{{- end}}
 {{- if .HasHTMLExtraction}}
 			c.lastContentType = resp.Header.Get("Content-Type")
 {{- end}}
 			c.limiter.OnSuccess()
-			if method != http.MethodGet && !c.DryRun {
+			if method != http.MethodGet{{if eq .ClientPattern "jsonrpc"}} && !readOnlyIntent{{end}} && !c.DryRun {
 				c.invalidateCache()
 			}
 			// Non-textual bodies (PDF, zip, image, octet-stream) must not be
@@ -1469,7 +1553,11 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 				}
 				return env, resp.StatusCode, nil
 			}
+{{- if eq .ClientPattern "jsonrpc"}}
+			return jsonRPC.Result, resp.StatusCode, nil
+{{- else}}
 			return json.RawMessage(sanitizeJSONResponse(respBody)), resp.StatusCode, nil
+{{- end}}
 		}
 
 		if !binaryResponse {
@@ -1564,7 +1652,39 @@ func (c *Client) dryRun(method, targetURL, path string, params map[string]string
 	authInfo, _ := c.authForRequest(context.Background())
 	authInfo.Value = authHeader
 {{- end}}
-{{- if eq .ClientPattern "proxy-envelope"}}
+{{- if eq .ClientPattern "jsonrpc"}}
+	arguments := map[string]any{}
+	if body != nil {
+		_ = json.Unmarshal(body, &arguments)
+	}
+	for key, value := range params {
+		if value != "" {
+			arguments[key] = value
+		}
+	}
+	id := c.previewJSONRPCID()
+{{- if .JSONRPC.IsMCP}}
+	envelope := map[string]any{
+		"jsonrpc": {{printf "%q" .JSONRPC.EffectiveVersion}},
+		"id":      id,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      path,
+			"arguments": arguments,
+		},
+	}
+{{- else}}
+	envelope := map[string]any{
+		"jsonrpc": {{printf "%q" .JSONRPC.EffectiveVersion}},
+		"id":      id,
+		"method":  path,
+		"params":  arguments,
+	}
+{{- end}}
+	fmt.Fprintf(os.Stderr, "POST %s\n", c.displayURL(targetURL, authHeader))
+	envelopeJSON, _ := json.MarshalIndent(envelope, "  ", "  ")
+	fmt.Fprintf(os.Stderr, "  Envelope:\n  %s\n", string(envelopeJSON))
+{{- else if eq .ClientPattern "proxy-envelope"}}
 	// Show the proxy envelope that would be sent
 	envelope := proxyEnvelope{
 		Service: serviceForPath(path),

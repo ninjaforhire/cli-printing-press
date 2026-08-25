@@ -128,7 +128,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 			c = c.WithTier({{printf "%q" .EffectiveTier}})
 {{- end}}
 
-			path := "{{.EffectivePath}}"
+			path := "{{if eq .ClientPattern "jsonrpc"}}{{.Endpoint.JSONRPCMethod}}{{else}}{{.EffectivePath}}{{end}}"
 {{- range .Endpoint.Params}}
 {{- if .Positional}}
 {{- $pi := positionalIndex $.Endpoint .Name}}

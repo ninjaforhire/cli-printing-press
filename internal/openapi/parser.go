@@ -72,6 +72,8 @@ const (
 	extensionDisplayName           = "x-display-name"
 	extensionWebsite               = "x-website"
 	extensionProxyRoutes           = "x-proxy-routes"
+	extensionJSONRPC               = "x-jsonrpc"
+	extensionJSONRPCMethod         = "x-jsonrpc-method"
 	extensionOrigin                = "x-origin"
 	extensionProviderName          = "x-providerName"
 	// extensionTenantEnvVar declares the env-var name that resolves the
@@ -552,6 +554,11 @@ func parseWithLocation(data []byte, lenient bool, strictRefs bool, location *url
 		websiteURL = ""
 	}
 
+	jsonRPC, err := parseJSONRPCExtension(doc)
+	if err != nil {
+		return nil, err
+	}
+
 	// Extract x-proxy-routes extension for proxy-envelope client pattern
 	var proxyRoutes map[string]string
 	if raw, ok := lookupOpenAPIInfoExtension(doc, extensionProxyRoutes); ok {
@@ -658,6 +665,7 @@ func parseWithLocation(data []byte, lenient bool, strictRefs bool, location *url
 		BasePath:                     basePath,
 		WebsiteURL:                   websiteURL,
 		ProxyRoutes:                  proxyRoutes,
+		JSONRPC:                      jsonRPC,
 		RateClass:                    rateClass,
 		Auth:                         auth,
 		Roles:                        roles,
@@ -822,6 +830,13 @@ func parseTypedExtension[T any](doc *openapi3.T, key string) (T, error) {
 		return zero, nil
 	}
 	return parseTypedExtensionRaw[T](key, raw)
+}
+
+func parseJSONRPCExtension(doc *openapi3.T) (spec.JSONRPCConfig, error) {
+	if raw, ok := lookupOpenAPIExtension(doc, extensionJSONRPC); ok {
+		return parseTypedExtensionRaw[spec.JSONRPCConfig](extensionJSONRPC, raw)
+	}
+	return spec.JSONRPCConfig{}, nil
 }
 
 func parseMCPExtension(doc *openapi3.T) (spec.MCPConfig, error) {
@@ -3243,6 +3258,11 @@ func mapResources(doc *openapi3.T, out *spec.APISpec, basePath string) error {
 				endpoint.DataSourceStrategy = pathDataSourceStrategy
 			}
 			endpoint.HappyArgs = readHappyArgsExtension(op.Extensions, fmt.Sprintf("%s %q", strings.ToUpper(method), path))
+			jsonRPCMethod, err := readJSONRPCMethodExtension(op.Extensions, fmt.Sprintf("%s %q", strings.ToUpper(method), path))
+			if err != nil {
+				return err
+			}
+			endpoint.JSONRPCMethod = jsonRPCMethod
 
 			// Namespace the inline-item synthetic name with the resource so
 			// two resources whose default GET endpoints both compute the
@@ -5165,6 +5185,21 @@ func readDataSourceStrategyExtension(extensions map[string]any, context string) 
 		warnf("%s: %s must be one of auto, local, live, got %q; ignoring", context, extensionDataSourceStrategy, strategy)
 		return ""
 	}
+}
+
+func readJSONRPCMethodExtension(extensions map[string]any, context string) (string, error) {
+	if extensions == nil {
+		return "", nil
+	}
+	raw, ok := extensions[extensionJSONRPCMethod]
+	if !ok || raw == nil {
+		return "", nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s: %s must be a string, got %T", context, extensionJSONRPCMethod, raw)
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func readHappyArgsExtension(extensions map[string]any, context string) string {

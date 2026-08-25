@@ -1,0 +1,2 @@
+set -euo pipefail
+"$BINARY" generate --spec testdata/golden/fixtures/jsonrpc-api.yaml --output "$CASE_ACTUAL_DIR/jsonrpc-golden" --force --validate=false

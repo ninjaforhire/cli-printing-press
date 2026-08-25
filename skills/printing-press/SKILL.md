@@ -2834,8 +2834,10 @@ cli-printing-press generate \
   --spec-source browser-sniffed \
   --traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json" \
   --force --lenient --validate
-# If proxy pattern was detected during browser-sniff, add:
+# If a proxy envelope was detected during browser-sniff, add:
 #   --client-pattern proxy-envelope
+# If a JSON-RPC 2.0 endpoint was detected, set client_pattern: jsonrpc in the
+# spec and include x-jsonrpc plus x-jsonrpc-method on every operation.
 ```
 
 Sniff-only (no original spec, browser-sniff was the primary source):
@@ -2849,8 +2851,10 @@ cli-printing-press generate \
   --spec-source browser-sniffed \
   --traffic-analysis "$DISCOVERY_DIR/traffic-analysis.json" \
   --force --lenient --validate
-# If proxy pattern was detected during browser-sniff, add:
+# If a proxy envelope was detected during browser-sniff, add:
 #   --client-pattern proxy-envelope
+# If a JSON-RPC 2.0 endpoint was detected, set client_pattern: jsonrpc in the
+# spec and include x-jsonrpc plus x-jsonrpc-method on every operation.
 ```
 
 Crowd-browser-sniff-enriched (original spec + crowd-discovered spec):

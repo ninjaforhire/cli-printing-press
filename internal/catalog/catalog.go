@@ -72,6 +72,7 @@ var validSpecSources = map[string]struct{}{
 var validClientPatterns = map[string]struct{}{
 	"rest":           {}, // Standard REST — default, no special client needed
 	"proxy-envelope": {}, // All requests wrapped in a POST envelope (e.g., Postman _api/ws/proxy)
+	"jsonrpc":        {}, // JSON-RPC 2.0 endpoint with per-operation method envelopes
 	"graphql":        {}, // GraphQL endpoint, needs query/mutation wrapper
 }
 
@@ -178,7 +179,7 @@ type Entry struct {
 	// payload vocabulary, not the generated CLI command language.
 	APILanguage string `yaml:"api_language,omitempty"`
 	// ClientPattern describes the HTTP client pattern needed. Empty defaults to "rest".
-	// Values: rest, proxy-envelope, graphql.
+	// Values: rest, proxy-envelope, jsonrpc, graphql.
 	ClientPattern string `yaml:"client_pattern,omitempty"`
 	// HTTPTransport describes the runtime HTTP transport. Empty defaults by provenance:
 	// official uses standard; non-official web-discovered sources use browser-chrome.
@@ -346,7 +347,7 @@ func (e *Entry) Validate() error {
 
 	if e.ClientPattern != "" {
 		if _, ok := validClientPatterns[e.ClientPattern]; !ok {
-			return fmt.Errorf("client_pattern must be one of: rest, proxy-envelope, graphql")
+			return fmt.Errorf("client_pattern must be one of: rest, proxy-envelope, jsonrpc, graphql")
 		}
 	}
 	if e.HTTPTransport != "" {

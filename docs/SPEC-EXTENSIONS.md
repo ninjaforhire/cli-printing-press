@@ -15,6 +15,7 @@ in the same change as any new `Extensions["x-*"]` lookup in that file.
 | `x-display-name` | `info` | `APISpec.DisplayName` | No |
 | `x-website` | `info` | `APISpec.WebsiteURL` | No |
 | `x-proxy-routes` | `info` | `APISpec.ProxyRoutes` | No |
+| `x-jsonrpc` | root or `info` | `APISpec.JSONRPC` | No |
 | `x-origin` | `info` | Google Discovery resource fallback | No |
 | `x-providerName` | `info` | Google Discovery resource fallback | No |
 | `x-roles` | root or `info` | `APISpec.Roles` | No |
@@ -49,6 +50,7 @@ in the same change as any new `Extensions["x-*"]` lookup in that file.
 | `x-pp-safe-probe` | operation | *skill guidance only; not parsed in parser.go* | No |
 | `x-pp-sync-walker` | operation | `Endpoint.Walker` | No |
 | `x-pp-dispatch-param` | parameter | `Param.DispatchParam` | No |
+| `x-jsonrpc-method` | operation | `Endpoint.JSONRPCMethod` | Required for `client_pattern: jsonrpc` |
 
 ## `info` Extensions
 
@@ -147,6 +149,42 @@ info:
   x-proxy-routes:
     /v1/search: search
     /v1/publish: publishing
+```
+
+### `x-jsonrpc`
+
+Configures the JSON-RPC 2.0 envelope for `client_pattern: jsonrpc`.
+
+Parsed field: `APISpec.JSONRPC`
+
+Rules:
+- Optional. `version` defaults to `"2.0"` and must resolve to that value.
+- `envelope` defaults to `plain`; supported values are `plain` and `mcp`.
+- `plain` sends `{jsonrpc, id, method, params}`.
+- `mcp` sends a `tools/call` request whose params contain the operation method as `name` and the input object as `arguments`.
+
+Example:
+
+```yaml
+client_pattern: jsonrpc
+x-jsonrpc:
+  envelope: mcp
+```
+
+### `x-jsonrpc-method`
+
+Names the JSON-RPC method invoked for one operation. It is required for every
+operation when `client_pattern: jsonrpc` is set.
+
+Parsed field: `Endpoint.JSONRPCMethod`
+
+Example:
+
+```yaml
+paths:
+  /tools/search:
+    post:
+      x-jsonrpc-method: search_meetings
 ```
 
 ### `x-origin` / `x-providerName`

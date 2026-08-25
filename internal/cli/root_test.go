@@ -95,3 +95,14 @@ func TestVersionCommandPrintsSelectedBinaryName(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, stdout.String(), CanonicalBinaryName+" ")
 }
+
+func TestNormalizeClientPatternAcceptsJSONRPC(t *testing.T) {
+	t.Parallel()
+
+	got, err := normalizeClientPattern("jsonrpc")
+	require.NoError(t, err)
+	require.Equal(t, "jsonrpc", got)
+
+	_, err = normalizeClientPattern("soap")
+	require.ErrorContains(t, err, "rest, proxy-envelope, jsonrpc")
+}

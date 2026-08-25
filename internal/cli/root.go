@@ -588,7 +588,7 @@ func newGenerateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Parse spec and show what would be generated without writing files (remote specs are still fetched)")
 	cmd.Flags().StringVar(&specSource, "spec-source", "", "Spec provenance: official, community, sniffed/browser-sniffed, docs (affects generated client defaults like rate limiting)")
 	cmd.Flags().StringVar(&category, "category", "", "Public-library category for non-catalog generation")
-	cmd.Flags().StringVar(&clientPattern, "client-pattern", "", "HTTP client pattern: rest (default), proxy-envelope (wraps requests in POST envelope)")
+	cmd.Flags().StringVar(&clientPattern, "client-pattern", "", "HTTP client pattern: rest (default), proxy-envelope, jsonrpc (single-endpoint JSON-RPC 2.0)")
 	cmd.Flags().StringVar(&httpTransport, "transport", "", "HTTP transport: standard, browser-http, browser-chrome, or browser-chrome-h3 (defaults based on spec provenance and reachability)")
 	cmd.Flags().StringVar(&mcpOrchestration, "mcp-orchestration", "", "MCP orchestration mode: endpoint-mirror or code")
 	cmd.Flags().StringSliceVar(&mcpTransport, "mcp-transport", nil, "MCP transports to compile: stdio, http, or a comma-separated list")
@@ -872,10 +872,10 @@ func normalizeSpecSource(value string) (string, error) {
 
 func normalizeClientPattern(value string) (string, error) {
 	switch value {
-	case "", "rest", "proxy-envelope":
+	case "", spec.ClientPatternREST, spec.ClientPatternProxyEnvelope, spec.ClientPatternJSONRPC:
 		return value, nil
 	default:
-		return "", fmt.Errorf("--client-pattern must be one of: rest, proxy-envelope (got %q)", value)
+		return "", fmt.Errorf("--client-pattern must be one of: rest, proxy-envelope, jsonrpc (got %q)", value)
 	}
 }
 

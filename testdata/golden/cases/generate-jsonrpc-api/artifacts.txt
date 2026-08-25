@@ -1,0 +1,2 @@
+jsonrpc-golden/internal/client/client.go
+jsonrpc-golden/internal/cli/promoted_meetings.go

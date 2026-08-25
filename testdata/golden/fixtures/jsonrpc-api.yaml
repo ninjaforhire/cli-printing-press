@@ -1,0 +1,27 @@
+name: jsonrpc-golden
+version: "0.1.0"
+description: Golden fixture for JSON-RPC 2.0 clients using an MCP tools/call envelope.
+base_url: https://api.example.com/mcp
+client_pattern: jsonrpc
+x-jsonrpc:
+  envelope: mcp
+auth:
+  type: bearer_token
+  header: Authorization
+  env_vars:
+    - JSONRPC_GOLDEN_TOKEN
+resources:
+  meetings:
+    description: Meeting tools
+    endpoints:
+      search:
+        method: POST
+        path: /tools/search
+        description: Search meetings
+        x-jsonrpc-method: search_meetings
+        meta:
+          mcp:read-only: "true"
+        body:
+          - name: query
+            type: string
+            description: Search terms

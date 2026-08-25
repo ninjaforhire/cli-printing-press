@@ -160,7 +160,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			c = c.WithTier({{printf "%q" .EffectiveTier}})
 {{- end}}
 
-			path := "{{.EffectivePath}}"
+			path := "{{if eq .ClientPattern "jsonrpc"}}{{.Endpoint.JSONRPCMethod}}{{else}}{{.EffectivePath}}{{end}}"
 {{- range .Endpoint.Params}}
 {{- if .Positional}}
 {{- $pi := positionalIndex $.Endpoint .Name}}
