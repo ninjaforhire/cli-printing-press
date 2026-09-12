@@ -34,3 +34,6 @@ AGENTS.override.md
 
 # Graphify knowledge graphs (regeneratable, AST-only)
 graphify-out/
+
+# Go build cache (regenerable, 138 MB of compiler artifacts)
+.gocache/
