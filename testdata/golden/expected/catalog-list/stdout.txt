@@ -1,6 +1,6 @@
 ai:
   elevenlabs           Generate, transform, transcribe, dub, and manage AI audio, voices, music, and conversational agents with ElevenLabs.
-  kie                  AI generation gateway for 100+ models — image, video, music, and voice generation via a unified async task API (Sora, Kling, Veo, Runway, Midjourney, Flux, Hailuo, Suno, and more)
+  kie                  AI generation gateway for 150+ market endpoints — image, video, music, speech, and utilities via a unified async task API (GPT Image 2.5, Nano Banana, Seedream, Kling, Seedance, Veo 3.1, Wan, MiniMax, Suno, ElevenLabs, and more)
 
 auth:
   stytch               Authentication and user management API
