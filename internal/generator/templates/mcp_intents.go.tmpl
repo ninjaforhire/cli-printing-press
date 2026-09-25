@@ -16,20 +16,29 @@
 package mcp
 
 import (
+	{{- if or .MCP.Intents .RecipeIntents}}
 	"context"
+{{- end}}
 {{- if .MCP.Intents}}
 	"encoding/json"
 {{- end}}
+	{{- if or .MCP.Intents .RecipeIntents}}
 	"fmt"
 	"strings"
+{{- end}}
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 {{- if .MCP.Intents}}
+	"{{modulePath}}/internal/mcp/bound"
+{{- end}}
+{{- if .MCP.Intents}}
 	"{{modulePath}}/internal/client"
 {{- end}}
-{{- if and .MCP.Intents .HasRequiredRoles}}
+{{- if .MCP.Intents}}
 	"{{modulePath}}/internal/cli"
+{{- end}}
+{{- if and .MCP.Intents .HasRequiredRoles}}
 	"{{modulePath}}/internal/config"
 {{- end}}
 {{- if .RecipeIntents}}
@@ -42,10 +51,22 @@ import (
 func RegisterIntents(s *server.MCPServer) {
 {{- range .MCP.Intents}}
 	s.AddTool(
-		mcplib.NewTool("{{.Name}}",
-			mcplib.WithDescription({{printf "%q" .Description}}),
-{{- range .Params}}
-			mcplib.{{mcpBindingFunc .Type}}("{{.Name}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" .Description}})),
+		mcplib.NewTool({{printf "%q" .Name}},
+			mcplib.WithDescription({{printf "%q" (composeIntentToolDescription $.APISpec .)}}),
+{{- range intentParamsForEmit .}}
+			mcplib.{{mcpBindingFunc .Type}}({{printf "%q" .Name}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" .Description}})),
+{{- end}}
+{{- if intentIsReadOnly $.APISpec .}}
+			mcplib.WithReadOnlyHintAnnotation(true),
+			mcplib.WithDestructiveHintAnnotation(false),
+			mcplib.WithIdempotentHintAnnotation(true),
+			mcplib.WithOpenWorldHintAnnotation(true),
+{{- else if intentIsDestructive $.APISpec .}}
+			mcplib.WithDestructiveHintAnnotation(true),
+			mcplib.WithOpenWorldHintAnnotation(true),
+{{- else}}
+			mcplib.WithDestructiveHintAnnotation(false),
+			mcplib.WithOpenWorldHintAnnotation(true),
 {{- end}}
 		),
 		handle{{pascal .Name}},
@@ -53,37 +74,57 @@ func RegisterIntents(s *server.MCPServer) {
 {{- end}}
 {{- range .RecipeIntents}}
 	s.AddTool(
-		mcplib.NewTool("{{.Name}}",
+		mcplib.NewTool({{printf "%q" .Name}},
 			mcplib.WithDescription({{printf "%q" .Description}}),
 {{- range .Params}}
-			mcplib.{{mcpBindingFunc (recipeParamTypeString .Type)}}("{{.InputName}}"{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" .Description}})),
+			mcplib.{{mcpBindingFunc (recipeParamTypeString .Type)}}({{printf "%q" .InputName}}{{if .Required}}, mcplib.Required(){{end}}, mcplib.Description({{printf "%q" .Description}})),
 {{- end}}
-{{- if .TakesArgs}}
-			mcplib.WithString("args", mcplib.Description("Additional positional arguments to append to the recipe command. Flag-like arguments are rejected; use structured parameters for flags.")),
-{{- end}}
+			mcplib.WithOpenWorldHintAnnotation(true),
 		),
 		handle{{pascal .Name}},
 	)
 {{- end}}
+{{- if and .PreserveMCPIntentRegistration (not .PreserveMCPIntentFile)}}
+	RegisterRecipeIntents(s)
+{{- end}}
 }
 
 {{range .MCP.Intents}}
-// handle{{pascal .Name}} runs the {{.Name}} intent: {{.Description}}
+// handle{{pascal .Name}} runs the {{.Name}} intent: {{composeIntentToolDescription $.APISpec .}}
 func handle{{pascal .Name}}(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 {{- if $.HasRequiredRoles}}
 	cfg, err := newMCPConfig()
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
-	c := newMCPClientFromConfig(cfg)
+	c, platformSession, err := newMCPClientFromConfig(ctx, cfg)
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
 {{- else}}
-	c, err := newMCPClient()
+	c, platformSession, err := newMCPClient(ctx)
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
 {{- end}}
+	if platformSession != nil {
+		defer platformSession.ZeroCredentials()
+	}
 
 	input := req.GetArguments()
+	if input == nil {
+		input = map[string]any{}
+	}
+{{- range intentParamsForEmit .}}
+{{- if .Default}}
+	if v, ok := input[{{printf "%q" .Name}}]; !ok || v == nil || v == "" {
+		input[{{printf "%q" .Name}}] = {{intentParamDefaultGo .}}
+	}
+{{- end}}
+{{- end}}
+	if err := cli.AdoptMCPOutputSemantics(platformSession, input); err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
 	scope := map[string]any{"input": input}
 
 {{range $i, $step := .Steps}}
@@ -116,14 +157,21 @@ func handle{{pascal .Name}}(ctx context.Context, req mcplib.CallToolRequest) (*m
 	}
 
 	if returnKey == "" {
-		return mcplib.NewToolResultText(`{"status":"ok"}`), nil
+		text := `{"status":"ok"}`
+		if platformSession != nil {
+			text = bound.WithMetadata(text, platformSession.OutputMetadata())
+		}
+		return mcplib.NewToolResultText(text), nil
 	}
 	out := scope[returnKey]
-	data, err := json.Marshal(out)
+	text, err := bound.JSON(out)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("encoding %s result: %v", returnKey, err)), nil
 	}
-	return mcplib.NewToolResultText(string(data)), nil
+	if platformSession != nil {
+		text = bound.WithMetadata(text, platformSession.OutputMetadata())
+	}
+	return mcplib.NewToolResultText(text), nil
 }
 {{end}}
 
@@ -136,38 +184,32 @@ func handle{{pascal .Name}}(ctx context.Context, req mcplib.CallToolRequest) (*m
 
 	input := req.GetArguments()
 	args := []string{
-{{- range .Command}}
-		{{printf "%q" .}},
-{{- end}}
 	}
-{{- range .Params}}
-{{- if eq (recipeParamTypeString .Type) "boolean"}}
-	args = appendRecipeBoolFlag(args, {{printf "%q" .FlagName}}, input[{{printf "%q" .InputName}}], {{.BoolDefault}})
+{{- range .Args}}
+{{- if .Static}}
+	args = append(args, {{printf "%q" .Token}})
+{{- else if .Param.Positional}}
+	var missing{{.Param.GoName}} bool
+	args, missing{{.Param.GoName}} = appendRecipePositional(args, input[{{printf "%q" .Param.InputName}}], {{.Param.Required}})
+	if missing{{.Param.GoName}} {
+		return mcplib.NewToolResultError({{printf "%q" (printf "%s is required" .Param.InputName)}}), nil
+	}
+{{- else if eq (recipeParamTypeString .Param.Type) "boolean"}}
+	args = appendRecipeBoolFlag(args, {{printf "%q" .Param.FlagName}}, input[{{printf "%q" .Param.InputName}}], {{.Param.BoolDefault}})
 {{- else}}
-	var missing{{.GoName}} bool
-	args, missing{{.GoName}} = appendRecipeStringFlag(args, {{printf "%q" .FlagName}}, input[{{printf "%q" .InputName}}], {{printf "%q" .Default}}, {{.Required}}, {{.UseEquals}})
-	if missing{{.GoName}} {
-		return mcplib.NewToolResultError({{printf "%q" (printf "--%s is required" .FlagName)}}), nil
+	var missing{{.Param.GoName}} bool
+	args, missing{{.Param.GoName}} = appendRecipeStringFlag(args, {{printf "%q" .Param.FlagName}}, input[{{printf "%q" .Param.InputName}}], {{printf "%q" .Param.Default}}, {{.Param.Required}}, {{.Param.UseEquals}})
+	if missing{{.Param.GoName}} {
+		return mcplib.NewToolResultError({{printf "%q" (printf "--%s is required" .Param.FlagName)}}), nil
 	}
 {{- end}}
-{{- end}}
-{{- if .TakesArgs}}
-	if raw, _ := input["args"].(string); strings.TrimSpace(raw) != "" {
-		tokens := cobratree.SplitShellArgs(raw)
-		for _, token := range tokens {
-			if strings.HasPrefix(token, "-") {
-				return mcplib.NewToolResultError(fmt.Sprintf("flag-like argument %q not allowed in args; use structured tool parameters instead", token)), nil
-			}
-		}
-		args = append(args, tokens...)
-	}
 {{- end}}
 
 	out, err := cobratree.RunCLICommand(ctx, recipeCLIPath, args)
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
-	return mcplib.NewToolResultText(out), nil
+	return cobratree.ToolResultFromCLICommand(out), nil
 }
 {{end}}
 
@@ -229,7 +271,7 @@ func callIntentEndpoint(ctx context.Context, c *client.Client, {{if .HasRequired
 	for k, v := range params {
 		placeholder := "{" + k + "}"
 		if strings.Contains(path, placeholder) {
-			path = strings.ReplaceAll(path, placeholder, formatMCPParamValue(v))
+			path = strings.ReplaceAll(path, placeholder, mcpPathValue(v))
 			continue
 		}
 		query[k] = formatMCPParamValue(v)
@@ -339,6 +381,14 @@ var (
 
 func init() {
 	recipeCLIPath, recipeCLIPathErr = cobratree.SiblingCLIPath()
+}
+
+func appendRecipePositional(args []string, value any, required bool) ([]string, bool) {
+	selected := recipeValueString(value)
+	if selected == "" {
+		return args, required
+	}
+	return append(args, selected), false
 }
 
 func appendRecipeStringFlag(args []string, name string, value any, defaultValue string, required bool, useEquals bool) ([]string, bool) {

@@ -12,53 +12,73 @@ import (
 )
 
 func newReportsExportReportYearCmd(flags *rootFlags) *cobra.Command {
+	var flagXApiVersion string
 	var flagYear int
 
 	cmd := &cobra.Command{
 		Use:         "report-year",
 		Aliases:     []string{"get"},
 		Short:       "Download the annual report as a binary file",
-		Example:     "  printing-press-golden-pp-cli reports export report-year --year 42",
-		Annotations: map[string]string{"pp:endpoint": "export.report-year", "pp:method": "GET", "pp:path": "/reports/{year}/export", "mcp:read-only": "true"},
+		Annotations: map[string]string{"pp:endpoint": "export.report-year", "pp:method": "GET", "pp:path": "/reports/{year}/export", "mcp:read-only": "true", "pp:requires-input": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Bare invocation of a command with required input prints help
 			// instead of pflag's terse "required flag not set" error. Optional-
 			// only read commands fall through so a bare call still executes.
-			if cmd.Flags().NFlag() == 0 && len(args) == 0 && !flags.dryRun {
+			// Machine callers (--json/--agent, which sets asJSON) get a usage
+			// error + exit 2 instead of silent exit-0 help, so an incomplete
+			// invocation is never mistaken for success.
+			if !hasChangedLocalFlags(cmd) && len(args) == 0 && !flags.dryRun {
+				if flags.asJSON {
+					if printErr := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+						"error": "requires input",
+						"usage": cmd.CommandPath() + " --help",
+					}, flags); printErr != nil {
+						return printErr
+					}
+					return usageErr(fmt.Errorf("%q requires input; run %q for usage", cmd.CommandPath(), cmd.CommandPath()+" --help"))
+				}
 				return cmd.Help()
 			}
-			if !cmd.Flags().Changed("year") && !flags.dryRun {
+			if !cmd.Flags().Changed("year") && flagYear == 0 && !flags.dryRun {
 				return fmt.Errorf("required flag \"%s\" not set", "year")
 			}
+			path := "/reports/{year}/export"
 			c, err := flags.newClient()
 			if err != nil {
 				return err
 			}
-
-			path := "/reports/{year}/export"
 			path = replacePathParam(path, "year", formatCLIParamValue(flagYear))
 			headerOverrides := map[string]string{
 				"Accept":                           "application/octet-stream",
 				"X-Printing-Press-Binary-Response": "true",
 			}
+
+			if cmd.Flags().Changed("x-api-version") || flagXApiVersion != "" {
+				headerOverrides["X-Api-Version"] = formatCLIParamValue(flagXApiVersion)
+			}
+
 			params := map[string]string{}
-			data, prov, err := resolveReadWithStrategy(cmd.Context(), c, flags, "auto", "export", false, path, params, headerOverrides, cmd.ErrOrStderr())
+			data, prov, err := resolveReadWithStrategyResponsePathAndJSONGuard(cmd.Context(), c, flags, "live", "export", false, path, params, headerOverrides, "", false, cmd.ErrOrStderr())
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 			_ = json.Valid
 			_ = os.Stderr
 			_ = prov
+			if handled, derr := handleBinaryResponseDelivery(cmd, flags, data); handled {
+				return derr
+			}
 			if flags.quiet {
 				return nil
 			}
 			if flags.asJSON || flags.csv || flags.compact || flags.plain || flags.selectFields != "" {
-				return fmt.Errorf("binary response cannot be rendered as structured output; redirect stdout or use --deliver file:<path>")
+				return usageErr(fmt.Errorf("binary response cannot be rendered as structured output; redirect stdout or use --deliver file:<path>"))
 			}
 			_, err = cmd.OutOrStdout().Write(data)
 			return err
 		},
 	}
+	cmd.Flags().StringVar(&flagXApiVersion, "x-api-version", "2026-04-01", "Required API version header.")
 	cmd.Flags().IntVar(&flagYear, "year", 0, "Year")
 
 	return cmd

@@ -3,9 +3,14 @@
 {{- $isGraphQLEndpoint := and (isGraphQL .APISpec) (eq .Endpoint.Path "/graphql") (or (eq .EndpointName "list") (eq .EndpointName "get"))}}
 {{- $isMultipart := endpointUsesMultipart .Endpoint}}
 {{- $isForm := endpointUsesForm .Endpoint}}
+{{- $isRaw := endpointUsesRawRequest .Endpoint}}
 {{- $hasJSONBody := and (or .Endpoint.Body .Endpoint.BodyJSONFallback) (not $isMultipart) (not $isForm)}}
-{{- $supportsAllPagination := and (ne .Endpoint.Pagination nil) (ne .Endpoint.Pagination.Type "id_walk")}}
+{{- $supportsAllPagination := and (ne .Endpoint.Pagination nil) (ne .Endpoint.Pagination.Type "id_walk") (eq .Endpoint.Method "GET") .IsReadOnly}}
+{{- $isMutationOutput := and (not .IsReadOnly) (not (or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD")))}}
 {{- $dataSourceStrategy := dataSourceStrategy .Resource .Endpoint}}
+{{- $documentedFields := compactFieldMapLiteral .Endpoint.Response.Item .Types}}
+{{- $skipLiveJSONGuard := or .Endpoint.UsesHTMLResponse .Endpoint.UsesBinaryResponse .Endpoint.UsesTextResponse}}
+{{- $hasHeaderOverrides := or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse .Endpoint.UsesTextResponse .Endpoint.UsesHTMLResponse (endpointHasHeaderParams .Endpoint)}}
 
 package cli
 
@@ -15,10 +20,10 @@ import (
 {{- end}}
 	"encoding/json"
 	"fmt"
-{{- if or (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
+{{- if or (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm) (not $isRaw)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
 	"io"
 {{- end}}
-{{- if and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) $isForm}}
+{{- if or (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) $isForm) .Endpoint.EmbeddedPagedSubresources}}
 	"net/url"
 {{- end}}
 	"os"
@@ -27,6 +32,9 @@ import (
 {{- end}}
 {{- if .IsAsync}}
 	"time"
+{{- end}}
+{{- if substackPublicationIDTemplatePath .APISpec .EffectivePath}}
+	"strings"
 {{- end}}
 {{ if $isGraphQLEndpoint}}
 	"{{modulePath}}/internal/client"
@@ -51,8 +59,12 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if $supportsAllPagination}}
 	var flagAll bool
 {{- end}}
-{{- if or (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
+{{- if or $isRaw (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
 	var stdinBody bool
+{{- end}}
+{{- if $isRaw}}
+	var rawBodyFile string
+	var rawContentType string
 {{- end}}
 {{- if .IsAsync}}
 	var flagWait bool
@@ -65,38 +77,59 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if .Endpoint.Alias}}
 		Aliases: []string{"{{.Endpoint.Alias}}"},
 {{- end}}
-		Short: "{{oneline .Endpoint.Description}}",
-{{- $example := exampleLine .CommandPath .EndpointName .Endpoint}}
-{{- if exampleNeedsTODO $example}}
-		// TODO: replace placeholder example values before relying on this for live dogfood.
+		Short: "{{oneline .Endpoint.Description}}{{if .Endpoint.Deprecated}} (deprecated){{end}}",
+{{- if .Endpoint.Deprecated}}
+		Long:  {{printf "%q" (endpointDeprecatedLong .Endpoint)}},
 {{- end}}
+{{- $example := exampleLine .CommandPath .EndpointName .Endpoint}}
+{{- $happyArgs := endpointHappyArgs .Endpoint}}
+{{- if $example}}
 		Example: {{printf "%q" $example}},
-		Annotations: map[string]string{"pp:endpoint": {{printf "%q" (printf "%s.%s" .ResourceName .EndpointName)}}, "pp:method": {{printf "%q" (upper .Endpoint.Method)}}, "pp:path": {{printf "%q" .EffectivePath}}{{if .IsReadOnly}}, "mcp:read-only": "true"{{end}}{{if .Endpoint.HappyArgs}}, "pp:happy-args": {{printf "%q" .Endpoint.HappyArgs}}{{end}}},
+{{- end}}
+		Annotations: map[string]string{ {{- if not .APISpec.IsLocalSQLiteSource}}"pp:endpoint": {{printf "%q" (printf "%s.%s" .ResourceName .EndpointName)}}, {{end}}"pp:method": {{printf "%q" (upper .Endpoint.Method)}}, "pp:path": {{printf "%q" .EffectivePath}}{{if .IsReadOnly}}, "mcp:read-only": "true"{{end}}{{if endpointHasRequiredInput .Endpoint}}, "pp:requires-input": "true"{{end}}{{if endpointSkipsErrorPathProbe .Endpoint}}, "pp:no-error-path-probe": "true"{{end}}{{if $happyArgs}}, "pp:happy-args": {{printf "%q" $happyArgs}}{{end}}{{if .Endpoint.HappyStdin}}, "pp:happy-stdin": {{printf "%q" .Endpoint.HappyStdin}}{{end}}{{if .Endpoint.LiveDogfoodRequiresTier}}, "pp:requires-tier": {{printf "%q" .Endpoint.LiveDogfoodRequiresTier}}{{end}}{{if .Endpoint.Deprecated}}, "pp:deprecated": "true"{{end}}},
 		RunE: func(cmd *cobra.Command, args []string) error {
 {{- if endpointHasRequiredInput .Endpoint}}
 			// Bare invocation of a command with required input prints help
 			// instead of pflag's terse "required flag not set" error. Optional-
 			// only read commands fall through so a bare call still executes.
-			if cmd.Flags().NFlag() == 0 && len(args) == 0 && !flags.dryRun {
+			// Machine callers (--json/--agent, which sets asJSON) get a usage
+			// error + exit 2 instead of silent exit-0 help, so an incomplete
+			// invocation is never mistaken for success.
+			if !hasChangedLocalFlags(cmd) && len(args) == 0 && !flags.dryRun {
+				if flags.asJSON {
+					if printErr := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+						"error": "requires input",
+						"usage": cmd.CommandPath() + " --help",
+					}, flags); printErr != nil {
+						return printErr
+					}
+					return usageErr(fmt.Errorf("%q requires input; run %q for usage", cmd.CommandPath(), cmd.CommandPath()+" --help"))
+				}
 				return cmd.Help()
 			}
 {{- end}}
 {{- if positionalArgs .Endpoint}}
 			if len(args) == 0 {
-				return cmd.Help()
+				// A missing required positional is a usage error in every output
+				// mode (matches command_promoted.go.tmpl). Machine callers
+				// (--json/--agent) also get a JSON error envelope on stdout;
+				// usageErr sets exit 2.
+				if flags.asJSON {
+					if printErr := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+						"error": "missing required argument",
+						"usage": fmt.Sprintf("%s%s", cmd.CommandPath(), "{{positionalArgs .Endpoint}}"),
+					}, flags); printErr != nil {
+						return printErr
+					}
+				}
+				return usageErr(fmt.Errorf("missing required argument\nUsage: %s%s", cmd.CommandPath(), "{{positionalArgs .Endpoint}}"))
 			}
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .Required (not .Positional) (not .Default)}}
-{{- if paramHasEnvDefault .}}
-			if !{{flagChangedExpr .}} && flag{{camel (paramIdent .)}} == "" && !flags.dryRun {
+			if {{flagRequiredUnsatisfiedExpr .}} {
 				return fmt.Errorf("required flag \"%s\" not set", "{{publicFlagName .}}")
 			}
-{{- else}}
-			if !{{flagChangedExpr .}} && !flags.dryRun {
-				return fmt.Errorf("required flag \"%s\" not set", "{{publicFlagName .}}")
-			}
-{{- end}}
 {{- end}}
 {{- end}}
 {{- range .Endpoint.Params}}
@@ -134,12 +167,17 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			}
 {{- end}}
 {{- end}}
-{{- if or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH") (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
+{{- if or $isRaw (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH") (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
 {{- if or $isMultipart $isForm}}
 {{- bodyRequiredChecks .Endpoint "\t\t\t"}}
 {{- else}}
 			if !stdinBody {
 {{- bodyRequiredChecks .Endpoint "\t\t\t\t"}}
+			}
+{{- end}}
+{{- if and $isRaw .Endpoint.BodyRequired}}
+			if rawBodyFile == "" && !stdinBody && !flags.dryRun {
+				return fmt.Errorf("raw request body required: pass --file <path> or --stdin")
 			}
 {{- end}}
 {{- end}}
@@ -152,20 +190,12 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				return err
 			}
 {{- end}}
-			c, err := flags.newClient()
-			if err != nil {
-				return err
-			}
-{{- if .EffectiveTier}}
-			c = c.WithTier({{printf "%q" .EffectiveTier}})
-{{- end}}
-
 			path := "{{.EffectivePath}}"
 {{- range .Endpoint.Params}}
 {{- if .Positional}}
 {{- $pi := positionalIndex $.Endpoint .Name}}
-{{- if gt $pi 0}}
-			if len(args) < {{add $pi 1}} {
+{{- if or (gt $pi 0) (pathContainsParam $.Endpoint.Path .Name)}}
+			if len(args) < {{add $pi 1}}{{if pathContainsParam $.Endpoint.Path .Name}} || args[{{$pi}}] == ""{{end}} {
 				return usageErr(fmt.Errorf("{{.Name}} is required\nUsage: %s <%s>", cmd.CommandPath(), "{{.Name}}"))
 			}
 {{- end}}
@@ -174,9 +204,36 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- end}}
 {{- end}}
+			c, err := flags.newClient()
+			if err != nil {
+				return err
+			}
+{{- if .EffectiveTier}}
+			c = c.WithTier({{printf "%q" .EffectiveTier}})
+{{- end}}
+{{- if substackPublicationIDTemplatePath .APISpec .EffectivePath}}
+			if err := resolveSubstackPublicationIDTemplate(cmd.Context(), c, flags); err != nil {
+				return err
+			}
+			path = strings.ReplaceAll(path, "{publication_id}", c.Config.TemplateVars["publication_id"])
+{{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .PathParam (not .Positional)}}
 			path = replacePathParam(path, "{{.Name}}", formatCLIParamValue(flag{{camel (paramIdent .)}}))
+{{- end}}
+{{- end}}
+{{- range .Endpoint.Params}}
+{{- if isDeepObjectQueryParam .}}
+			if flag{{camel (paramIdent .)}} != "" {
+				path, err = appendDeepObjectQueryParam(path, "{{paramWireName .}}", flag{{camel (paramIdent .)}})
+				if err != nil {
+					return err
+				}
+			}
+{{- else if isArrayQueryParam .}}
+			if flag{{camel (paramIdent .)}} != "" {
+				path = appendArrayQueryParam(path, "{{paramWireName .}}", flag{{camel (paramIdent .)}}, "{{queryParamStyle .}}", {{queryParamExplodes .}})
+			}
 {{- end}}
 {{- end}}
 {{- if $isGraphQLEndpoint}}
@@ -189,15 +246,15 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			htmlRequestParams["{{.Name}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+			if {{readParamPresenceExpr .}} {
 				htmlRequestParams["{{.Name}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
 {{- end}}
 
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
 			headerOverrides := map[string]string{
 {{- range .Endpoint.HeaderOverrides}}
 				"{{.Name}}": "{{.Value}}",
@@ -205,11 +262,22 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if .Endpoint.UsesBinaryResponse}}
 				"X-Printing-Press-Binary-Response": "true",
 {{- end}}
+{{- if .Endpoint.UsesTextResponse}}
+				"X-Printing-Press-Text-Response": "true",
+{{- end}}
+{{- if .Endpoint.UsesHTMLResponse}}
+				"X-Printing-Press-HTML-Response": "true",
+{{- end}}
 			}
+			{{ range .Endpoint.Params}}{{if and (paramIsHeader .) (not .Positional)}}
+				if {{paramPresenceExpr .}} {
+				headerOverrides[{{printf "%q" .Name}}] = formatCLIParamValue(flag{{camel (paramIdent .)}})
+			}
+			{{ end}}{{ end}}
 {{- end}}
 
 {{- if or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD")}}
-{{- if and $isGraphQLEndpoint (eq .EndpointName "list")}}
+{{- if and $isGraphQLEndpoint (eq .EndpointName "list") .IsReadOnly}}
 {{- if .HasStore}}
 			if err := validateDataSourceStrategy(flags, "{{$dataSourceStrategy}}"); err != nil {
 				return err
@@ -272,7 +340,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				}
 			}
 {{- end}}
-{{- else if and $isGraphQLEndpoint (eq .EndpointName "get")}}
+{{- else if and $isGraphQLEndpoint (eq .EndpointName "get") .IsReadOnly}}
 {{- if .HasStore}}
 			if err := validateDataSourceStrategy(flags, "{{$dataSourceStrategy}}"); err != nil {
 				return err
@@ -309,17 +377,26 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			}
 {{- end}}
 {{- else if $supportsAllPagination}}
+{{- if and $skipLiveJSONGuard (not .HasStore)}}
+			if flagAll {
+{{- if .Endpoint.UsesHTMLResponse}}
+				return fmt.Errorf("--all is not supported for live HTML responses; omit --all to extract the current page")
+{{- else}}
+				return fmt.Errorf("--all is not supported for live binary/text responses; omit --all to fetch the current page")
+{{- end}}
+			}
+{{- end}}
 {{- if .HasStore}}
-			data, prov, err := resolvePaginatedReadWithStrategy(cmd.Context(), c, flags, "{{$dataSourceStrategy}}", "{{lower .ResourceName}}", path, map[string]string{
+			{{if $skipLiveJSONGuard}}data, prov, err := resolvePaginatedReadWithStrategyAndJSONGuard{{else}}data, prov, err := resolvePaginatedReadWithStrategy{{end}}(cmd.Context(), c, flags, "{{if localReadSupported .Endpoint}}{{$dataSourceStrategy}}{{else}}live{{end}}", "{{lower .ResourceName}}", path, retainCLIQueryParams(cmd, map[string]string{
 {{- range .Endpoint.Params}}
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
 				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
-			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}", cmd.ErrOrStderr())
+			}, {{queryParamFlagNamesLiteral .Endpoint}}, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}"), {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", {{.PageSize}}, "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}", {{printf "%q" .Endpoint.ResponsePath}}, {{if $skipLiveJSONGuard}}false, {{if .Endpoint.UsesHTMLResponse}}liveAllRejectHTML{{else}}liveAllRejectNonJSON{{end}}, {{end}}cmd.ErrOrStderr())
 {{- else}}
 {{- if eq $dataSourceStrategy "local"}}
 			return fmt.Errorf("data_source_strategy local requires the local store data layer")
@@ -328,16 +405,16 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				return fmt.Errorf("no local data source for this command; use --data-source live or --data-source auto")
 			}
 {{- end}}
-			data, err := paginatedGet(cmd.Context(), c, path, map[string]string{
+			data, err := paginatedGetWithResponsePath(cmd.Context(), c, path, retainCLIQueryParams(cmd, map[string]string{
 {{- range .Endpoint.Params}}
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
 				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
-			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}")
+			}, {{queryParamFlagNamesLiteral .Endpoint}}, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}"), {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}}, flagAll && !flags.dryRun, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", {{.PageSize}}, "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}", {{printf "%q" .Endpoint.ResponsePath}})
 {{- end}}
 {{- else}}
 			params := map[string]string{}
@@ -345,14 +422,34 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			params["{{paramWireName .}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+				if {{if or (eq $.Endpoint.Method "GET") (eq $.Endpoint.Method "HEAD")}}{{readParamPresenceExpr .}}{{else}}{{paramPresenceExpr .}}{{end}} {
 				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
 {{- if .HasStore}}
-			data, prov, err := resolveReadWithStrategy(cmd.Context(), c, flags, "{{$dataSourceStrategy}}", "{{lower .ResourceName}}", {{localReadIsList $supportsAllPagination .APISpec .EndpointName .Endpoint}}, path, params, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, cmd.ErrOrStderr())
+{{- if .IsReadOnly}}
+{{- if $skipLiveJSONGuard}}
+			data, prov, err := resolveReadWithStrategyResponsePathAndJSONGuard(cmd.Context(), c, flags, "{{if localReadSupported .Endpoint}}{{$dataSourceStrategy}}{{else}}live{{end}}", "{{lower .ResourceName}}", {{localReadIsList $supportsAllPagination .APISpec .EndpointName .Endpoint}}, path, params, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}}, {{printf "%q" .Endpoint.ResponsePath}}, false, cmd.ErrOrStderr())
+{{- else}}
+			data, prov, err := resolveReadWithStrategyAndResponsePath(cmd.Context(), c, flags, "{{if localReadSupported .Endpoint}}{{$dataSourceStrategy}}{{else}}live{{end}}", "{{lower .ResourceName}}", {{localReadIsList $supportsAllPagination .APISpec .EndpointName .Endpoint}}, path, params, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}}, {{printf "%q" .Endpoint.ResponsePath}}, cmd.ErrOrStderr())
+{{- end}}
+{{- else}}
+{{- if .HasStore}}
+			var prov DataProvenance
+{{- end}}
+{{- if $hasHeaderOverrides}}
+			data, err := c.GetMutatingWithHeaders(cmd.Context(), path, params, headerOverrides)
+{{- else}}
+			data, err := c.GetMutating(cmd.Context(), path, params)
+{{- end}}
+{{- if .HasStore}}
+			if err == nil {
+				prov = attachFreshness(DataProvenance{Source: "live"}, flags)
+			}
+{{- end}}
+{{- end}}
 {{- else}}
 {{- if eq $dataSourceStrategy "local"}}
 			return fmt.Errorf("data_source_strategy local requires the local store data layer")
@@ -361,10 +458,18 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				return fmt.Errorf("no local data source for this command; use --data-source live or --data-source auto")
 			}
 {{- end}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+			{{- if .IsReadOnly}}
 			data, err := c.GetWithHeaders(cmd.Context(), path, params, headerOverrides)
+			{{- else}}
+			data, err := c.GetMutatingWithHeaders(cmd.Context(), path, params, headerOverrides)
+			{{- end}}
 {{- else}}
+			{{- if .IsReadOnly}}
 			data, err := c.Get(cmd.Context(), path, params)
+			{{- else}}
+			data, err := c.GetMutating(cmd.Context(), path, params)
+			{{- end}}
 {{- end}}
 {{- end}}
 {{- end}}
@@ -374,17 +479,23 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			params["{{paramWireName .}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+			if {{paramPresenceExpr .}} {
 				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
-{{- if $isMultipart}}
+{{- if $isRaw}}
+			rawBody, err := readRawRequestBody(rawBodyFile, stdinBody)
+			if err != nil {
+				return err
+			}
+			data, statusCode, err := c.{{if .IsReadOnly}}SendRawRead{{else}}SendRaw{{end}}(cmd.Context(), "POST", path, params, rawBody, rawContentType, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}})
+{{- else if $isMultipart}}
 			fields := map[string]string{}
 			fileFields := map[string]string{}
 {{multipartBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
 			data, statusCode, err := c.PostMultipartWithParamsAndHeaders(cmd.Context(), path, params, fields, fileFields, headerOverrides)
 {{- else}}
 			data, statusCode, err := c.PostMultipartWithParams(cmd.Context(), path, params, fields, fileFields)
@@ -392,27 +503,48 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- else if $isForm}}
 			fields := url.Values{}
 {{formBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PostQueryFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PostFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PostQueryFormWithParams(cmd.Context(), path, params, fields)
 {{- else}}
 			data, statusCode, err := c.PostFormWithParams(cmd.Context(), path, params, fields)
 {{- end}}
+{{- end}}
 {{- else}}
-			var body map[string]any
+			var body any
 			if stdinBody {
 				stdinData, err := io.ReadAll(os.Stdin)
 				if err != nil {
 					return fmt.Errorf("reading stdin: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				var jsonBody []any
+{{- else}}
 				var jsonBody map[string]any
+{{- end}}
 				if err := json.Unmarshal(stdinData, &jsonBody); err != nil {
 					return fmt.Errorf("parsing stdin JSON: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				if jsonBody == nil {
+					return fmt.Errorf("parsing stdin JSON: expected JSON array, got null")
+				}
+{{- end}}
 				body = jsonBody
 			} else {
-				body = map[string]any{}
-{{bodyMapForEndpoint .Endpoint "\t\t\t\t"}}			}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if and .Endpoint.BodyJSONFallback .Endpoint.BodyIsArray}}
+				body = []any{}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- else}}
+				bodyMap := map[string]any{}
+				{{assignJSONBodyMap .Endpoint "bodyMap" "body"}}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- end}}			}
+{{- if $hasHeaderOverrides}}
 {{- if .IsReadOnly}}
 			data, statusCode, err := c.PostQueryWithParamsAndHeaders(cmd.Context(), path, params, body, headerOverrides)
 {{- else}}
@@ -427,35 +559,54 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- end}}
 {{- else if eq .Endpoint.Method "DELETE"}}
-{{- if or (not $hasJSONBody) (endpointHasRequestParams .Endpoint)}}
+{{- if or $isRaw (not $hasJSONBody) (endpointHasRequestParams .Endpoint)}}
 			params := map[string]string{}
 {{- range .Endpoint.Params}}
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			params["{{paramWireName .}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+			if {{paramPresenceExpr .}} {
 				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
 {{- end}}
-{{- if $hasJSONBody}}
-			var body map[string]any
+{{- if $isRaw}}
+			rawBody, err := readRawRequestBody(rawBodyFile, stdinBody)
+			if err != nil {
+				return err
+			}
+			data, statusCode, err := c.{{if .IsReadOnly}}SendRawRead{{else}}SendRaw{{end}}(cmd.Context(), "DELETE", path, params, rawBody, rawContentType, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}})
+{{- else if $hasJSONBody}}
+			var body any
 			if stdinBody {
 				stdinData, err := io.ReadAll(os.Stdin)
 				if err != nil {
 					return fmt.Errorf("reading stdin: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				var jsonBody []any
+{{- else}}
 				var jsonBody map[string]any
+{{- end}}
 				if err := json.Unmarshal(stdinData, &jsonBody); err != nil {
 					return fmt.Errorf("parsing stdin JSON: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				if jsonBody == nil {
+					return fmt.Errorf("parsing stdin JSON: expected JSON array, got null")
+				}
+{{- end}}
 				body = jsonBody
 			} else {
-				body = map[string]any{}
-{{bodyMapForEndpoint .Endpoint "\t\t\t\t"}}			}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if and .Endpoint.BodyJSONFallback .Endpoint.BodyIsArray}}
+				body = []any{}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- else}}
+				bodyMap := map[string]any{}
+				{{assignJSONBodyMap .Endpoint "bodyMap" "body"}}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- end}}			}
+{{- if $hasHeaderOverrides}}
 {{- if endpointHasRequestParams .Endpoint}}
 			data, statusCode, err := c.DeleteWithParamsAndBodyAndHeaders(cmd.Context(), path, params, body, headerOverrides)
 {{- else}}
@@ -469,7 +620,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- end}}
 {{- else}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
 			data, statusCode, err := c.DeleteWithParamsAndHeaders(cmd.Context(), path, params, headerOverrides)
 {{- else}}
 			data, statusCode, err := c.DeleteWithParams(cmd.Context(), path, params)
@@ -481,48 +632,91 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			params["{{paramWireName .}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+			if {{paramPresenceExpr .}} {
 				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
-{{- if $isMultipart}}
+{{- if $isRaw}}
+			rawBody, err := readRawRequestBody(rawBodyFile, stdinBody)
+			if err != nil {
+				return err
+			}
+			data, statusCode, err := c.{{if .IsReadOnly}}SendRawRead{{else}}SendRaw{{end}}(cmd.Context(), "PUT", path, params, rawBody, rawContentType, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}})
+{{- else if $isMultipart}}
 			fields := map[string]string{}
 			fileFields := map[string]string{}
 {{multipartBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryMultipartWithParamsAndHeaders(cmd.Context(), path, params, fields, fileFields, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PutMultipartWithParamsAndHeaders(cmd.Context(), path, params, fields, fileFields, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryMultipartWithParams(cmd.Context(), path, params, fields, fileFields)
 {{- else}}
 			data, statusCode, err := c.PutMultipartWithParams(cmd.Context(), path, params, fields, fileFields)
+{{- end}}
 {{- end}}
 {{- else if $isForm}}
 			fields := url.Values{}
 {{formBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PutFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryFormWithParams(cmd.Context(), path, params, fields)
 {{- else}}
 			data, statusCode, err := c.PutFormWithParams(cmd.Context(), path, params, fields)
 {{- end}}
+{{- end}}
 {{- else}}
-			var body map[string]any
+			var body any
 			if stdinBody {
 				stdinData, err := io.ReadAll(os.Stdin)
 				if err != nil {
 					return fmt.Errorf("reading stdin: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				var jsonBody []any
+{{- else}}
 				var jsonBody map[string]any
+{{- end}}
 				if err := json.Unmarshal(stdinData, &jsonBody); err != nil {
 					return fmt.Errorf("parsing stdin JSON: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				if jsonBody == nil {
+					return fmt.Errorf("parsing stdin JSON: expected JSON array, got null")
+				}
+{{- end}}
 				body = jsonBody
 			} else {
-				body = map[string]any{}
-{{bodyMapForEndpoint .Endpoint "\t\t\t\t"}}			}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if and .Endpoint.BodyJSONFallback .Endpoint.BodyIsArray}}
+				body = []any{}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- else}}
+				bodyMap := map[string]any{}
+				{{assignJSONBodyMap .Endpoint "bodyMap" "body"}}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- end}}			}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryWithParamsAndHeaders(cmd.Context(), path, params, body, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PutWithParamsAndHeaders(cmd.Context(), path, params, body, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PutQueryWithParams(cmd.Context(), path, params, body)
 {{- else}}
 			data, statusCode, err := c.PutWithParams(cmd.Context(), path, params, body)
+{{- end}}
 {{- end}}
 {{- end}}
 {{- else if eq .Endpoint.Method "PATCH"}}
@@ -531,74 +725,157 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- if and .Positional (not (pathContainsParam $.Endpoint.Path .Name))}}
 			params["{{paramWireName .}}"] = args[{{positionalIndex $.Endpoint .Name}}]
 {{- end}}
-{{- if and (not .Positional) (not .PathParam)}}
-			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
+{{- if and (not .Positional) (not .PathParam) (not (paramIsHeader .)) (not (isArrayQueryParam .)) (not (isDeepObjectQueryParam .))}}
+			if {{paramPresenceExpr .}} {
 				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
-{{- if $isMultipart}}
+{{- if $isRaw}}
+			rawBody, err := readRawRequestBody(rawBodyFile, stdinBody)
+			if err != nil {
+				return err
+			}
+			data, statusCode, err := c.{{if .IsReadOnly}}SendRawRead{{else}}SendRaw{{end}}(cmd.Context(), "PATCH", path, params, rawBody, rawContentType, {{if $hasHeaderOverrides}}headerOverrides{{else}}nil{{end}})
+{{- else if $isMultipart}}
 			fields := map[string]string{}
 			fileFields := map[string]string{}
 {{multipartBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryMultipartWithParamsAndHeaders(cmd.Context(), path, params, fields, fileFields, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PatchMultipartWithParamsAndHeaders(cmd.Context(), path, params, fields, fileFields, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryMultipartWithParams(cmd.Context(), path, params, fields, fileFields)
 {{- else}}
 			data, statusCode, err := c.PatchMultipartWithParams(cmd.Context(), path, params, fields, fileFields)
+{{- end}}
 {{- end}}
 {{- else if $isForm}}
 			fields := url.Values{}
 {{formBodyMaps .Endpoint.Body "\t\t\t"}}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PatchFormWithParamsAndHeaders(cmd.Context(), path, params, fields, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryFormWithParams(cmd.Context(), path, params, fields)
 {{- else}}
 			data, statusCode, err := c.PatchFormWithParams(cmd.Context(), path, params, fields)
 {{- end}}
+{{- end}}
 {{- else}}
-			var body map[string]any
+			var body any
 			if stdinBody {
 				stdinData, err := io.ReadAll(os.Stdin)
 				if err != nil {
 					return fmt.Errorf("reading stdin: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				var jsonBody []any
+{{- else}}
 				var jsonBody map[string]any
+{{- end}}
 				if err := json.Unmarshal(stdinData, &jsonBody); err != nil {
 					return fmt.Errorf("parsing stdin JSON: %w", err)
 				}
+{{- if .Endpoint.BodyIsArray}}
+				if jsonBody == nil {
+					return fmt.Errorf("parsing stdin JSON: expected JSON array, got null")
+				}
+{{- end}}
 				body = jsonBody
 			} else {
-				body = map[string]any{}
-{{bodyMapForEndpoint .Endpoint "\t\t\t\t"}}			}
-{{- if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}
+{{- if and .Endpoint.BodyJSONFallback .Endpoint.BodyIsArray}}
+				body = []any{}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- else}}
+				bodyMap := map[string]any{}
+				{{assignJSONBodyMap .Endpoint "bodyMap" "body"}}
+{{bodyMapForEndpointVars .Endpoint "\t\t\t\t" "bodyMap" "body"}}{{- end}}			}
+{{- if $hasHeaderOverrides}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryWithParamsAndHeaders(cmd.Context(), path, params, body, headerOverrides)
+{{- else}}
 			data, statusCode, err := c.PatchWithParamsAndHeaders(cmd.Context(), path, params, body, headerOverrides)
+{{- end}}
+{{- else}}
+{{- if .IsReadOnly}}
+			data, statusCode, err := c.PatchQueryWithParams(cmd.Context(), path, params, body)
 {{- else}}
 			data, statusCode, err := c.PatchWithParams(cmd.Context(), path, params, body)
 {{- end}}
 {{- end}}
 {{- end}}
+{{- end}}
 {{- if eq .Endpoint.Method "DELETE"}}
 			if err != nil {
-				return classifyDeleteError(err, flags)
+				return classifyDeleteError(cmd.OutOrStdout(), err, flags)
 			}
 {{- else}}
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
+			}
+{{- if and .IsReadOnly (not .HasStore)}}
+			if isDryRunResponse(c.IsDryRun(), data) {
+				if flags.asJSON || (!isTerminal(cmd.OutOrStdout()) && !flags.csv && !flags.quiet && !flags.plain) {
+					return printOutputWithFlagsMeta(cmd.OutOrStdout(), data, flags, map[string]any{"source": "dry-run"}, {{$documentedFields}})
+				}
+				return nil
 			}
 {{- end}}
-{{- if .Endpoint.UsesBinaryResponse}}
+{{- end}}
+{{- if and (not $isMutationOutput) (not (or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD")))}}
+			_ = statusCode
+{{- if .HasStore}}
+			prov := attachFreshness(DataProvenance{Source: "live"}, flags)
+{{- end}}
+{{- end}}
+{{- if .Endpoint.UsesTextResponse}}
+			_ = os.Stderr
+{{- if and .HasStore (not $isMutationOutput)}}
+			_ = prov
+{{- end}}
+			var textEnvelope struct {
+				Format string `json:"format"`
+				Body   string `json:"body"`
+			}
+			if err := json.Unmarshal(data, &textEnvelope); err != nil {
+				return fmt.Errorf("decoding text response envelope: %w", err)
+			}
+			if flags.quiet {
+				return nil
+			}
+			if flags.asJSON || flags.agent || flags.csv || flags.compact || flags.selectFields != "" {
+				if flags.csv {
+					data = append(append(json.RawMessage{'['}, data...), ']')
+				}
+				return printOutputWithFlagsMeta(cmd.OutOrStdout(), data, flags, map[string]any{"source": "live"}, {{$documentedFields}})
+			}
+			_, err = cmd.OutOrStdout().Write([]byte(textEnvelope.Body))
+			return err
+{{- else if .Endpoint.UsesBinaryResponse}}
 			_ = json.Valid
 			_ = os.Stderr
 {{- if or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH") (eq .Endpoint.Method "DELETE")}}
 			_ = statusCode
 {{- end}}
-{{- if and .HasStore (or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD") $supportsAllPagination $isGraphQLEndpoint)}}
+{{- if and .HasStore (not $isMutationOutput)}}
 			_ = prov
 {{- end}}
+			if handled, derr := handleBinaryResponseDelivery(cmd, flags, data); handled {
+				return derr
+			}
 			if flags.quiet {
 				return nil
 			}
 			if flags.asJSON || flags.csv || flags.compact || flags.plain || flags.selectFields != "" {
-				return fmt.Errorf("binary response cannot be rendered as structured output; redirect stdout or use --deliver file:<path>")
+				return usageErr(fmt.Errorf("binary response cannot be rendered as structured output; redirect stdout or use --deliver file:<path>"))
 			}
 			_, err = cmd.OutOrStdout().Write(data)
 			return err
@@ -608,14 +885,10 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				data = filterJSONByFieldValues(data, {{printf "%q" .Field}}, formatCLIParamValue(flag{{camel (paramIdent .Param)}}))
 			}
 {{- end}}
-{{- if endpointNeedsClientLimit .Endpoint}}
-			// Honor --limit when the API accepts but ignores ?limit=N.
-			data = truncateJSONArray(data, flagLimit)
-{{- end}}
-
 {{- if .Endpoint.UsesHTMLResponse}}
 			if !flags.dryRun {
 				data, err = extractHTMLResponse(data, htmlExtractionOptions{
+					Context: cmd.Context(),
 					Mode: "{{with .Endpoint.HTMLExtract}}{{.EffectiveMode}}{{else}}page{{end}}",
 					BaseURL: htmlExtractionRequestURL(c.BaseURL, path, htmlRequestParams),
 					LinkPrefixes: []string{
@@ -625,7 +898,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- end}}
 					},
-					Limit: {{with .Endpoint.HTMLExtract}}{{.Limit}}{{else}}0{{end}},
+					Limit: {{if endpointNeedsClientLimit .Endpoint}}flagLimit{{else}}{{with .Endpoint.HTMLExtract}}{{.Limit}}{{else}}0{{end}}{{end}},
 					ScriptSelector: {{with .Endpoint.HTMLExtract}}{{printf "%q" .EffectiveScriptSelector}}{{else}}""{{end}},
 					JSONPath: {{with .Endpoint.HTMLExtract}}{{printf "%q" .JSONPath}}{{else}}""{{end}},
 				})
@@ -634,7 +907,21 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				}
 			}
 {{- end}}
+{{- if and (endpointNeedsClientLimit .Endpoint) (not .Endpoint.UsesHTMLResponse)}}
+			// Honor --limit when the API accepts but ignores ?limit=N.
+			data = truncateJSONArray(cmd.Context(), data, flagLimit)
+{{- end}}
 
+{{- if and (not $isMutationOutput) .Endpoint.ResponsePath (or (not .HasStore) .Endpoint.UsesHTMLResponse)}}
+			if !flags.dryRun {
+				data = applyResponsePath(data, {{printf "%q" .Endpoint.ResponsePath}})
+			}
+
+{{- end}}
+{{- if and (endpointNeedsClientLimit .Endpoint) .Endpoint.UsesHTMLResponse}}
+			// Honor --limit on extracted items, after any response-path unwrap.
+			data = truncateJSONArray(cmd.Context(), data, flagLimit)
+{{- end}}
 {{- if .IsAsync}}
 			if asyncJobID := ExtractJobID(data, "{{.Async.JobIDField}}"); asyncJobID != "" {
 				_ = RecordJob(JobRow{
@@ -679,7 +966,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			}
 {{- end}}
 
-{{- if not (or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD"))}}
+{{- if $isMutationOutput}}
 			// Inspect the mutate response body for a partial-failure-shaped
 			// field (e.g. Google Ads `partialFailureError`). Several Google
 			// APIs return 200 OK with a partial-failure field when some
@@ -698,7 +985,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 					}
 				}
 			}
-	{{- if and .HasStore (not .IsReadOnly) (not .Endpoint.UsesBinaryResponse) (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH"))}}
+	{{- if and .HasStore (not .IsReadOnly) (not .Endpoint.UsesBinaryResponse) (not .Endpoint.UsesTextResponse) (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH"))}}
 			if !flags.dryRun && statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure) {
 				writeMutationResponseToStore(cmd.Context(), "{{lower .ResourceName}}", data, {{printf "%q" .Endpoint.ResponsePath}})
 			}
@@ -743,6 +1030,9 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 					"status":   statusCode,
 					"success":  statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure),
 				}
+				if flags.agent {
+					envelope["meta"] = map[string]any{"source": "live"}
+				}
 				if partialFailure != nil {
 					envelope["partial_failure"] = partialFailure
 				}
@@ -768,36 +1058,60 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 						}
 					}
 				}
+				// Mutation-riding reads (POST search, RPC-over-POST lists) return
+				// the same single-key collection envelopes as GET reads. Unwrap
+				// before filtering so rows nest once under the result key and
+				// --select filters rows, not envelope keys; plain created-object
+				// responses pass through unwrapSingleKeyArray untouched.
 				// Apply --compact and --select to the API response before wrapping.
 				// --select wins when both are set: explicit field choice trumps the
 				// generic high-gravity allow-list. Otherwise --compact still applies
 				// when --agent is on but the user did not name fields.
-				filtered := data
+				var selectErr error
+				filtered := unwrapSingleKeyArray(data)
 				if flags.selectFields != "" {
-					filtered = filterFields(filtered, flags.selectFields)
+					filtered, selectErr = filterFieldsChecked(filtered, flags.selectFields)
+					selectErr = selectErrorForDryRun(selectErr, flags, data)
 				} else if flags.compact {
-					filtered = compactFields(filtered)
+					filtered = compactFields(filtered, {{$documentedFields}})
 				}
 				if len(filtered) > 0 {
 					var parsed any
 					if err := json.Unmarshal(filtered, &parsed); err == nil {
-						envelope["data"] = parsed
+						if flags.agent {
+							envelope["results"] = parsed
+						} else {
+							envelope["data"] = parsed
+						}
 					}
 				}
 				envelopeJSON, err := json.Marshal(envelope)
 				if err != nil {
 					return err
 				}
-				if perr := printOutput(cmd.OutOrStdout(), json.RawMessage(envelopeJSON), true); perr != nil {
+				resultKey := "data"
+				if flags.agent {
+					resultKey = "results"
+				}
+				structured, err := wrapPlatformStructuredOutput(json.RawMessage(envelopeJSON), flags, resultKey, true)
+				if err != nil {
+					return err
+				}
+				if perr := printOutput(cmd.OutOrStdout(), structured, true); perr != nil {
 					return perr
 				}
 				if partialFailure != nil && !flags.allowPartialFailure {
 					return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "{{.ResourceName}}", partialFailure.Message))
 				}
-				return nil
+				return selectErr
 			}
 {{- end}}
-{{- if or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD")}}
+{{- if not $isMutationOutput}}
+{{- if $supportsAllPagination}}
+			outputData := collectionItemsForOutput(data, path)
+{{- else}}
+			outputData := data
+{{- end}}
 {{- if .HasStore}}
 			// Print provenance to stderr for human-facing output only.
 			// Machine-format flags (--json, --csv, --compact, --quiet, --plain,
@@ -806,7 +1120,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			// SYNC: keep this gate aligned with command_promoted.go.tmpl.
 			if wantsHumanTable(cmd.OutOrStdout(), flags) {
 				var countItems []json.RawMessage
-				_ = json.Unmarshal(data, &countItems)
+				_ = json.Unmarshal(outputData, &countItems)
 				printProvenance(cmd, len(countItems), prov)
 			}
 			// For JSON output, wrap with provenance envelope before passing through flags.
@@ -815,23 +1129,32 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 			// --plain) opt out of the auto-JSON path so piped consumers that asked for
 			// a non-JSON format reach the standard pipeline below.
 			if flags.asJSON || (!isTerminal(cmd.OutOrStdout()) && !flags.csv && !flags.quiet && !flags.plain) {
+				var selectErr error
 				filtered := data
 				if flags.selectFields != "" {
-					filtered = filterFields(filtered, flags.selectFields)
+					filtered, selectErr = filterFieldsChecked(filtered, flags.selectFields)
+					selectErr = selectErrorForDryRun(selectErr, flags, data)
 				} else if flags.compact {
-					filtered = compactFields(filtered)
+					filtered = compactFields(filtered, {{$documentedFields}})
 				}
 				wrapped, wrapErr := wrapWithProvenance(filtered, prov)
 				if wrapErr != nil {
 					return wrapErr
 				}
-				return printOutput(cmd.OutOrStdout(), wrapped, true)
+				wrapped, wrapErr = wrapPlatformStructuredOutput(wrapped, flags, "results", true)
+				if wrapErr != nil {
+					return wrapErr
+				}
+				if err := printOutput(cmd.OutOrStdout(), wrapped, true); err != nil {
+					return err
+				}
+				return selectErr
 			}
 			// For all other output modes (table, csv, plain, quiet), use the standard pipeline
 {{- end}}
 			if wantsHumanTable(cmd.OutOrStdout(), flags) {
 				var items []map[string]any
-				if json.Unmarshal(data, &items) == nil && len(items) > 0 {
+				if json.Unmarshal(outputData, &items) == nil && len(items) > 0 {
 					if err := printAutoTable(cmd.OutOrStdout(), items); err != nil {
 						return err
 					}
@@ -842,23 +1165,26 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				}
 			}
 {{- end}}
-{{- if not (or (eq .Endpoint.Method "GET") (eq .Endpoint.Method "HEAD"))}}
+{{- if $isMutationOutput}}
 			// Fall-through for mutate paths that did not hit the table or
 			// asJSON branches: --quiet, --csv, --plain, and default terminal
-			// raw output. printOutputWithFlags renders the body, then the
-			// typed partial-failure exit fires unless --allow-partial-failure
-			// downgrades it. Without this guard a partial failure would exit
-			// 0 for these output modes — the exact silent-swallow regression
-			// the surrounding patch is preventing for asJSON / piped output.
-			if perr := printOutputWithFlags(cmd.OutOrStdout(), data, flags); perr != nil {
-				return perr
-			}
+			// raw output. printOutputWithFlagsMeta renders the body with live
+			// provenance, then the typed partial-failure exit fires unless
+			// --allow-partial-failure downgrades it. Without this guard a
+			// partial failure would exit 0 for these output modes — the exact
+			// silent-swallow regression the surrounding patch is preventing
+			// for asJSON / piped output.
+			printErr := printOutputWithFlagsMeta(cmd.OutOrStdout(), data, flags, map[string]any{"source": "live"}, {{$documentedFields}})
 			if partialFailure != nil && !flags.allowPartialFailure {
 				return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "{{.ResourceName}}", partialFailure.Message))
 			}
-			return nil
+			return printErr
 {{- else}}
-			return printOutputWithFlags(cmd.OutOrStdout(), data, flags)
+			formatData := data
+			if flags.csv || flags.plain {
+				formatData = outputData
+			}
+			return printOutputWithFlagsMeta(cmd.OutOrStdout(), formatData, flags, map[string]any{"source": "live"}, {{$documentedFields}})
 {{- end}}
 {{- end}}
 		},
@@ -886,12 +1212,16 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- end}}
 {{- bodyFlagRegs .Endpoint}}
+{{- if $isRaw}}
+	cmd.Flags().StringVar(&rawBodyFile, "file", "", "Read the raw request body from a file (use - for stdin)")
+	cmd.Flags().StringVar(&rawContentType, "content-type", {{printf "%q" .Endpoint.RequestContentType}}, "Content-Type for the raw request body")
+{{- end}}
 {{- if $supportsAllPagination}}
 	cmd.Flags().BoolVar(&flagAll, "all", false, "Fetch all pages")
 {{- end}}
-{{- if or (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
-{{- if bodyExceedsFlagDepth .Endpoint}}
-	cmd.Flags().BoolVar(&stdinBody, "stdin", false, "Read request body as JSON from stdin (use this for deeply nested fields not exposed as flags)")
+{{- if or $isRaw (and (or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")) (not $isMultipart) (not $isForm)) (and (eq .Endpoint.Method "DELETE") $hasJSONBody)}}
+{{- if $isRaw}}
+	cmd.Flags().BoolVar(&stdinBody, "stdin", false, "Read the raw request body from stdin")
 {{- else}}
 	cmd.Flags().BoolVar(&stdinBody, "stdin", false, "Read request body as JSON from stdin")
 {{- end}}
@@ -919,7 +1249,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 // exhausted. pathParams must include every {placeholder} in the parent
 // path (e.g. {"id": "<value>"}).
 func fetchFull{{$funcPrefix}}{{$endpointCamel}}{{$propCamel}}(ctx context.Context, c interface {
-	GetWithHeaders(ctx context.Context, path string, params map[string]string, headers map[string]string) (json.RawMessage, error)
+	GetWithHeadersValues(ctx context.Context, path string, params url.Values, headers map[string]string) (json.RawMessage, error)
 }, pathParams map[string]string) ([]json.RawMessage, error) {
 	childPath := "{{.ChildPath}}"
 	for name, val := range pathParams {

@@ -7,17 +7,17 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-// safeXNetVersion is the lowest golang.org/x/net release without the 2026
-// advisories (GO-2026-5025..5030). Keep in sync with the explicit pin in
-// templates/go.mod.tmpl.
-const safeXNetVersion = "v0.55.0"
+// safeXNetVersion is the lowest golang.org/x/net release without GO-2026-5942
+// (CVE-2026-46600; also covers GO-2026-5025..5030). Keep in sync with the
+// explicit pin in templates/go.mod.tmpl.
+const safeXNetVersion = "v0.56.0"
 
 // ensureSafeXNet bumps golang.org/x/net to safeXNetVersion when the generated
 // module resolves it below that version. x/net is dragged in transitively by
-// several optional features — surf (browser HTTP transport), goquery (search
+// several optional features — the Chrome HTTP/2 transport, goquery (search
 // backends), kooky (cookie auth), chromedp, and net/html extraction — that
 // live in different templates and copied-in packages. Enumerating every puller
-// as a go.mod.tmpl condition is fragile (it has already missed surf/goquery/
+// as a go.mod.tmpl condition is fragile (it has already missed goquery/
 // kooky once) and a too-broad condition breaks the `go mod tidy` gate by
 // leaving an unused require in CLIs that don't pull x/net at all.
 //

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,15 +21,19 @@ import (
 type VerifyConfig struct {
 	Dir       string // generated CLI directory
 	SpecPath  string // OpenAPI spec path
-	APIKey    string // optional - if set, tests against real API
-	EnvVar    string // env var name for the API key (e.g., GITHUB_TOKEN)
+	APIKey    string // optional - nonempty selects live against the real API
+	EnvVar    string // named env var; nonempty value selects live without copying into APIKey
 	Threshold int    // minimum pass rate (default 80)
 	NoSpec    bool   // structural-only mode: skip spec-dependent checks
+	// AllowDestructive permits live-mode execute probes for commands classified
+	// as write operations. The default keeps live verification read-only.
+	AllowDestructive bool
 }
 
 // VerifyReport is the output of a runtime verification run.
 type VerifyReport struct {
 	Mode                   string                 `json:"mode"` // "live" or "mock"
+	ModeDetail             string                 `json:"mode_detail,omitempty"`
 	Total                  int                    `json:"total"`
 	Passed                 int                    `json:"passed"`
 	Failed                 int                    `json:"failed"`
@@ -86,11 +91,6 @@ type FreshnessResult struct {
 
 // RunVerify executes the runtime verification pipeline.
 func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
-	releaseHome, err := scopeSubprocessHome()
-	if err != nil {
-		return nil, err
-	}
-	defer releaseHome()
 	// Keep this boundary safe for programmatic callers; CLI commands also
 	// normalize earlier when they need the stable path for follow-on argv.
 	absDir, err := filepath.Abs(cfg.Dir)
@@ -98,6 +98,11 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 		return nil, fmt.Errorf("resolving CLI directory: %w", err)
 	}
 	cfg.Dir = absDir
+	releaseHome, err := scopeSubprocessHome(findCLINames(cfg.Dir)...)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseHome()
 	if cfg.NoSpec {
 		return runStructuralVerify(cfg)
 	}
@@ -126,11 +131,8 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 	}
 
 	// 2. Determine mode
-	if cfg.APIKey != "" {
-		report.Mode = "live"
-	} else {
-		report.Mode = "mock"
-	}
+	report.Mode, report.ModeDetail = verifyMode(cfg)
+	report.Results = append(report.Results, runResourcePathContractChecks(cfg.Dir)...)
 
 	// 3. Build the generated CLI binary
 	binaryPath, err := buildCLI(cfg.Dir)
@@ -303,7 +305,7 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 			report.Results = append(report.Results, result)
 			continue
 		}
-		result := runCommandTests(binaryPath, cmd, report.Mode, env)
+		result := runCommandTests(binaryPath, cmd, report.Mode, env, cfg.AllowDestructive)
 		commands[i] = cmd // preserve classification
 		report.Results = append(report.Results, result)
 	}
@@ -339,6 +341,18 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 	finalizeVerifyReport(report, cfg.Threshold, true)
 
 	return report, nil
+}
+
+func verifyMode(cfg VerifyConfig) (string, string) {
+	if cfg.APIKey != "" || (cfg.EnvVar != "" && os.Getenv(cfg.EnvVar) != "") {
+		// Keep environment credentials separate: copying one into APIKey would
+		// broadcast it over every request credential in multi-key auth.
+		return "live", ""
+	}
+	if cfg.EnvVar != "" {
+		return "mock", fmt.Sprintf("--env-var %s is unset or empty; running in mock mode", cfg.EnvVar)
+	}
+	return "mock", ""
 }
 
 func authEnvVarSpecNames(envVarSpecs []apispec.AuthEnvVar) []string {
@@ -456,9 +470,7 @@ func runSideEffectSafeCommandTests(binary string, cmd discoveredCommand, env []s
 
 	positionals, flags := sideEffectSafeInvocationInputs(cmd)
 
-	dryArgs := append([]string{cmd.Name}, positionals...)
-	dryArgs = append(dryArgs, flags...)
-	dryArgs = append(dryArgs, "--dry-run")
+	dryArgs := buildRuntimeTestArgs(cmd.Name, positionals, flags, "--dry-run")
 	if err := runCLI(binary, dryArgs, env, 10*time.Second); err == nil || isIntentionalStubExit(err) {
 		result.DryRun = true
 	}
@@ -486,7 +498,7 @@ func runSideEffectSafeCommandTests(binary string, cmd discoveredCommand, env []s
 }
 
 // runCommandTests executes the test suite for a single command.
-func runCommandTests(binary string, cmd discoveredCommand, mode string, env []string) CommandResult {
+func runCommandTests(binary string, cmd discoveredCommand, mode string, env []string, allowDestructive bool) CommandResult {
 	result := CommandResult{
 		Command: cmd.Name,
 		Kind:    cmd.Kind,
@@ -504,11 +516,7 @@ func runCommandTests(binary string, cmd discoveredCommand, mode string, env []st
 
 	// Build positional args + flags for test invocations
 	buildTestArgs := func(cmdName string, positionalArgs, flags []string, extra ...string) []string {
-		args := []string{cmdName}
-		args = append(args, positionalArgs...)
-		args = append(args, flags...)
-		args = append(args, extra...)
-		return args
+		return buildRuntimeTestArgs(cmdName, positionalArgs, flags, extra...)
 	}
 
 	// Test 2: --dry-run (skip for local/data-layer commands that don't make API calls)
@@ -523,10 +531,14 @@ func runCommandTests(binary string, cmd discoveredCommand, mode string, env []st
 	// Test 3: Execute (only for read commands in live mode, all in mock mode)
 	if cmd.Kind == "local" || cmd.Kind == "data-layer" {
 		result.Execute = true // tested separately in data pipeline
-	} else if mode == "live" && cmd.Kind == "write" {
+	} else if mode == "live" && cmd.Kind == "write" && !allowDestructive {
 		result.Execute = true // skip writes on live = pass (tested via dry-run)
 	} else {
-		args := buildTestArgs(cmd.Name, positionals, extraFlags, "--json")
+		extra := []string{"--json"}
+		if hasExplicitOutputMode(extraFlags) {
+			extra = nil
+		}
+		args := buildTestArgs(cmd.Name, positionals, extraFlags, extra...)
 		err := runCLI(binary, args, env, 15*time.Second)
 		result.Execute = err == nil || isIntentionalStubExit(err) || isDocumentedSuccessExit(err, typedCodes)
 	}
@@ -545,6 +557,20 @@ func runCommandTests(binary string, cmd discoveredCommand, mode string, env []st
 	result.Score = score
 
 	return result
+}
+
+func buildRuntimeTestArgs(cmdName string, positionalArgs, flags []string, extra ...string) []string {
+	args := []string{cmdName}
+	if slices.ContainsFunc(positionalArgs, isNegativeNumericArg) {
+		args = appendRuntimeFlagArgs(args, flags)
+		args = append(args, extra...)
+		args = append(args, "--")
+		return append(args, positionalArgs...)
+	}
+	args = append(args, positionalArgs...)
+	args = appendRuntimeFlagArgs(args, flags)
+	args = append(args, extra...)
+	return args
 }
 
 func isIntentionalStubExit(err error) bool {
@@ -618,6 +644,12 @@ func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, exp
 		if !cliHasSyncCommand(cliDir) {
 			return true, "SKIP (CLI has no sync command)"
 		}
+		if !cliHasLocalStore(cliDir) {
+			return true, "SKIP (CLI has no local store)"
+		}
+		if mode == "mock" && cliIsGraphQLCLIDir(cliDir) {
+			return true, "SKIP (GraphQL CLI: mock server cannot synthesize sync data)"
+		}
 	}
 
 	env := envFn()
@@ -634,20 +666,34 @@ func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, exp
 
 	// Test sync (if it exists)
 	var syncErrors []error
-	syncErr := runCLI(binary, []string{"sync", "--db", dbPath, "--resources", "repos", "--full"}, env, 30*time.Second)
+	syncErr := runCLI(binary, boundedSyncProbeArgs(mode, []string{"sync", "--db", dbPath, "--resources", "repos", "--full"}), env, 30*time.Second)
 	if syncErr != nil {
 		syncErrors = append(syncErrors, syncErr)
-		syncErr = runCLI(binary, []string{"sync", "--db", dbPath, "--full"}, env, 30*time.Second)
+		syncErr = runCLI(binary, boundedSyncProbeArgs(mode, []string{"sync", "--db", dbPath, "--full"}), env, 30*time.Second)
 	}
 	if syncErr != nil {
 		syncErrors = append(syncErrors, syncErr)
-		// Sync might not accept --db flag - try without.
-		syncErr = runCLI(binary, []string{"sync", "--full"}, env, 30*time.Second)
+		// Sync might not accept --resources or --full; keep --db when
+		// possible so downstream sql probes read the same temporary store.
+		syncErr = runCLI(binary, boundedSyncProbeArgs(mode, []string{"sync", "--db", dbPath}), env, 30*time.Second)
+	}
+	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
+		// Sync might not accept --db either; try the bare command before
+		// deciding the pipeline crashed.
+		syncErr = runCLI(binary, boundedSyncProbeArgs(mode, []string{"sync", "--full"}), env, 30*time.Second)
+	}
+	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
+		syncErr = runCLI(binary, boundedSyncProbeArgs(mode, []string{"sync"}), env, 30*time.Second)
 	}
 	if syncErr != nil {
 		syncErrors = append(syncErrors, syncErr)
 		if allSyncAttemptsWereUnknownCommand(syncErrors) {
 			return true, "WARN: no sync command — data-pipeline check skipped"
+		}
+		if flag, ok := firstUnknownSyncFlag(syncErrors); ok {
+			return false, fmt.Sprintf("FAIL: sync rejected flag %s", flag)
 		}
 		return false, "FAIL: sync crashed"
 	}
@@ -667,6 +713,9 @@ func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, exp
 		// No domain tables found — ambiguous (could be minimal CLI or unusual naming).
 		// Don't fail the pipeline gate; report for human review.
 		return true, "WARN: sync completed but no domain tables found in sqlite_master"
+	}
+	if mode == "mock" && strings.TrimSpace(cliDir) != "" && !cliHasSyncableResources(cliDir) {
+		return true, fmt.Sprintf("PASS: %d domain tables created (mock mode; no syncable resources declared)", len(tables))
 	}
 
 	var bestShortTable string
@@ -714,6 +763,14 @@ func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, exp
 	return false, fmt.Sprintf("FAIL: %d domain tables created but 0 rows after sync (%s mode)", len(tables), mode)
 }
 
+func boundedSyncProbeArgs(mode string, args []string) []string {
+	if mode != "live" {
+		return args
+	}
+	bounded := append([]string(nil), args...)
+	return append(bounded, "--max-pages", "1")
+}
+
 func allSyncAttemptsWereUnknownCommand(errs []error) bool {
 	if len(errs) == 0 {
 		return false
@@ -726,13 +783,53 @@ func allSyncAttemptsWereUnknownCommand(errs []error) bool {
 	return true
 }
 
+func cliIsGraphQLCLIDir(dir string) bool {
+	return fileExists(filepath.Join(dir, "internal", "client", "graphql.go"))
+}
+
 func isUnknownSyncCommandError(err error) bool {
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "unknown command \"sync\"")
 }
 
+func firstUnknownSyncFlag(errs []error) (string, bool) {
+	for _, err := range errs {
+		if flag, ok := unknownSyncFlag(err); ok {
+			return flag, true
+		}
+	}
+	return "", false
+}
+
+func unknownSyncFlag(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{"unknown flag: ", "unknown shorthand flag: "} {
+		if _, after, ok := strings.Cut(text, marker); ok {
+			flag := strings.Fields(after)
+			if len(flag) > 0 {
+				return flag[0], true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
 func cliHasSyncCommand(cliDir string) bool {
 	return hasRegisteredCommandFileWithPrefix(filepath.Join(cliDir, "internal", "cli"), "sync")
+}
+
+func cliHasLocalStore(cliDir string) bool {
+	return fileExists(filepath.Join(cliDir, "internal", "store", "store.go"))
+}
+
+func cliHasSyncableResources(cliDir string) bool {
+	content := readAllGoFiles(filepath.Join(cliDir, "internal", "cli"))
+	content += readAllGoFiles(filepath.Join(cliDir, "internal", "store"))
+	return hasNonEmptySyncResources(content)
 }
 
 func isAuxiliaryPipelineTable(table string, totalTables int) bool {
@@ -924,16 +1021,17 @@ func renderNestedDataEnvelopeFixture(fixture nestedDataEnvelopeFixture) string {
 }
 
 // templateVarReadRe matches the shape config.go.tmpl emits for each
-// EndpointTemplateVars entry: `os.Getenv("X")` immediately followed by a
+// EndpointTemplateVars entry: an env read immediately followed by a
 // `cfg.TemplateVars["..."] = v` assignment. Auth-bearing env reads land in
 // named cfg fields; template-var reads land in this map. Used by both
 // discoverCLIEnvVars (to exclude template names from the auth set) and
 // discoverCLITemplateVarEnvs (to recover them for mock-mode injection).
-var templateVarReadRe = regexp.MustCompile(`(?s)os\.Getenv\("([^"]+)"\)[^{]*\{\s*cfg\.TemplateVars\[`)
+var templateVarReadRe = regexp.MustCompile(`(?s)(?:os\.Getenv|cliutil\.EnvOverride)\("([^"]+)"\)[^{]*\{\s*cfg\.TemplateVars\[`)
 
 // discoverCLIEnvVars reads the CLI's config.go and extracts env var names
-// from os.Getenv() calls. This discovers what the CLI actually reads, which
-// may differ from what the spec declares or the API name implies.
+// from os.Getenv / cliutil.EnvOverride calls. This discovers what the CLI
+// actually reads, which may differ from what the spec declares or the API
+// name implies.
 func discoverCLIEnvVars(dir string) []string {
 	configPath := filepath.Join(dir, "internal", "config", "config.go")
 	data, err := os.ReadFile(configPath)
@@ -955,7 +1053,7 @@ func discoverCLIEnvVars(dir string) []string {
 		templateVarNames[m[1]] = true
 	}
 
-	re := regexp.MustCompile(`os\.Getenv\("([^"]+)"\)`)
+	re := regexp.MustCompile(`(?:os\.Getenv|cliutil\.EnvOverride)\("([^"]+)"\)`)
 	matches := re.FindAllStringSubmatch(body, -1)
 	seen := map[string]bool{}
 	var envVars []string

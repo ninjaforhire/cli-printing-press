@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/discovery"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
@@ -88,12 +89,7 @@ func AnalyzeCaptureWithOptions(capture *EnrichedCapture, options AnalyzeOptions)
 	for _, group := range groups {
 		endpoint, responseFields := buildEndpoint(group, auth)
 		inferredTypes.addEndpointTypes(group.NormalizedPath, &endpoint, responseFields)
-		if options.PreserveHosts {
-			groupBaseURL := mostCommonBaseURL(group.Entries)
-			if groupBaseURL != "" && groupBaseURL != baseURL {
-				endpoint.BaseURL = groupBaseURL
-			}
-		}
+		applyEndpointOrigin(&endpoint, group, baseURL)
 		resourceKey, resourceName := discovery.ResourceKey(group.NormalizedPath)
 		if resourceKey == "" {
 			resourceKey = "default"
@@ -131,6 +127,8 @@ func AnalyzeCaptureWithOptions(capture *EnrichedCapture, options AnalyzeOptions)
 		Resources: resources,
 		Types:     inferredTypes.types,
 	}
+
+	SanitizeSpecCapturedResourceIDs(apiSpec)
 
 	if err := apiSpec.Validate(); err != nil {
 		if len(apiSpec.Resources) == 0 && len(groups) > 0 {
@@ -614,30 +612,33 @@ func buildEndpoint(group EndpointGroup, auth spec.AuthConfig) (spec.Endpoint, []
 	}
 
 	responseType := inferResponseType(responseBodies)
-	if len(params) == 0 && len(responseFields) > 0 {
-		params = responseFields
-	}
+	requestContentType := inferRequestContentType(group.Entries)
 
 	endpoint := spec.Endpoint{
-		Method:       group.Method,
-		Path:         group.NormalizedPath,
-		Description:  fmt.Sprintf("%s %s", group.Method, group.NormalizedPath),
-		Params:       params,
-		Body:         body,
-		ObservedAuth: observedAuthHeaders(group.Entries),
+		Method:             group.Method,
+		Path:               group.NormalizedPath,
+		Description:        fmt.Sprintf("%s %s", group.Method, group.NormalizedPath),
+		Params:             params,
+		Body:               body,
+		RequestContentType: requestContentType,
+		ObservedAuth:       observedAuthHeaders(group.Entries),
 		Response: spec.ResponseDef{
 			Type: responseType,
 			Item: deriveResponseItemName(group.NormalizedPath),
 		},
 	}
 	if groupLooksHTML(group) {
+		htmlExtract := inferHTMLExtract(group)
 		endpoint.ResponseFormat = spec.ResponseFormatHTML
 		endpoint.Response = spec.ResponseDef{
 			Type: htmlResponseType(group),
-			Item: "html",
+			Item: htmlResponseItem(htmlExtract),
 		}
-		endpoint.HTMLExtract = inferHTMLExtract(group)
+		endpoint.HTMLExtract = htmlExtract
 		endpoint.Description = htmlEndpointDescription(group)
+		if strings.EqualFold(group.Method, "POST") {
+			endpoint.Meta = map[string]string{"mcp:read-only": "true"}
+		}
 	}
 	return endpoint, responseFields
 }
@@ -867,7 +868,13 @@ func mostCommonHTMLSurfaceHost(entries []EnrichedEntry) string {
 
 func isUsefulHTMLSurfaceEntry(entry EnrichedEntry, targetHost string) bool {
 	method := strings.ToUpper(strings.TrimSpace(entry.Method))
-	if method != "" && method != "GET" && method != "HEAD" {
+	if method == "" {
+		method = "GET"
+	}
+	if method != "GET" && method != "HEAD" && method != "POST" {
+		return false
+	}
+	if method == "POST" && !strings.Contains(strings.ToLower(getHeaderValue(entry.RequestHeaders, "Content-Type")), "form-urlencoded") {
 		return false
 	}
 	if entry.ResponseStatus < 200 || entry.ResponseStatus >= 400 {
@@ -893,6 +900,9 @@ func isUsefulHTMLSurfaceEntry(entry EnrichedEntry, targetHost string) bool {
 		return false
 	}
 	lower := strings.ToLower(body)
+	if method == "POST" {
+		return looksLikeHTMLTableFragment(lower)
+	}
 	return strings.Contains(lower, "<title") ||
 		strings.Contains(lower, "<meta") ||
 		strings.Contains(lower, "<a ")
@@ -972,22 +982,91 @@ func groupLooksHTML(group EndpointGroup) bool {
 }
 
 func htmlResponseType(group EndpointGroup) string {
-	if inferHTMLExtract(group).EffectiveMode() == spec.HTMLExtractModeLinks {
+	switch inferHTMLExtract(group).EffectiveMode() {
+	case spec.HTMLExtractModeLinks, spec.HTMLExtractModeTable:
 		return "array"
+	default:
+		return "object"
 	}
-	return "object"
+}
+
+func htmlResponseItem(extract *spec.HTMLExtract) string {
+	if extract != nil && extract.EffectiveMode() == spec.HTMLExtractModeTable {
+		return "html_table_row"
+	}
+	return "html"
 }
 
 func inferHTMLExtract(group EndpointGroup) *spec.HTMLExtract {
 	prefixes := inferHTMLLinkPrefixes(group.Entries)
 	mode := spec.HTMLExtractModePage
-	if len(prefixes) > 0 && !strings.Contains(group.NormalizedPath, "{") {
+	if strings.EqualFold(group.Method, "POST") && groupLooksHTMLTable(group) {
+		mode = spec.HTMLExtractModeTable
+	} else if len(prefixes) > 0 && !strings.Contains(group.NormalizedPath, "{") {
 		mode = spec.HTMLExtractModeLinks
 	}
 	return &spec.HTMLExtract{
 		Mode:         mode,
 		LinkPrefixes: prefixes,
 		Limit:        50,
+	}
+}
+
+func groupLooksHTMLTable(group EndpointGroup) bool {
+	for _, entry := range group.Entries {
+		if looksLikeHTMLTableFragment(strings.ToLower(entry.ResponseBody)) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeHTMLTableFragment(lowerBody string) bool {
+	return strings.Contains(lowerBody, "<table") &&
+		strings.Contains(lowerBody, "<tr") &&
+		(strings.Contains(lowerBody, "<td") || strings.Contains(lowerBody, "<th"))
+}
+
+func inferRequestContentType(entries []EnrichedEntry) string {
+	var chosen string
+	for _, entry := range entries {
+		body := strings.TrimSpace(entry.RequestBody)
+		if body == "" {
+			continue
+		}
+		contentType := effectiveRequestContentType(body, getHeaderValue(entry.RequestHeaders, "Content-Type"))
+		if contentType == "" {
+			continue
+		}
+		if chosen == "" {
+			chosen = contentType
+			continue
+		}
+		if chosen != contentType {
+			return ""
+		}
+	}
+	return chosen
+}
+
+// effectiveRequestContentType prefers the payload that actually parsed over
+// the advertised media type. A raw JSON object sent under a form Content-Type
+// is modeled and replayed as JSON so the generated CLI does not treat the
+// entire document as one form-field name.
+func effectiveRequestContentType(body string, advertised string) string {
+	if _, ok := parseJSONRequestObject(body); ok {
+		return "application/json"
+	}
+	return normalizeRequestContentType(advertised)
+}
+
+func normalizeRequestContentType(contentType string) string {
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch contentType {
+	case "application/x-www-form-urlencoded", "multipart/form-data", "application/json":
+		return contentType
+	default:
+		return ""
 	}
 }
 
@@ -1462,6 +1541,7 @@ func detectCapturedAuth(capture *AuthCapture, envPrefix string) spec.AuthConfig 
 				Header:       "Cookie",
 				In:           "cookie",
 				CookieDomain: capture.BoundDomain,
+				Cookies:      cookieNames(capture.Cookies),
 				EnvVars:      envVarsOrNil(envPrefix, "COOKIES"),
 			}
 		case "composed":
@@ -1483,6 +1563,7 @@ func detectCapturedAuth(capture *AuthCapture, envPrefix string) spec.AuthConfig 
 			Header:       "Cookie",
 			In:           "cookie",
 			CookieDomain: capture.BoundDomain,
+			Cookies:      cookieNames(capture.Cookies),
 			EnvVars:      envVarsOrNil(envPrefix, "COOKIES"),
 		}
 	}
@@ -1643,7 +1724,7 @@ func FilterEndpointsByMinSamplesWithOptions(apiSpec *spec.APISpec, capture *Enri
 	qualifying := map[string]bool{}
 	for _, g := range groups {
 		if len(g.Entries) >= minSamples {
-			qualifying[endpointFilterKey(g.Method, g.NormalizedPath, groupBaseURLOverride(g, options, apiSpec.BaseURL))] = true
+			qualifying[endpointFilterKey(g.Method, g.NormalizedPath, groupBaseURLOverride(g, apiSpec.BaseURL))] = true
 		}
 	}
 
@@ -1665,10 +1746,16 @@ func FilterEndpointsByMinSamplesWithOptions(apiSpec *spec.APISpec, capture *Enri
 	return dropped
 }
 
-func groupBaseURLOverride(group EndpointGroup, options AnalyzeOptions, specBaseURL string) string {
-	if !options.PreserveHosts {
-		return ""
+func applyEndpointOrigin(endpoint *spec.Endpoint, group EndpointGroup, specBaseURL string) {
+	if endpoint == nil {
+		return
 	}
+	if override := groupBaseURLOverride(group, specBaseURL); override != "" {
+		endpoint.BaseURL = override
+	}
+}
+
+func groupBaseURLOverride(group EndpointGroup, specBaseURL string) string {
 	groupBaseURL := mostCommonBaseURL(group.Entries)
 	if groupBaseURL == "" || groupBaseURL == specBaseURL {
 		return ""
@@ -1775,6 +1862,8 @@ func encodeSampleJSON(sample SampleFile) ([]byte, error) {
 	return []byte(buf.String()), nil
 }
 
+const maxSampleFilenameBytes = 120
+
 // sampleFilename returns method__path-slug__hash.json. The hash is the
 // first 8 hex chars of sha256(METHOD + " " + normalizedPath), with host
 // included only for host-preserved groups so same-path groups cannot
@@ -1799,7 +1888,32 @@ func sampleFilename(group EndpointGroup) string {
 		hashKey = host + " " + hashKey
 	}
 	h := sha256.Sum256([]byte(hashKey))
-	return fmt.Sprintf("%s__%s__%s.json", method, slug, hex.EncodeToString(h[:4]))
+	hash := hex.EncodeToString(h[:4])
+	prefix := method + "__"
+	suffix := "__" + hash + ".json"
+	slug = truncateSampleFilenameSlug(slug, maxSampleFilenameBytes-len(prefix)-len(suffix))
+	return prefix + slug + suffix
+}
+
+func truncateSampleFilenameSlug(slug string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return "sample"
+	}
+	if len(slug) <= maxBytes {
+		return slug
+	}
+	for len(slug) > maxBytes {
+		_, size := utf8.DecodeLastRuneInString(slug)
+		if size <= 0 {
+			break
+		}
+		slug = slug[:len(slug)-size]
+	}
+	slug = strings.TrimRight(slug, "._-")
+	if slug == "" {
+		return "sample"
+	}
+	return slug
 }
 
 // buildSampleFile selects a representative entry from the group, redacts

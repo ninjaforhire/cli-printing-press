@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -178,7 +179,7 @@ func TestRunCommandTestsExecutesMockReadCommands(t *testing.T) {
 	binary := buildCommandProbeBinary(t)
 	cmd := discoveredCommand{Name: "items", Kind: "read"}
 
-	result := runCommandTests(binary, cmd, "mock", os.Environ())
+	result := runCommandTests(binary, cmd, "mock", os.Environ(), false)
 	assert.True(t, result.Help)
 	assert.True(t, result.DryRun)
 	assert.False(t, result.Execute)
@@ -195,12 +196,37 @@ func TestRunCommandTestsUsesHappyArgsAnnotation(t *testing.T) {
 		},
 	}
 
-	result := runCommandTests(binary, cmd, "mock", os.Environ())
+	result := runCommandTests(binary, cmd, "mock", os.Environ(), false)
 
 	assert.True(t, result.Help)
 	assert.True(t, result.DryRun)
 	assert.True(t, result.Execute)
 	assert.Equal(t, 3, result.Score)
+}
+
+func TestRunCommandTestsUsesSafeHappyArgsArgv(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "argv.log")
+	binary := buildRuntimeArgProbeBinary(t)
+	env := append(os.Environ(), "PP_PROBE_LOG="+logPath)
+	cmd := discoveredCommand{
+		Name: "whereabouts",
+		Kind: "read",
+		Args: []string{"-122.1"},
+		Annotations: map[string]string{
+			happyArgsAnnotation: "<longitude>=-122.1;--west=-122.1;--csv=true",
+		},
+	}
+
+	result := runCommandTests(binary, cmd, "mock", env, false)
+
+	assert.True(t, result.Help)
+	assert.True(t, result.DryRun)
+	assert.True(t, result.Execute)
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "whereabouts --west=-122.1 --csv=true --dry-run -- -122.1")
+	assert.Contains(t, string(data), "whereabouts --west=-122.1 --csv=true -- -122.1")
+	assert.NotContains(t, string(data), "--json")
 }
 
 func TestRunDataPipelineTestMockModeRequiresRows(t *testing.T) {
@@ -229,6 +255,35 @@ func TestRunDataPipelineTestMockModeRequiresRows(t *testing.T) {
 
 		assert.True(t, pass)
 		assert.Contains(t, detail, "items has 2 rows")
+	})
+
+	t.Run("falls back when sync rejects full flag", func(t *testing.T) {
+		binary := buildNoFullSyncDataPipelineProbeBinary(t, 2)
+
+		pass, detail := runDataPipelineTest(binary, "", "mock", os.Environ, 2)
+
+		assert.True(t, pass)
+		assert.Contains(t, detail, "items has 2 rows")
+	})
+
+	t.Run("reports unknown sync flag distinctly", func(t *testing.T) {
+		binary := buildUnknownFlagSyncDataPipelineProbeBinary(t)
+
+		pass, detail := runDataPipelineTest(binary, "", "mock", os.Environ, 2)
+
+		assert.False(t, pass)
+		assert.Equal(t, "FAIL: sync rejected flag --full", detail)
+	})
+
+	t.Run("skips no-store CLIs whose sync command is not the data pipeline", func(t *testing.T) {
+		dir := seedDataPipelineCLIDir(t, true)
+		require.NoError(t, WriteCLIManifest(dir, CLIManifest{SpecFormat: "browser-sniff"}))
+		binary := buildUnknownFlagSyncDataPipelineProbeBinary(t)
+
+		pass, detail := runDataPipelineTest(binary, dir, "mock", os.Environ, 2)
+
+		assert.True(t, pass)
+		assert.Equal(t, "SKIP (CLI has no local store)", detail)
 	})
 
 	t.Run("passes when an auxiliary table is empty before populated data table", func(t *testing.T) {
@@ -277,6 +332,22 @@ func TestRunDataPipelineTestMockModeRequiresRows(t *testing.T) {
 	})
 }
 
+func TestRunDataPipelineTestBoundsLiveSync(t *testing.T) {
+	binary := buildLiveBoundedSyncProbeBinary(t)
+
+	pass, detail := runDataPipelineTest(binary, "", "live", os.Environ, 1)
+
+	assert.True(t, pass)
+	assert.Contains(t, detail, "items has 1 rows")
+}
+
+func TestUnknownSyncFlagIgnoresEmptyFlagName(t *testing.T) {
+	flag, ok := unknownSyncFlag(errors.New("unknown flag: "))
+
+	assert.False(t, ok)
+	assert.Empty(t, flag)
+}
+
 func TestRunDataPipelineTestSkipsUnsyncableCLIs(t *testing.T) {
 	t.Run("skips local-datastore manifests before sync", func(t *testing.T) {
 		dir := seedDataPipelineCLIDir(t, true)
@@ -303,12 +374,51 @@ func TestRunDataPipelineTestSkipsUnsyncableCLIs(t *testing.T) {
 	t.Run("runs normal sync CLIs", func(t *testing.T) {
 		dir := seedDataPipelineCLIDir(t, true)
 		require.NoError(t, WriteCLIManifest(dir, CLIManifest{SpecFormat: "openapi3"}))
+		seedDataPipelineStore(t, dir, true)
 		binary := buildDataPipelineProbeBinary(t, 2)
 
 		pass, detail := runDataPipelineTest(binary, dir, "mock", os.Environ, 2)
 
 		assert.True(t, pass)
 		assert.Contains(t, detail, "items has 2 rows")
+	})
+
+	t.Run("mock mode skips row requirement for stores without syncable resources", func(t *testing.T) {
+		dir := seedDataPipelineCLIDir(t, true)
+		require.NoError(t, WriteCLIManifest(dir, CLIManifest{SpecFormat: "browser-sniff"}))
+		seedDataPipelineStore(t, dir, false)
+		binary := buildDataPipelineProbeBinary(t, 0)
+
+		pass, detail := runDataPipelineTest(binary, dir, "mock", os.Environ, 2)
+
+		assert.True(t, pass)
+		assert.Equal(t, "PASS: 1 domain tables created (mock mode; no syncable resources declared)", detail)
+	})
+
+	t.Run("mock mode skips graphql sync data pipeline", func(t *testing.T) {
+		dir := seedDataPipelineCLIDir(t, true)
+		require.NoError(t, WriteCLIManifest(dir, CLIManifest{SpecFormat: "openapi3"}))
+		seedDataPipelineStore(t, dir, true)
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "client"), 0o755))
+		writeTestFile(t, filepath.Join(dir, "internal", "client", "graphql.go"), "package client\n")
+		binary := buildFailingSyncDataPipelineProbeBinary(t)
+
+		pass, detail := runDataPipelineTest(binary, dir, "mock", os.Environ, 2)
+
+		assert.True(t, pass)
+		assert.Equal(t, "SKIP (GraphQL CLI: mock server cannot synthesize sync data)", detail)
+	})
+
+	t.Run("mock mode still fails zero rows when syncable resources exist", func(t *testing.T) {
+		dir := seedDataPipelineCLIDir(t, true)
+		require.NoError(t, WriteCLIManifest(dir, CLIManifest{SpecFormat: "openapi3"}))
+		seedDataPipelineStore(t, dir, true)
+		binary := buildDataPipelineProbeBinary(t, 0)
+
+		pass, detail := runDataPipelineTest(binary, dir, "mock", os.Environ, 2)
+
+		assert.False(t, pass)
+		assert.Contains(t, detail, "1 domain tables created but 0 rows after sync")
 	})
 }
 
@@ -492,7 +602,7 @@ func TestRunCommandTestsWithoutHappyArgsKeepsGenericFailure(t *testing.T) {
 		Args: []string{"mock-value"},
 	}
 
-	result := runCommandTests(binary, cmd, "mock", os.Environ())
+	result := runCommandTests(binary, cmd, "mock", os.Environ(), false)
 
 	assert.True(t, result.Help)
 	assert.False(t, result.DryRun)
@@ -659,6 +769,48 @@ func main() {
 	return binaryPath
 }
 
+func buildRuntimeArgProbeBinary(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	writeTestFile(t, mainFile, `package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	args := os.Args[1:]
+	if logPath := os.Getenv("PP_PROBE_LOG"); logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = f.WriteString(strings.Join(args, " ") + "\n")
+			_ = f.Close()
+		}
+	}
+	if len(args) == 2 && args[0] == "whereabouts" && args[1] == "--help" {
+		return
+	}
+	if len(args) == 1 && args[0] == "whereabouts" {
+		fmt.Fprintln(os.Stderr, "required flag(s) \"west\" not set")
+		os.Exit(1)
+	}
+	if len(args) > 0 && args[0] == "whereabouts" {
+		return
+	}
+	os.Exit(1)
+}
+`)
+	binaryPath := filepath.Join(dir, "test-cli")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, mainFile)
+	out, err := buildCmd.CombinedOutput()
+	require.NoError(t, err, "building test binary: %s", string(out))
+	return binaryPath
+}
+
 func buildDataPipelineProbeBinary(t *testing.T, rowCount int) string {
 	t.Helper()
 
@@ -725,6 +877,192 @@ func dbArg(args []string) string {
 	return binaryPath
 }
 
+func buildLiveBoundedSyncProbeBinary(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	writeTestFile(t, mainFile, `package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	args := os.Args[1:]
+	if len(args) == 0 {
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "sync":
+		if !hasFlagValue(args[1:], "--max-pages", "1") {
+			fmt.Fprintln(os.Stderr, "live sync probe requires --max-pages 1")
+			os.Exit(1)
+		}
+		dbPath := dbArg(args[1:])
+		if dbPath == "" {
+			os.Exit(1)
+		}
+		if err := os.WriteFile(dbPath+".marker", []byte(dbPath), 0o644); err != nil {
+			os.Exit(1)
+		}
+		return
+	case "sql":
+		dbPath := dbArg(args[1:])
+		if dbPath == "" {
+			os.Exit(1)
+		}
+		usedDB, err := os.ReadFile(dbPath + ".marker")
+		if err != nil || string(usedDB) != dbPath {
+			os.Exit(1)
+		}
+		query := args[len(args)-1]
+		if strings.Contains(query, "sqlite_master") {
+			fmt.Println("items")
+			return
+		}
+		if strings.Contains(query, "count(*)") {
+			fmt.Println(1)
+			return
+		}
+	}
+	os.Exit(1)
+}
+
+func hasFlagValue(args []string, flag, want string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func dbArg(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--db" {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+`)
+	binaryPath := filepath.Join(dir, "test-cli")
+	buildCmd := exec.Command("go", "build", "-o", "./test-cli", mainFile)
+	buildCmd.Dir = dir
+	out, err := buildCmd.CombinedOutput()
+	require.NoError(t, err, "building test binary: %s", string(out))
+	return binaryPath
+}
+
+func buildNoFullSyncDataPipelineProbeBinary(t *testing.T, rowCount int) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	writeTestFile(t, mainFile, fmt.Sprintf(`package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	args := os.Args[1:]
+	if len(args) == 0 {
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "sync":
+		for _, arg := range args[1:] {
+			if arg == "--full" {
+				fmt.Fprintln(os.Stderr, "unknown flag: --full")
+				os.Exit(1)
+			}
+		}
+		dbPath := dbArg(args[1:])
+		if dbPath == "" {
+			os.Exit(1)
+		}
+		if err := os.WriteFile(dbPath+".marker", []byte(dbPath), 0o644); err != nil {
+			os.Exit(1)
+		}
+		return
+	case "sql":
+		dbPath := dbArg(args[1:])
+		if dbPath == "" {
+			os.Exit(1)
+		}
+		usedDB, err := os.ReadFile(dbPath + ".marker")
+		if err != nil || string(usedDB) != dbPath {
+			os.Exit(1)
+		}
+		query := args[len(args)-1]
+		if strings.Contains(query, "sqlite_master") {
+			fmt.Println("items")
+			return
+		}
+		if strings.Contains(query, "count(*)") {
+			fmt.Println(%d)
+			return
+		}
+	}
+	os.Exit(1)
+}
+
+func dbArg(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--db" {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+`, rowCount))
+	binaryPath := filepath.Join(dir, "test-cli")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, mainFile)
+	out, err := buildCmd.CombinedOutput()
+	require.NoError(t, err, "building test binary: %s", string(out))
+	return binaryPath
+}
+
+func buildUnknownFlagSyncDataPipelineProbeBinary(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	writeTestFile(t, mainFile, `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "sync" {
+		for _, arg := range args[1:] {
+			if arg == "--full" {
+				fmt.Fprintln(os.Stderr, "unknown flag: --full")
+				os.Exit(1)
+			}
+		}
+		fmt.Fprintln(os.Stderr, "sync requires --full")
+		os.Exit(1)
+	}
+	os.Exit(1)
+}
+`)
+	binaryPath := filepath.Join(dir, "test-cli")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, mainFile)
+	out, err := buildCmd.CombinedOutput()
+	require.NoError(t, err, "building test binary: %s", string(out))
+	return binaryPath
+}
+
 func seedDataPipelineCLIDir(t *testing.T, includeSync bool) string {
 	t.Helper()
 
@@ -747,6 +1085,31 @@ func newRootCmd() {}
 func newItemsCmd(flags any) {}
 `)
 	return dir
+}
+
+func seedDataPipelineStore(t *testing.T, dir string, syncableResources bool) {
+	t.Helper()
+
+	storeDir := filepath.Join(dir, "internal", "store")
+	require.NoError(t, os.MkdirAll(storeDir, 0o755))
+	content := `package store
+
+func Open() {}
+`
+	if syncableResources {
+		content += `
+func defaultSyncResources() []string {
+	return []string{"items"}
+}
+`
+	} else {
+		content += `
+func defaultSyncResources() []string {
+	return []string{}
+}
+`
+	}
+	writeTestFile(t, filepath.Join(storeDir, "store.go"), content)
 }
 
 func buildAuxiliaryFirstDataPipelineProbeBinary(t *testing.T, settingsRows, itemRows int) string {
@@ -1038,6 +1401,12 @@ func main() {}
 	assert.FileExists(t, binaryPath)
 }
 
+func TestBuildCLIArgsUseReproducibleBuildFlags(t *testing.T) {
+	args := buildCLIArgs("out-bin", "./cmd/sample-pp-cli")
+
+	assert.Equal(t, []string{"build", "-trimpath", "-ldflags=-buildid=", "-o", "out-bin", "./cmd/sample-pp-cli"}, args)
+}
+
 // TestExtractPositionalPlaceholders covers the placeholder extractor used
 // by inferPositionalArgs. The bracketed-flag-descriptor cases are the
 // retro #301 F2 regression: cobra Use strings like
@@ -1099,6 +1468,16 @@ func TestExtractPositionalPlaceholders(t *testing.T) {
 			usage: " <Region> [flags]",
 			want:  []string{"region"},
 		},
+		{
+			name:  "pipe alternative chooses first id-shaped option",
+			usage: " <name|id|uuid> [flags]",
+			want:  []string{"id"},
+		},
+		{
+			name:  "pipe alternative falls back to first option",
+			usage: " <query|text> [flags]",
+			want:  []string{"query"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1109,10 +1488,68 @@ func TestExtractPositionalPlaceholders(t *testing.T) {
 }
 
 func TestParseHappyArgsAnnotation(t *testing.T) {
-	got := parseHappyArgsAnnotation(" <person>= Alice ; --query= sunset ; --limit=10 ; invalid ; name=Bob ; --bad ")
+	got := parseHappyArgsAnnotation(" <person>= Alice ; --query= sunset ; --limit=10 ; invalid ; name=Bob ; empty= ; --dry-run ; --bad ")
 
-	assert.Equal(t, []string{"Alice"}, got.positionals)
-	assert.Equal(t, []string{"--query", "sunset", "--limit", "10"}, got.flags)
+	assert.Equal(t, []string{"Alice", "Bob"}, got.positionals)
+	assert.Equal(t, []string{"--query", "sunset", "--limit", "10", "--dry-run", "true", "--bad", "true"}, got.flags)
+
+	escaped := parseHappyArgsAnnotation(`<person>=vendor\;part;--query=foo\;bar`)
+	assert.Equal(t, []string{"vendor;part"}, escaped.positionals)
+	assert.Equal(t, []string{"--query", "foo;bar"}, escaped.flags)
+}
+
+func TestClassifyCommandKindUsesEndpointMutationAnnotations(t *testing.T) {
+	spec := &openAPISpec{Paths: []string{"/phone-numbers"}}
+
+	mutating := discoveredCommand{
+		Name: "create-phone-number",
+		Annotations: map[string]string{
+			endpointMethodAnnotation: "POST",
+		},
+	}
+	classifyCommandKind(&mutating, spec)
+	assert.Equal(t, "write", mutating.Kind)
+
+	readOnlyPost := discoveredCommand{
+		Name: "lookup",
+		Annotations: map[string]string{
+			endpointMethodAnnotation: "POST",
+			mcpReadOnlyAnnotation:    "true",
+		},
+	}
+	classifyCommandKind(&readOnlyPost, spec)
+	assert.Equal(t, "read", readOnlyPost.Kind)
+}
+
+func TestRunCommandTestsSkipsLiveWriteExecuteUnlessAllowed(t *testing.T) {
+	binary := buildHappyArgsProbeBinary(t)
+	logFile := filepath.Join(t.TempDir(), "probe.log")
+	env := append(os.Environ(), "PP_PROBE_LOG="+logFile)
+	cmd := discoveredCommand{
+		Name: "whereabouts",
+		Kind: "write",
+		Annotations: map[string]string{
+			happyArgsAnnotation: "<person>=Alice;--query=sunset",
+		},
+	}
+
+	result := runCommandTests(binary, cmd, "live", env, false)
+	require.True(t, result.Execute, "live write execute is treated as skipped/pass")
+	assert.Equal(t, 3, result.Score)
+	assert.NotContains(t, readProbeLog(t, logFile), "whereabouts Alice --query sunset --json")
+
+	require.NoError(t, os.Remove(logFile))
+	result = runCommandTests(binary, cmd, "live", env, true)
+	require.True(t, result.Execute)
+	assert.Equal(t, 3, result.Score)
+	assert.Contains(t, readProbeLog(t, logFile), "whereabouts Alice --query sunset --json")
+}
+
+func readProbeLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
 }
 
 func TestMergeHappyPositionalsOverlaysInOrder(t *testing.T) {
@@ -1130,6 +1567,33 @@ func TestMergeHappyFlagsOverlaysByFlagName(t *testing.T) {
 	assert.Equal(t,
 		[]string{"--query", "sunset", "--limit", "10"},
 		mergeHappyFlags([]string{"--query", "mock-query"}, []string{"--query", "sunset", "--limit", "10"}),
+	)
+}
+
+func TestAppendRuntimeFlagArgsUsesEqualsForNegativeNumericValues(t *testing.T) {
+	assert.Equal(t,
+		[]string{"map", "--west=-122.1", "--east", "140.9"},
+		appendRuntimeFlagArgs([]string{"map"}, []string{"--west", "-122.1", "--east", "140.9"}),
+	)
+}
+
+func TestBuildRuntimeTestArgsUsesEqualsForBareBooleanHappyFlags(t *testing.T) {
+	happy := parseHappyArgsAnnotation("<item>=example-id;--dry-run")
+
+	assert.Equal(t,
+		[]string{"create", "example-id", "--dry-run=true", "--json"},
+		buildRuntimeTestArgs("create", happy.positionals, happy.flags, "--json"),
+	)
+}
+
+func TestBuildRuntimeTestArgsProtectsNegativeNumericPositionals(t *testing.T) {
+	assert.Equal(t,
+		[]string{"map", "--json", "--", "-122.1", "140.9"},
+		buildRuntimeTestArgs("map", []string{"-122.1", "140.9"}, nil, "--json"),
+	)
+	assert.Equal(t,
+		[]string{"map", "140.9", "--limit", "1"},
+		buildRuntimeTestArgs("map", []string{"140.9"}, []string{"--limit", "1"}),
 	)
 }
 
@@ -1809,10 +2273,10 @@ func Load() *Config {
 	if cfg.TemplateVars == nil {
 		cfg.TemplateVars = map[string]string{}
 	}
-	if v := os.Getenv("SHOPIFY_SHOP"); v != "" {
+	if v := cliutil.EnvOverride("SHOPIFY_SHOP"); v != "" {
 		cfg.TemplateVars["shop"] = v
 	}
-	if v := os.Getenv("SHOPIFY_API_VERSION"); v != "" {
+	if v := cliutil.EnvOverride("SHOPIFY_API_VERSION"); v != "" {
 		cfg.TemplateVars["api_version"] = v
 	}
 	return cfg

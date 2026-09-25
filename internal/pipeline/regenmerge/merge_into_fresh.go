@@ -13,6 +13,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,14 +50,21 @@ var regenmergeGeneratorOwnedDirs = map[string]struct{}{
 //
 // Steps in order:
 //  1. Per-file verdict switch — copy preserve-worthy files from snapshot
-//     into fresh; no-op on TEMPLATED-CLEAN / NEW-TEMPLATE-EMISSION;
+//     into fresh; overlay TEMPLATED-* drift/additions onto fresh so
+//     rewritten templated bodies land while hand-authored decls stay;
+//     no-op on TEMPLATED-CLEAN / NEW-TEMPLATE-EMISSION;
 //     leave PUBLISHED-ONLY-TEMPLATED files alone (fresh didn't emit them).
 //  2. Re-inject lost AddCommand calls into fresh-derived host files.
 //  3. Merge go.mod requires/replaces from snapshot into fresh's go.mod via
 //     renderMergedGoMod (preserves hand-added deps for novel packages).
 //  4. Sweep snapshot for non-classified files (README.md, Makefile, etc.)
 //     under non-generator-owned directories and copy any that don't exist
-//     in fresh.
+//     in fresh. Markerless files under generator-owned internal directories
+//     are preserved too: they are hand-authored standalone files, not stale
+//     template emissions.
+//  5. Copy `.git` and `.gitmodules` from snapshot into fresh. Walks skip
+//     `.git`, and CopyDir drops git plumbing, so force-regen would otherwise
+//     emit a tree with no history. Symlinked git metadata is refused.
 //
 // Symlinks at any preserve path or sweep path are refused — the caller is
 // expected to have validated the snapshot/fresh directory shape upstream.
@@ -63,10 +73,14 @@ var regenmergeGeneratorOwnedDirs = map[string]struct{}{
 // preserved; TEMPLATED-WITH-ADDITIONS, TEMPLATED-BODY-DRIFT, and
 // TEMPLATED-VALUE-DRIFT files are left as fresh emitted them unless the file
 // is a generated editable hook whose whole purpose is to carry agent-authored
-// additions. Lost AddCommand re-injection is skipped. The non-classified file
-// sweep and go.mod merge still run because both are spec-orthogonal — non-Go
-// files and go.mod require additions are valid preservation targets even when
-// the fresh spec differs from the snapshot's.
+// additions. Leaving Applied unset on those skips is what distinguishes a
+// dropped hand-edit from a same-spec preserve.
+// Lost AddCommand re-injection still runs when its constructor is
+// preserved in the merged novel files. The non-classified file
+// sweep, go.mod merge, and git-metadata copy still run because they are
+// spec-orthogonal — non-Go files, go.mod require additions, and history
+// are valid preservation targets even when the fresh spec differs from
+// the snapshot's.
 func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts Options) error {
 	if report == nil {
 		return errors.New("nil report")
@@ -81,42 +95,56 @@ func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts 
 	for i := range report.Files {
 		fc := &report.Files[i]
 		switch fc.Verdict {
-		case VerdictTemplatedClean, VerdictNewTemplateEmission, VerdictPublishedOnlyTemplated:
-			// fresh's emission is authoritative; nothing to copy from snapshot.
-		case VerdictNovel, VerdictNovelCollision:
-			if err := copyPreserveFile(snapshotDir, freshDir, fc.Path); err != nil {
-				return err
-			}
-			fc.Applied = true
-		case VerdictTemplatedWithAdditions, VerdictTemplatedBodyDrift, VerdictTemplatedValueDrift:
-			if opts.NovelOnly && !preserveTemplatedDriftInNovelOnly(fc.Path) {
-				continue
-			}
-			if err := copyPreserveFile(snapshotDir, freshDir, fc.Path); err != nil {
-				return err
-			}
-			fc.Applied = true
+		case VerdictTemplatedClean, VerdictNewTemplateEmission, VerdictPublishedOnlyTemplated,
+			VerdictNovel, VerdictNovelCollision,
+			VerdictTemplatedWithAdditions, VerdictTemplatedBodyDrift, VerdictTemplatedValueDrift:
 		default:
 			return fmt.Errorf("unhandled verdict %q for %s", fc.Verdict, fc.Path)
 		}
+		if !shouldPreserveFromSnapshot(*fc, snapshotDir, freshDir, opts) {
+			continue
+		}
+		if (fc.Verdict == VerdictTemplatedWithAdditions || fc.Verdict == VerdictTemplatedBodyDrift || fc.Verdict == VerdictTemplatedValueDrift) &&
+			tryOverlayHandEditedDecls(snapshotDir, freshDir, opts.BaseDir, freshDir, fc.Path) {
+			fc.Applied = true
+			continue
+		}
+		if err := copyPreserveFile(snapshotDir, freshDir, fc.Path); err != nil {
+			return err
+		}
+		fc.Applied = true
 	}
 
-	if !opts.NovelOnly {
-		for i := range report.LostRegistrations {
-			lr := &report.LostRegistrations[i]
-			if len(lr.Calls) == 0 {
-				continue
-			}
-			hostPath := filepath.Join(freshDir, lr.HostFile)
-			if err := injectAddCommands(hostPath, lr.Calls, lr.EnclosingFunc); err != nil {
-				return fmt.Errorf("re-injecting AddCommand into %s: %w", lr.HostFile, err)
-			}
-			lr.Applied = true
+	var novelDecls declSet
+	if opts.NovelOnly {
+		var err error
+		novelDecls, err = collectDeclsFromDir(filepath.Join(snapshotDir, "internal", "cli"), true)
+		if err != nil {
+			return fmt.Errorf("collecting preserved novel command declarations: %w", err)
 		}
+	}
+	for i := range report.LostRegistrations {
+		lr := &report.LostRegistrations[i]
+		calls := lr.Calls
+		if opts.NovelOnly {
+			calls = novelOnlyRegistrationCalls(calls, novelDecls)
+			lr.Calls = calls
+		}
+		if len(calls) == 0 {
+			continue
+		}
+		hostPath := filepath.Join(freshDir, lr.HostFile)
+		if err := injectAddCommands(hostPath, calls, lr.EnclosingFunc); err != nil {
+			return fmt.Errorf("re-injecting AddCommand into %s: %w", lr.HostFile, err)
+		}
+		lr.Applied = true
 	}
 
 	if err := pruneFreshDeclCollisions(freshDir, report); err != nil {
 		return fmt.Errorf("pruning fresh declaration collisions: %w", err)
+	}
+	if err := preserveRuntimeVersionLayout(snapshotDir, freshDir, report); err != nil {
+		return fmt.Errorf("preserving runtime version layout: %w", err)
 	}
 
 	if report.GoMod != nil {
@@ -143,8 +171,502 @@ func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts 
 		return fmt.Errorf("sweeping non-classified snapshot files: %w", err)
 	}
 
+	// Hidden-dir sweep skips .printing-press-patches; copy records back, then
+	// fail closed if a recorded file or call site did not survive the merge.
+	if err := pipeline.PreservePatchRecords(snapshotDir, freshDir); err != nil {
+		return fmt.Errorf("preserving patch records: %w", err)
+	}
+	if err := pipeline.ValidatePatchRecords(freshDir); err != nil {
+		return fmt.Errorf("recorded patches no longer match the merged tree: %w", err)
+	}
+
+	if err := preserveGitMetadata(snapshotDir, freshDir); err != nil {
+		return fmt.Errorf("preserving git metadata: %w", err)
+	}
+
 	report.Applied = true
 	return nil
+}
+
+// preserveRuntimeVersionLayout keeps release-ledger-owned version surfaces
+// stable across template splits. Older published CLIs stored the CLI version
+// variable in internal/cli/root.go; newer templates split it into
+// internal/cli/version.go. Reprints must keep the published layout and value
+// so the library's release-ledger guard does not see a runtime-version change
+// in the publish PR.
+func preserveRuntimeVersionLayout(snapshotDir, freshDir string, report *MergeReport) error {
+	if report == nil {
+		return nil
+	}
+	if err := preserveLegacyCLIRootVersionLayout(snapshotDir, freshDir, report); err != nil {
+		return err
+	}
+	return preserveMCPMainVersionValues(snapshotDir, freshDir, report)
+}
+
+func preserveLegacyCLIRootVersionLayout(snapshotDir, freshDir string, report *MergeReport) error {
+	rootRel := filepath.ToSlash(filepath.Join("internal", "cli", "root.go"))
+	versionRel := filepath.ToSlash(filepath.Join("internal", "cli", "version.go"))
+	if fileVerdict(report, versionRel) != VerdictNewTemplateEmission {
+		return nil
+	}
+
+	snapshotRoot := filepath.Join(snapshotDir, rootRel)
+	freshRoot := filepath.Join(freshDir, rootRel)
+	freshVersion := filepath.Join(freshDir, versionRel)
+	versionLiteral, ok, err := readStringVarLiteral(snapshotRoot, "version")
+	if err != nil || !ok {
+		return err
+	}
+	snapshotRootDecls, err := extractDecls(snapshotRoot)
+	if err != nil {
+		return err
+	}
+	if _, hasCurrentVersionCmd := snapshotRootDecls["newVersionCmd"]; !hasCurrentVersionCmd {
+		if _, hasLegacyVersionCmd := snapshotRootDecls["newVersionCliCmd"]; !hasLegacyVersionCmd {
+			return nil
+		}
+	}
+	if _, err := os.Stat(freshVersion); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	rootDecls, err := extractDecls(freshRoot)
+	if err != nil {
+		return err
+	}
+	if _, hasVersion := rootDecls["version"]; hasVersion {
+		if err := replaceStringVarLiteral(freshRoot, "version", versionLiteral); err != nil {
+			return err
+		}
+	} else if err := insertStringVarAfterImports(freshRoot, "version", versionLiteral); err != nil {
+		return err
+	}
+
+	rootDecls, err = extractDecls(freshRoot)
+	if err != nil {
+		return err
+	}
+	if _, hasVersionCmd := rootDecls["newVersionCmd"]; !hasVersionCmd {
+		fn, err := extractFuncSource(freshVersion, "newVersionCmd")
+		if err != nil {
+			return err
+		}
+		if fn != "" {
+			if err := appendGoSource(freshRoot, fn); err != nil {
+				return err
+			}
+		}
+	}
+	if err := os.Remove(freshVersion); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func preserveMCPMainVersionValues(snapshotDir, freshDir string, report *MergeReport) error {
+	rootVersionLiteral, rootHasVersion, err := readStringVarLiteral(filepath.Join(snapshotDir, "internal", "cli", "root.go"), "version")
+	if err != nil {
+		return err
+	}
+	for _, fc := range report.Files {
+		rel := filepath.ToSlash(fc.Path)
+		if !strings.HasPrefix(rel, "cmd/") || !strings.HasSuffix(rel, "-pp-mcp/main.go") {
+			continue
+		}
+		literal, ok, err := readStringVarLiteral(filepath.Join(snapshotDir, rel), "version")
+		if err != nil {
+			return err
+		}
+		freshPath := filepath.Join(freshDir, rel)
+		if _, err := os.Stat(freshPath); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if ok {
+			if err := replaceStringVarLiteral(freshPath, "version", literal); err != nil {
+				return err
+			}
+			continue
+		}
+		if rootHasVersion {
+			literal = rootVersionLiteral
+		} else {
+			literal, ok, err = readStringVarLiteral(freshPath, "version")
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+		}
+		if err := inlineStringVarReferencesAndRemove(freshPath, "version", literal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fileVerdict(report *MergeReport, rel string) Verdict {
+	for _, fc := range report.Files {
+		if filepath.ToSlash(fc.Path) == rel {
+			return fc.Verdict
+		}
+	}
+	return ""
+}
+
+func readStringVarLiteral(path, name string) (string, bool, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, ident := range valueSpec.Names {
+				if ident.Name != name || i >= len(valueSpec.Values) {
+					continue
+				}
+				lit, ok := valueSpec.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return "", false, nil
+				}
+				return lit.Value, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+func replaceStringVarLiteral(path, name, literal string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, ident := range valueSpec.Names {
+				if ident.Name != name || i >= len(valueSpec.Values) {
+					continue
+				}
+				lit, ok := valueSpec.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return fmt.Errorf("%s var %s is not a string literal", path, name)
+				}
+				start := fset.Position(lit.Pos()).Offset
+				end := fset.Position(lit.End()).Offset
+				next := append([]byte{}, data[:start]...)
+				next = append(next, literal...)
+				next = append(next, data[end:]...)
+				return writeFileAtomic(path, next)
+			}
+		}
+	}
+	return fmt.Errorf("%s missing var %s", path, name)
+}
+
+func insertStringVarAfterImports(path, name, literal string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+	insertAt := -1
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if ok && gen.Tok == token.IMPORT {
+			insertAt = fset.Position(gen.End()).Offset
+		}
+	}
+	if insertAt < 0 {
+		insertAt = fset.Position(file.Name.End()).Offset
+	}
+	block := []byte("\n\n// " + name + " is the printed CLI's version, overridable at build time via ldflags.\nvar " + name + " = " + literal + "\n")
+	next := append([]byte{}, data[:insertAt]...)
+	next = append(next, block...)
+	next = append(next, data[insertAt:]...)
+	return writeFileAtomic(path, next)
+}
+
+func extractFuncSource(path, name string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return "", fmt.Errorf("parsing %s: %w", path, err)
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name {
+			continue
+		}
+		startPos := fn.Pos()
+		if fn.Doc != nil {
+			startPos = fn.Doc.Pos()
+		}
+		start := fset.Position(startPos).Offset
+		end := fset.Position(fn.End()).Offset
+		return strings.TrimSpace(string(data[start:end])), nil
+	}
+	return "", nil
+}
+
+var trailingWhitespaceRE = regexp.MustCompile(`\s*\z`)
+
+func appendGoSource(path, src string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	next := trailingWhitespaceRE.ReplaceAll(data, nil)
+	next = append(next, []byte("\n\n"+strings.TrimSpace(src)+"\n")...)
+	return writeFileAtomic(path, next)
+}
+
+func inlineStringVarReferencesAndRemove(path, name, literal string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+
+	declNameOffsets := map[int]struct{}{}
+	var references []int
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, ident := range valueSpec.Names {
+				if ident.Name == name {
+					declNameOffsets[fset.Position(ident.Pos()).Offset] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(declNameOffsets) == 0 {
+		return nil
+	}
+
+	identDeclaresName := func(ident *ast.Ident) bool {
+		return ident != nil && ident.Name == name
+	}
+	fieldListDeclaresName := func(fields *ast.FieldList) bool {
+		if fields == nil {
+			return false
+		}
+		for _, field := range fields.List {
+			if slices.ContainsFunc(field.Names, identDeclaresName) {
+				return true
+			}
+		}
+		return false
+	}
+	exprsDeclareName := func(exprs []ast.Expr) bool {
+		for _, expr := range exprs {
+			if ident, ok := expr.(*ast.Ident); ok && identDeclaresName(ident) {
+				return true
+			}
+		}
+		return false
+	}
+	addReference := func(ident *ast.Ident, shadowed bool) {
+		if shadowed || !identDeclaresName(ident) {
+			return
+		}
+		offset := fset.Position(ident.Pos()).Offset
+		if _, isDeclName := declNameOffsets[offset]; isDeclName {
+			return
+		}
+		references = append(references, offset)
+	}
+
+	var collectExpr func(ast.Expr, bool)
+	collectExpr = func(expr ast.Expr, shadowed bool) {
+		ast.Inspect(expr, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case nil:
+				return true
+			case *ast.SelectorExpr:
+				collectExpr(n.X, shadowed)
+				return false
+			case *ast.KeyValueExpr:
+				if _, keyIsIdent := n.Key.(*ast.Ident); !keyIsIdent {
+					collectExpr(n.Key, shadowed)
+				}
+				collectExpr(n.Value, shadowed)
+				return false
+			case *ast.Ident:
+				addReference(n, shadowed)
+			}
+			return true
+		})
+	}
+	collectExprs := func(exprs []ast.Expr, shadowed bool) {
+		for _, expr := range exprs {
+			collectExpr(expr, shadowed)
+		}
+	}
+
+	var collectBlock func(*ast.BlockStmt, bool)
+	var collectStmt func(ast.Stmt, bool) bool
+	collectBlock = func(block *ast.BlockStmt, shadowed bool) {
+		if block == nil {
+			return
+		}
+		blockShadowed := shadowed
+		for _, stmt := range block.List {
+			if collectStmt(stmt, blockShadowed) {
+				blockShadowed = true
+			}
+		}
+	}
+	collectStmt = func(stmt ast.Stmt, shadowed bool) bool {
+		switch s := stmt.(type) {
+		case *ast.AssignStmt:
+			collectExprs(s.Rhs, shadowed)
+			return s.Tok == token.DEFINE && exprsDeclareName(s.Lhs)
+		case *ast.DeclStmt:
+			gen, ok := s.Decl.(*ast.GenDecl)
+			if !ok {
+				return false
+			}
+			declaresName := false
+			for _, spec := range gen.Specs {
+				valueSpec, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				collectExprs(valueSpec.Values, shadowed)
+				for _, ident := range valueSpec.Names {
+					if identDeclaresName(ident) {
+						declaresName = true
+					}
+				}
+			}
+			return declaresName
+		case *ast.ExprStmt:
+			collectExpr(s.X, shadowed)
+		case *ast.ReturnStmt:
+			collectExprs(s.Results, shadowed)
+		case *ast.IfStmt:
+			stmtShadowed := shadowed
+			if s.Init != nil && collectStmt(s.Init, shadowed) {
+				stmtShadowed = true
+			}
+			collectExpr(s.Cond, stmtShadowed)
+			collectBlock(s.Body, stmtShadowed)
+			if s.Else != nil {
+				switch elseNode := s.Else.(type) {
+				case *ast.BlockStmt:
+					collectBlock(elseNode, stmtShadowed)
+				case *ast.IfStmt:
+					collectStmt(elseNode, stmtShadowed)
+				}
+			}
+		case *ast.ForStmt:
+			stmtShadowed := shadowed
+			if s.Init != nil && collectStmt(s.Init, shadowed) {
+				stmtShadowed = true
+			}
+			if s.Cond != nil {
+				collectExpr(s.Cond, stmtShadowed)
+			}
+			if s.Post != nil {
+				collectStmt(s.Post, stmtShadowed)
+			}
+			collectBlock(s.Body, stmtShadowed)
+		case *ast.RangeStmt:
+			collectExpr(s.X, shadowed)
+			bodyShadowed := shadowed
+			if s.Tok == token.DEFINE && exprsDeclareName([]ast.Expr{s.Key, s.Value}) {
+				bodyShadowed = true
+			}
+			collectBlock(s.Body, bodyShadowed)
+		case *ast.BlockStmt:
+			collectBlock(s, shadowed)
+		}
+		return false
+	}
+
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			shadowed := fieldListDeclaresName(d.Recv) ||
+				fieldListDeclaresName(d.Type.Params) ||
+				fieldListDeclaresName(d.Type.Results)
+			collectBlock(d.Body, shadowed)
+		case *ast.GenDecl:
+			if d.Tok == token.VAR {
+				for _, spec := range d.Specs {
+					valueSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					collectExprs(valueSpec.Values, false)
+				}
+			}
+		}
+	}
+	if len(references) == 0 {
+		return pruneDeclsFromGoFile(path, declSet{name: struct{}{}})
+	}
+
+	next := append([]byte{}, data...)
+	sort.Sort(sort.Reverse(sort.IntSlice(references)))
+	for _, offset := range references {
+		next = append(next[:offset], append([]byte(literal), next[offset+len(name):]...)...)
+	}
+	if err := writeFileAtomic(path, next); err != nil {
+		return err
+	}
+	return pruneDeclsFromGoFile(path, declSet{name: struct{}{}})
 }
 
 // pruneFreshDeclCollisions removes declarations from fresh-owned Go files when
@@ -411,9 +933,67 @@ func pruneCollidingSpec(spec ast.Spec, collisions declSet) (ast.Spec, bool) {
 	return spec, false
 }
 
-func preserveTemplatedDriftInNovelOnly(rel string) bool {
-	_, ok := novelOnlyEditableHookPaths[filepath.ToSlash(rel)]
-	return ok
+// Applied=false on a TEMPLATED-* drift verdict is the only durable signal
+// that a hand-edit was classified and then left on the floor. Same-spec
+// merge flips Applied; NovelOnly does not. Clean templated files are
+// unapplied too, but they never carried a hand-edit.
+func SkippedTemplatedHandEdits(report *MergeReport) []FileClassification {
+	if report == nil {
+		return nil
+	}
+	var dropped []FileClassification
+	for _, fc := range report.Files {
+		if fc.Applied {
+			continue
+		}
+		switch fc.Verdict {
+		case VerdictTemplatedWithAdditions, VerdictTemplatedBodyDrift, VerdictTemplatedValueDrift:
+			dropped = append(dropped, fc)
+		}
+	}
+	slices.SortFunc(dropped, func(a, b FileClassification) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+	return dropped
+}
+
+// A mode suffix does not identify which Applied=false templated hand-edits
+// were discarded; the operator needs the paths to recover them.
+func FormatSkippedTemplatedHandEdits(report *MergeReport) string {
+	dropped := SkippedTemplatedHandEdits(report)
+	if len(dropped) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("warning: cross-spec --force dropped hand-edits in generated files:\n")
+	for _, fc := range dropped {
+		b.WriteString("  ")
+		b.WriteString(fc.Path)
+		b.WriteString(" (")
+		b.WriteString(string(fc.Verdict))
+		b.WriteString(")\n")
+	}
+	return b.String()
+}
+
+func shouldPreserveFromSnapshot(fc FileClassification, snapshotDir, freshDir string, opts Options) bool {
+	switch fc.Verdict {
+	case VerdictNovel, VerdictNovelCollision:
+		return true
+	case VerdictTemplatedWithAdditions, VerdictTemplatedBodyDrift, VerdictTemplatedValueDrift:
+		return !opts.NovelOnly || preserveTemplatedDriftInNovelOnly(snapshotDir, freshDir, fc.Path)
+	default:
+		return false
+	}
+}
+
+func preserveTemplatedDriftInNovelOnly(snapshotDir, freshDir, rel string) bool {
+	rel = filepath.ToSlash(rel)
+	if _, ok := novelOnlyEditableHookPaths[rel]; ok {
+		return true
+	}
+	return isNovelCommandScaffoldTest(freshDir, rel) ||
+		isHandAuthoredNovelCommandScaffold(snapshotDir, freshDir, rel)
 }
 
 // novelOnlyEditableHookPaths lists generator-emitted files whose intended
@@ -421,6 +1001,52 @@ func preserveTemplatedDriftInNovelOnly(rel string) bool {
 // when they need NovelOnly regen to preserve templated drift.
 var novelOnlyEditableHookPaths = map[string]struct{}{
 	"internal/store/extras.go": {},
+}
+
+const novelCommandScaffoldMarker = "Novel command scaffold"
+const novelCommandScaffoldTODO = "TODO: implement novel feature"
+const novelCommandScaffoldTestMarker = "cli-printing-press: novel-scaffold-test"
+
+func isHandAuthoredNovelCommandScaffold(snapshotDir, freshDir, rel string) bool {
+	if !strings.HasPrefix(rel, "internal/cli/") || !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
+		return false
+	}
+	snapshotPath := filepath.Join(snapshotDir, rel)
+	freshPath := filepath.Join(freshDir, rel)
+	freshData, err := os.ReadFile(freshPath)
+	if err != nil {
+		return false
+	}
+	if hasGeneratedMarkerBytes(freshData) || !bytes.Contains(freshData, []byte(novelCommandScaffoldMarker)) {
+		return false
+	}
+	snapshotData, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return false
+	}
+	if bytes.Contains(snapshotData, []byte(novelCommandScaffoldTODO)) {
+		return false
+	}
+	return !bytes.Equal(snapshotData, freshData)
+}
+
+func isNovelCommandScaffoldTest(freshDir, rel string) bool {
+	if !strings.HasPrefix(rel, "internal/cli/") || !strings.HasSuffix(rel, "_test.go") {
+		return false
+	}
+	freshData, err := os.ReadFile(filepath.Join(freshDir, rel))
+	if err != nil {
+		return false
+	}
+	if hasGeneratedMarkerBytes(freshData) {
+		return false
+	}
+	return bytes.Contains(freshData, []byte(novelCommandScaffoldTestMarker))
+}
+
+func hasGeneratedMarkerBytes(data []byte) bool {
+	return bytes.Contains(data, []byte("Generated by CLI Printing Press")) ||
+		bytes.Contains(data, []byte("DO NOT EDIT"))
 }
 
 // copyPreserveFile copies snapshot/rel → fresh/rel, refusing symlinks and
@@ -485,8 +1111,9 @@ func copyFileAtomic(src, dst string, mode os.FileMode) error {
 
 // sweepNonClassifiedFiles walks the snapshot for files that the classifier
 // did not see (non-Go, non-module files like README.md, Makefile,
-// .printing-press.json) and copies any that don't exist in fresh AND don't
-// live under a generator-owned directory. Symlinks are refused.
+// .printing-press.json) and copies any that don't exist in fresh. In
+// generator-owned internal directories, only markerless files are swept; a
+// generated marker means the missing file is stale template output.
 func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 	return filepath.WalkDir(snapshotDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -507,9 +1134,6 @@ func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 			if !shouldWalkDir(d.Name()) {
 				return filepath.SkipDir
 			}
-			if isGeneratorOwnedInternalDir(relSlash) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 		if !isManuscriptsPath(relSlash) && !shouldWalkDir(filepath.Base(filepath.Dir(path))) {
@@ -525,6 +1149,9 @@ func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("statting fresh path %s: %w", relSlash, err)
 		}
+		if isGeneratorOwnedInternalPath(relSlash) && snapshotFileHasGeneratedMarker(path) {
+			return nil
+		}
 		if err := copyPreserveFile(snapshotDir, freshDir, rel); err != nil {
 			return fmt.Errorf("sweeping snapshot file %s: %w", relSlash, err)
 		}
@@ -536,11 +1163,10 @@ func isManuscriptsPath(relSlash string) bool {
 	return relSlash == ".manuscripts" || strings.HasPrefix(relSlash, ".manuscripts/")
 }
 
-// isGeneratorOwnedInternalDir reports whether relSlash names a directory
-// under internal/ that the generator owns end-to-end. Used by the sweep to
-// avoid copying random non-Go content into a directory the generator
-// regenerates from scratch each run.
-func isGeneratorOwnedInternalDir(relSlash string) bool {
+// isGeneratorOwnedInternalPath reports whether relSlash is under an internal/
+// subtree the generator owns end-to-end. Used by the sweep to distinguish stale
+// generated sidecars from markerless standalone files.
+func isGeneratorOwnedInternalPath(relSlash string) bool {
 	const prefix = "internal/"
 	rest, ok := strings.CutPrefix(relSlash, prefix)
 	if !ok {
@@ -552,4 +1178,9 @@ func isGeneratorOwnedInternalDir(relSlash string) bool {
 	}
 	_, owned := regenmergeGeneratorOwnedDirs[first]
 	return owned
+}
+
+func snapshotFileHasGeneratedMarker(path string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && hasGeneratedMarkerBytes(data)
 }

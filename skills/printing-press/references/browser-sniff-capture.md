@@ -1,9 +1,9 @@
 # Browser-Sniff Capture Implementation
 
-> **When to read:** This file is referenced by Phase 1.7 of the printing-press skill.
+> **When to read:** This file is referenced by `06-browser-sniff-gate` of the printing-press skill.
 > Read it when the user approves temporary browser discovery (browser-use, agent-browser, or manual HAR capture of live site traffic).
 >
-> **Context:** This file documents what happens AFTER Phase 1.7 decides to browser-sniff. The decision itself — approve, decline, or silent-skip — is recorded in `$PRESS_RUNSTATE/runs/$RUN_ID/browser-browser-sniff-gate.json` by Phase 1.7 before this reference is loaded. Phase 1.5 refuses to proceed without that marker file. See SKILL.md Phase 1.7 "Enforcement: the browser-browser-sniff-gate.json marker file" for the contract.
+> **Context:** This file documents what happens AFTER `06-browser-sniff-gate` decides to browser-sniff. The decision itself — approve, decline, or silent-skip — is recorded in `$PRESS_RUNSTATE/runs/$RUN_ID/browser-browser-sniff-gate.json` by that phase before this reference is loaded. `08-ecosystem-absorb-gate` refuses to proceed without that marker file. See [06-browser-sniff-gate.md](../phases/06-browser-sniff-gate.md) "Enforcement: the browser-browser-sniff-gate.json marker file" for the contract.
 >
 > Browser discovery is a temporary generation-time aid. It exists to learn URLs, methods, request bodies, persisted GraphQL hashes, BFF envelopes, auth/header construction, response shapes, and replayability. It is not permission to generate a printed CLI that keeps a browser open for normal commands.
 
@@ -15,7 +15,7 @@
 
 3. **Use click-based SPA navigation after installing interceptors.** `browser-use open` triggers a full page reload which resets the JS context and destroys fetch/XHR interceptors. After installing interceptors, navigate by clicking links (`browser-use eval "document.querySelector('a[href*=account]').click()"` or `browser-use click`). Only use `browser-use open` for the first page load or when you need to re-install interceptors.
 
-4. **Run `cli-printing-press probe-reachability` before announcing any browser escalation, and don't expose transport tiers to the user as peer choices.** If research or preflight saw Cloudflare/Vercel/WAF/DataDome/PerimeterX/CAPTCHA evidence, the *first* action is the no-browser probe — not a Chrome-attach prompt and not a transport-tier menu like "Browser-sniff + clearance cookie / Browser-sniff Surf-only / HAR / Hold". Intent menus are fine (yes/no, browser-sniff or pivot, etc.); the wrong shape is forcing the user to pick between Surf vs cookie vs full browser, which is the classifier's job. Many passive challenges (Vercel TLS-fingerprint mitigation, lighter Cloudflare gates) clear with Surf alone, no cookie, no setup. If `probe-reachability` returns `mode: browser_http`, the printed CLI will ship Surf transport with zero clearance-cookie capture — runtime is settled silently. (Browser-sniff for endpoint *discovery* is a separate decision handled by Phase 1.7's normal matrix; if that matrix says to ask, the existing intent-level prompts already disclose Chrome attach as a possibility — that's the right place for that consent, not bundled into a transport-tier menu.) Only when the probe returns `browser_clearance_http` or `unknown` should you tell the user direct HTTP is blocked and proceed with a real browser capture. Do NOT replace the target with RSS/docs/official API or ask for a smaller CLI shape until after browser capture has failed by the criteria below.
+4. **Run `cli-printing-press probe-reachability` before announcing any browser escalation, and don't expose transport tiers to the user as peer choices.** If research or preflight saw Cloudflare/Vercel/WAF/DataDome/PerimeterX/CAPTCHA evidence, the *first* action is the no-browser probe — not a Chrome-attach prompt and not a transport-tier menu like "Browser-sniff + clearance cookie / Browser-sniff Surf-only / HAR / Hold". Intent menus are fine (yes/no, browser-sniff or pivot, etc.); the wrong shape is forcing the user to pick between Surf vs cookie vs full browser, which is the classifier's job. Many passive challenges (Vercel TLS-fingerprint mitigation, lighter Cloudflare gates) clear with Surf alone, no cookie, no setup. If `probe-reachability` returns `mode: browser_http`, the printed CLI will ship Chrome-compatible transport with zero clearance-cookie capture — runtime is settled silently. (Browser-sniff for endpoint *discovery* is a separate decision handled by Phase 1.7's normal matrix; if that matrix says to ask, the existing intent-level prompts already disclose Chrome attach as a possibility — that's the right place for that consent, not bundled into a transport-tier menu.) Only when the probe returns `browser_clearance_http` or `unknown` should you tell the user direct HTTP is blocked and proceed with a real browser capture. Do NOT replace the target with RSS/docs/official API or ask for a smaller CLI shape until after browser capture has failed by the criteria below.
 
 5. **Replayability is the success criterion.** A browser capture succeeds only when it produces a shippable surface: replayable API calls, persisted-query registry entries, browser-clearance cookies that can be imported and replayed, or structured HTML/SSR/RSS/JSON-LD extraction targets. If the only observed path requires live page-context execution, report HOLD or return to discovery for a lighter surface. Do not continue as if resident browser transport is acceptable.
 
@@ -234,7 +234,7 @@ For option 1 (save-then-restore):
 
 ```bash
 # Grab cookies from running Chrome. $SESSION_STATE_FILE lives outside
-# $DISCOVERY_DIR (initialized in SKILL.md's "Run Initialization") so the
+# $DISCOVERY_DIR (initialized in 02-run-initialization) so the
 # Phase 5.5 `cp -r "$DISCOVERY_DIR"` cannot pick it up.
 agent-browser --auto-connect state save "$SESSION_STATE_FILE" 2>&1
 
@@ -294,7 +294,7 @@ agent-browser state save "$SESSION_STATE_FILE"
 ```
 Close the headed browser and restart headless with the saved state.
 
-**For HAR export (option 3):** Guide the user through the DevTools HAR-export flow. Make clear that a HAR is discovery input, not a promise that every captured HTML/XHR route becomes a printed CLI command. After analyzing the HAR, keep only surfaces that replay through lightweight HTTP/Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, or structured HTML/SSR/RSS extraction. If the HAR only proves live page-context execution works, HOLD or pivot scope.
+**For HAR export (option 3):** Guide the user through the DevTools HAR-export flow. Make clear that a HAR is discovery input, not a promise that every captured HTML/XHR route becomes a printed CLI command. After analyzing the HAR, keep only surfaces that replay through lightweight HTTP/Chrome-compatible HTTP, browser-clearance cookie import plus replay, or structured HTML/SSR/RSS extraction. If the HAR only proves live page-context execution works, HOLD or pivot scope.
 
 **Manual HAR body capture pitfall.** Chrome can export page responses from disk cache as `206` partial-content entries with empty `response.content.text`, even when the user chose a HAR-with-content export. If browser-sniff analysis reports many `206` entries or missing bodies, tell the user the capture did not preserve response bodies and give the fix directly: in DevTools > Network, check **Disable cache**, then hard-reload each page while DevTools stays open before exporting the HAR. If Chrome still omits bodies, ask for a Firefox HAR export instead; Firefox's HAR export is more reliable for preserving page bodies.
 
@@ -860,10 +860,12 @@ This is the same shape `agent-browser`'s enriched-capture JSON uses (Step 2b lin
 
 **Write-time credential strip (mandatory — not optional).**
 
-Before writing the entry to `$DISCOVERY_DIR/browser-sniff-capture.json`, scrub credentials from `request_headers` and `response_headers`:
+Before writing the entry to `$DISCOVERY_DIR/browser-sniff-capture.json`, scrub credentials from `request_headers`, `response_headers`, and request/response **bodies**. Matching on JSON field names such as `apiKey` is not enough: products that let users store outbound HTTP credentials embed those values under nested header maps (`formulaMap.Authorization`, `headers.Authorization`, `headers["X-API-Key"]`).
 
 - Remove headers with names matching (case-insensitive): `Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token`, `X-Session-Id`, and any header matching the regex `/^x-.*-(token|key|auth|session|secret)$/i`.
+- In request/response bodies, redact the same header names when they appear as nested map keys, and redact values that are `Basic` / `Bearer` / `Token` credential blobs regardless of the surrounding key name. The durable machine scrub is `browsersniff.RedactJSONBody` (used for `<spec-stem>-samples/`); apply the same rules when writing the capture yourself.
 - For URLs containing query parameters that look like tokens (`access_token=`, `api_key=`, `token=`, `key=`, `signature=`, `auth=`, `password=`), redact the value to `REDACTED` in the stored URL.
+- **Scope guard:** scrub header maps and request/response bodies only. Do not run a blind base64 sweep over `url`, `host`, or `path` fields — long base64-shaped path segments are endpoint evidence, not credentials.
 
 Cross-reference `secret-protection.md` for the canonical scrub list — when the canonical list updates, this section must update too. The strip happens at write time so the artifact never sits on disk with live credentials, even briefly. Phase 5.5 archive-time strip is a defense-in-depth backstop, not the primary control for chrome-MCP captures.
 
@@ -883,7 +885,7 @@ When any trigger fires, do NOT write the artifact. Re-fire the Step 2c.5 recover
 
 **Replayability check.**
 
-Even when failure detection passes, the same replayability constraint from cardinal rule 5 applies: the captured surface must round-trip through Surf with the same Chrome TLS fingerprint the printed CLI will ship, or the captured URLs are unusable in production. Do not skip this check just because the user's authenticated browser session worked — the printed CLI does not have the user's authenticated browser session.
+Even when failure detection passes, the same replayability constraint from cardinal rule 5 applies: the captured surface must round-trip through the Chrome-compatible transport with the same TLS fingerprint the printed CLI will ship, or the captured URLs are unusable in production. Do not skip this check just because the user's authenticated browser session worked — the printed CLI does not have the user's authenticated browser session.
 
 #### Step 2c: Thin-results safety check
 
@@ -1013,6 +1015,12 @@ cli-printing-press browser-sniff --har "$DISCOVERY_DIR/browser-sniff-capture.jso
 
 If `$API_RUN_DIR/source-priority.json` exists with two or more sources, add `--preserve-hosts` to the browser-sniff command so combo-CLI captures retain peer API hosts with per-endpoint `base_url` overrides instead of selecting only the dominant host.
 
+Immediately inspect `$DISCOVERY_DIR/traffic-analysis.json` for response-body quality before trusting the sniffed spec:
+
+- If `warnings[].type` contains `empty_response_shapes`, or every `endpoint_clusters[]` entry has `size_class: "empty"` and `response_shape: {}`, the HAR/enriched capture did not preserve usable response bodies. Do not proceed to generation with the skeletal sniffed spec.
+- For each discovered endpoint cluster, use curl or another direct HTTP path with the captured method, URL, safe headers, and body shape to retrieve at least one representative response. Store those response samples in `$DISCOVERY_DIR/direct-response-*.json` or the browser-sniff report, then repair the sniffed spec's response types from the direct responses.
+- If direct HTTP is blocked by the same protection that required browser capture, report HOLD or return to the capture recovery menu. Do not invent type definitions from endpoint names alone.
+
 If hand-writing or repairing `$DISCOVERY_DIR/traffic-analysis.json`, inspect the canonical schema first:
 
 ```bash
@@ -1035,11 +1043,12 @@ use `html` only for GET/HEAD HTML and embedded-JSON surfaces, with
 Report: "Browser-Sniff discovered **N endpoints** across **M resources**. [X new endpoints not in the original spec.]"
 
 Read `$DISCOVERY_DIR/traffic-analysis.json` before reporting. If it includes:
+- `"warnings": [{"type": "empty_response_shapes", ...}]` — report: "Browser-Sniff captured endpoints but no response bodies. I need direct curl/HTTP samples before generation can have useful response types." Then run the response-body quality recovery from Step 3 before updating the spec source.
 - `"reachability": {"mode": "browser_clearance_http", ...}` — report: "Direct HTTP is blocked; generation will use browser-compatible HTTP plus `auth login --chrome` cookie import. After generation, test whether Surf + imported cookies can replay the captured requests without a resident browser."
 - Useful same-site HTML document captures — report: "Browser-Sniff found replayable HTML pages; generation can emit `response_format: html` commands that extract metadata and filtered links without a resident browser."
 - `"reachability": {"mode": "browser_required", ...}` — report: "The captured surface appears to require live page-context execution. This is not a shippable runtime shape for ordinary printed CLI commands. Return to discovery for a Surf/direct/browser-clearance replayable surface such as HTML, SSR data, RSS, JSON-LD, or a lighter internal endpoint, or HOLD the run."
 
-Also report the runtime shape the printed CLI will use: standard HTTP, Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, structured HTML/SSR/RSS extraction, or HOLD because no replayable surface was found.
+Also report the runtime shape the printed CLI will use: standard HTTP, Chrome-compatible HTTP, browser-clearance cookie import plus replay, structured HTML/SSR/RSS extraction, or HOLD because no replayable surface was found.
 
 Update the spec source for Phase 2:
 - **Enrichment mode**: Phase 2 will use `--spec <original> --spec <sniff-spec> --name <api>` to merge both

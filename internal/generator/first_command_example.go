@@ -9,11 +9,54 @@ import (
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 )
 
+type commandExampleCandidate struct {
+	resourceName string
+	resource     spec.Resource
+	endpointName string
+	endpoint     spec.Endpoint
+}
+
+func firstCommandExampleCandidate(resources map[string]spec.Resource) (commandExampleCandidate, bool) {
+	var empty commandExampleCandidate
+	var resNames []string
+	for name := range resources {
+		resNames = append(resNames, name)
+	}
+	sort.Strings(resNames)
+	preferredVerbs := []string{"list", "get", "search", "query"}
+	shared := sharedGETRPCPaths(resources)
+
+	for _, rName := range resNames {
+		r := resources[rName]
+		for _, verb := range preferredVerbs {
+			if ep, ok := r.Endpoints[verb]; ok && endpointIsReadCommandShared(ep, verb, shared) {
+				return commandExampleCandidate{resourceName: rName, resource: r, endpointName: verb, endpoint: ep}, true
+			}
+		}
+	}
+	for _, rName := range resNames {
+		r := resources[rName]
+		for _, eName := range sortedEndpointNames(r.Endpoints) {
+			if ep := r.Endpoints[eName]; endpointIsReadCommandShared(ep, eName, shared) {
+				return commandExampleCandidate{resourceName: rName, resource: r, endpointName: eName, endpoint: ep}, true
+			}
+		}
+	}
+	for _, rName := range resNames {
+		r := resources[rName]
+		eNames := sortedEndpointNames(r.Endpoints)
+		if len(eNames) > 0 {
+			eName := eNames[0]
+			return commandExampleCandidate{resourceName: rName, resource: r, endpointName: eName, endpoint: r.Endpoints[eName]}, true
+		}
+	}
+	return empty, false
+}
+
 // firstCommandExample returns a runnable "resource [endpoint] <pos1> <pos2>..."
 // invocation for docs that need a concrete example. Required public flags are
 // included so generated docs do not advertise commands that fail immediately.
-// Read-only verbs (list, get, search, query) are preferred to keep examples
-// non-destructive.
+// Read-only commands are preferred to keep examples non-destructive.
 // Returns empty when the spec has no endpoints, so callers can skip the
 // block rather than render nonsense.
 //
@@ -32,68 +75,52 @@ import (
 // the mock-value catch-all. This keeps SKILL examples honest enough that
 // verify-skill exits 0 on first generation.
 func firstCommandExample(resources map[string]spec.Resource) string {
-	var resNames []string
-	for name := range resources {
-		resNames = append(resNames, name)
+	candidate, ok := firstCommandExampleCandidate(resources)
+	if !ok {
+		return ""
 	}
-	sort.Strings(resNames)
-	preferredVerbs := []string{"list", "get", "search", "query"}
-
-	pathFor := func(rName string, r spec.Resource, eName string, ep spec.Endpoint) string {
+	pathFor := func(rName string, r spec.Resource, ep spec.Endpoint) string {
 		// Kebab the resource segment to match the actual cobra command name
 		// (mirrors toKebab(resourceName) in buildPromotedCommands). PascalCase
 		// or snake_case spec keys would otherwise advertise an unrunnable path.
 		parts := []string{toKebab(rName)}
 		if !isPromotableSingleEndpoint(rName, r) {
-			parts = append(parts, toKebab(eName))
+			parts = append(parts, toKebab(candidate.endpointName))
 		}
 		parts = append(parts, readmeExampleArgs(ep)...)
 		return strings.Join(parts, " ")
 	}
 
-	for _, rName := range resNames {
-		r := resources[rName]
-		for _, verb := range preferredVerbs {
-			if ep, ok := r.Endpoints[verb]; ok {
-				return pathFor(rName, r, verb, ep)
-			}
-		}
-	}
-	for _, rName := range resNames {
-		r := resources[rName]
-		eNames := sortedEndpointNames(r.Endpoints)
-		if len(eNames) > 0 {
-			return pathFor(rName, r, eNames[0], r.Endpoints[eNames[0]])
-		}
-	}
-	return ""
+	return pathFor(candidate.resourceName, candidate.resource, candidate.endpoint)
 }
-
 func commandExampleArgs(ep spec.Endpoint) string {
 	return strings.Join(commandExampleArgParts(ep), " ")
 }
 
 func commandExampleArgParts(ep spec.Endpoint) []string {
 	var parts []string
-	for _, p := range ep.Params {
-		if !p.Positional {
+	for _, p := range orderedPositionalParams(ep) {
+		if value, ok := derivableHappyArgValue(ep, p); ok {
+			parts = append(parts, value)
 			continue
 		}
-		val := exampleValue(p)
-		if val == "" {
-			val = "<" + p.Name + ">"
+		if p.Required {
+			val := exampleValue(p)
+			if val == "" {
+				val = "<" + p.Name + ">"
+			}
+			parts = append(parts, val)
+			continue
 		}
-		parts = append(parts, val)
+		break
 	}
 	return append(parts, requiredFlagExampleParts(ep)...)
 }
 
 func readmeExampleArgs(ep spec.Endpoint) []string {
 	var parts []string
-	for _, p := range ep.Params {
-		if p.Positional {
-			parts = append(parts, skillExamplePositionalValue(p))
-		}
+	for _, p := range orderedPositionalParams(ep) {
+		parts = append(parts, skillExamplePositionalValue(p))
 	}
 	return append(parts, requiredFlagExampleParts(ep)...)
 }
@@ -116,7 +143,16 @@ func requiredFlagExampleParts(ep spec.Endpoint) []string {
 		for _, p := range ep.Body {
 			if p.Required && p.Type == "string" {
 				val := exampleValue(p)
-				if val == "" {
+				// A string body flag whose value must be valid JSON (the command
+				// emits a json.Valid guard — see isJSONStringParam) cannot use the
+				// scalar "example-value" placeholder: it fails that guard
+				// immediately, so the emitted Example would advertise a command
+				// that errors on first run and the live-dogfood happy-path /
+				// json-fidelity probes (which run the Example verbatim) reject it.
+				// Emit a minimal valid-JSON placeholder instead.
+				if isJSONStringParam(p) {
+					val = jsonStringBodyExamplePlaceholder(p)
+				} else if val == "" {
 					val = "value"
 				}
 				parts = append(parts, "--"+publicFlagName(p), val)
@@ -125,6 +161,22 @@ func requiredFlagExampleParts(ep spec.Endpoint) []string {
 		}
 	}
 	return parts
+}
+
+// jsonStringBodyExamplePlaceholder returns a minimal, valid-JSON value for a
+// JSON-typed string body flag (isJSONStringParam). The value is single-quoted
+// so the rendered example survives a copy-paste into a shell and is parsed back
+// to valid JSON by the quote-aware live-dogfood example tokenizer
+// (shellargs.ArgsAfterBinary strips the quotes). An empty array/object keeps the
+// example runnable without inventing field names the upstream API might reject;
+// the array-vs-object shape follows the param's described body type.
+func jsonStringBodyExamplePlaceholder(p spec.Param) string {
+	desc := strings.TrimSpace(p.Description)
+	lower := strings.ToLower(desc)
+	if strings.HasPrefix(desc, "[") || strings.Contains(lower, "array") {
+		return "'[]'"
+	}
+	return "'{}'"
 }
 
 func requiredFlagExampleValue(ep spec.Endpoint, p spec.Param) string {

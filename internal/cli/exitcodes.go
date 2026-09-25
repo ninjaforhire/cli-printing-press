@@ -1,5 +1,10 @@
 package cli
 
+import (
+	"errors"
+	"fmt"
+)
+
 // Exit codes for structured error reporting.
 const (
 	ExitSuccess         = 0
@@ -22,3 +27,30 @@ type ExitError struct {
 
 func (e *ExitError) Error() string { return e.Err.Error() }
 func (e *ExitError) Unwrap() error { return e.Err }
+
+// Type assertion misses fmt.Errorf wraps from restore-after-cancel.
+func asExitError(err error) *ExitError {
+	var exitErr *ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr
+	}
+	return nil
+}
+
+// failClosedAfterReport returns the typed verification exit after a command
+// has already printed or encoded its report. Silent avoids a second stderr
+// copy from main; Cobra still prints the error once.
+func failClosedAfterReport(msg string) error {
+	return &ExitError{Code: ExitGenerationError, Err: errors.New(msg), Silent: true}
+}
+
+func wrapKeepingExitClass(err, extra error) error {
+	if extra == nil {
+		return err
+	}
+	wrapped := fmt.Errorf("%w; %v", err, extra)
+	if exitErr := asExitError(err); exitErr != nil {
+		return &ExitError{Code: exitErr.Code, Silent: exitErr.Silent, Err: wrapped}
+	}
+	return wrapped
+}

@@ -1,6 +1,6 @@
 # Setup Checks
 
-Post-contract checks the skill must run after executing the bash setup contract block in `SKILL.md`. These handle the contract output signals: `[setup-error]`, optional `[local-binary-stale]` / `[local-binary-rebuilt]` repo-mode rebuild markers, `[repo-upgrade-available]`, the always-emitted `PRINTING_PRESS_BIN=<abs-path>` and `PRESS_REPO_MODE=<true|false>` markers, the global open-agent-skills freshness check, the `min-binary-version` compatibility check, `[upgrade-required]`, `[upgrade-available]`, `[browser-tools-missing]`, and optional `[binary-shadow]` advisory.
+Post-contract checks the skill must run after executing the bash setup contract block in [phases/01-preflight.md](../phases/01-preflight.md). These handle the contract output signals: `[setup-error]`, optional `[local-binary-stale]` / `[local-binary-rebuilt]` repo-mode rebuild markers, `[go-toolchain-old]`, `[low-disk]`, `[repo-upgrade-available]`, the always-emitted `PRINTING_PRESS_BIN=<abs-path>` and `PRESS_REPO_MODE=<true|false>` markers, the global open-agent-skills freshness check, the `min-binary-version` compatibility check, `[skill-stale]`, `[upgrade-required]`, `[upgrade-available]`, `[browser-tools-missing]`, and optional `[binary-shadow]` advisory.
 
 Apply these in order. The preamble below runs unconditionally; each numbered section after it is conditional — do nothing if its trigger isn't present.
 
@@ -16,13 +16,30 @@ This rule applies to *all* generator command references in the rest of this docu
 
 ## 1. Refusal: missing prerequisite
 
-If the setup contract output contains a line starting with `[setup-error]`, a required prerequisite is missing (the cli-printing-press binary or the Go toolchain) and the contract has already exited non-zero.
+If the setup contract output contains a line starting with `[setup-error]`, a required prerequisite or environment floor is missing (for example: the cli-printing-press binary, the phase-receipt helper required by this skill, the Go toolchain, an old Go toolchain under `GOTOOLCHAIN=local`, an incomplete Go standard library, or critically low disk space) and the contract has already exited non-zero.
 
 **Stop the skill immediately.** Do not proceed to research, generation, or any other work. Surface the message the contract printed (it includes the exact install command or download URL) verbatim to the user.
 
 The user must install the missing prerequisite in their terminal before re-running. Do not offer to auto-install — the README's install flow is the source of truth for the binary, and silent auto-install hides failure modes (network, wrong GOPATH, no Go toolchain) inside an opaque skill invocation.
 
 If the contract output contains `[local-binary-stale]` followed by `[local-binary-rebuilt]`, continue setup. The repo-mode local binary was older than the checked-out source version and the contract rebuilt it before emitting `PRINTING_PRESS_BIN`. If `[local-binary-stale]` is followed by `[setup-error]`, this section's refusal rule applies.
+
+## 1.5. Environment advisories
+
+If the setup contract output contains a line starting with `[go-toolchain-old]`, the installed `go` is older than the toolchain used to build the resolved `cli-printing-press` binary. Parse the follow-up lines:
+
+- `PRESS_GO_INSTALLED=<installed Go version>`
+- `PRESS_GO_REQUIRED=<binary build Go version>`
+
+This is advisory by default because `GOTOOLCHAIN=auto` may download and use the required toolchain on the first Go command. Tell the user the later Go quality gates may download Go `<required>` or fail if the environment is offline or toolchain downloads are blocked. Do not stop the skill unless the setup contract also emitted `[setup-error]`.
+
+If the setup contract output contains a line starting with `[low-disk]`, the volume holding `PRINTING_PRESS_HOME` has less than the warning threshold free. Parse the follow-up lines:
+
+- `PRESS_DISK_PATH=<checked path>`
+- `PRESS_DISK_AVAIL_KB=<available KiB>`
+- `PRESS_DISK_WARN_KB=<warning threshold KiB>`
+
+This is advisory. Tell the user the current run may need several GiB for generated files, Go build cache, module downloads, or repository clones. Continue unless the setup contract also emitted `[setup-error]`. The thresholds can be tuned for small runners with `PRINTING_PRESS_DISK_WARN_KB` and `PRINTING_PRESS_DISK_FAIL_KB`; invalid threshold values make the disk probe skip silently.
 
 ## 2. Interactive repo upgrade prompt
 
@@ -78,7 +95,6 @@ If `PRESS_REPO_MODE=false`, run the targeted global open-agent-skills updater be
 npx -y skills@latest update -g \
   printing-press \
   printing-press-amend \
-  printing-press-catalog \
   printing-press-import \
   printing-press-output-review \
   printing-press-polish \
@@ -121,6 +137,30 @@ If the installed binary is older than the minimum, stop the skill immediately an
 > "cli-printing-press binary vX.Y.Z is older than the minimum required vA.B.C. Run `go install github.com/mvanhorn/cli-printing-press/v4/cmd/cli-printing-press@latest` to update."
 
 Do not proceed to research, scoring, publishing, or any other workflow when the binary is below `min-binary-version`. This is the compatibility floor, not a freshness advisory.
+
+## 4.25. Skill-too-old-for-binary (skill drift) hard gate
+
+This is the reverse of section 4. `min-binary-version` stops a skill that is newer than the binary. This section stops a **skill that is older than the binary** — the case where an upgraded binary still runs a frozen `version: 2.0.0` install whose Phase 1 text calls deleted commands.
+
+Apply these in order:
+
+1. If the setup contract output contains a line starting with `[skill-stale]`, parse:
+
+   - `PRESS_SKILL_INSTALLED=<skill version declared by the running skill>`
+   - `PRESS_SKILL_REQUIRED=<min_skill_version this binary expects>`
+   - `PRESS_SKILL_REINSTALL=<skills-only install command>`
+
+   **Stop the skill immediately.** Do not proceed to research, generation, scoring, publishing, or any later phase. The running skill text is older than this binary's floor; continuing would follow obsolete instructions. Tell the user:
+
+   > "printing-press skill v\<installed\> is older than cli-printing-press binary v\<binary\> expects (>= \<required\>). Reinstall the skills, then restart the agent session before re-running /printing-press."
+
+   Then give them the `PRESS_SKILL_REINSTALL` command (the skills-only installer). There is **no skip-and-continue**.
+
+2. Independently, read this skill's YAML frontmatter `version:` field and parse `min_skill_version` from `<PRINTING_PRESS_BIN> version --json`. Compare using semver. If the frontmatter version is missing or lower than `min_skill_version`, treat it as `[skill-stale]` even if the contract did not emit the marker (older binaries omit `min_skill_version` — skip this comparison when the field is absent). Same stop, same reinstall path, no skip.
+
+A current skill/binary pair emits no `[skill-stale]` marker, no stderr warning from `version --json`, and no extra human-facing output from this section.
+
+If `<PRINTING_PRESS_BIN> version --json` printed a `warning:` about an installed skill in a well-known location (`~/.claude/skills/printing-press` or similar) whose `version:` is below `min_skill_version`, treat that as `[skill-stale]` too: the binary discovered a stale on-disk copy that this session may be executing. Stop and reinstall as above.
 
 ## 4.5. Required-minimum (currency floor) hard gate
 

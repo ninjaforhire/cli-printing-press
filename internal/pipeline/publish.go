@@ -2,22 +2,23 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/mvanhorn/cli-printing-press/v4/catalog"
-	catalogpkg "github.com/mvanhorn/cli-printing-press/v4/internal/catalog"
-	"github.com/mvanhorn/cli-printing-press/v4/internal/catalogmeta"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/graphql"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/openapi"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/specmeta"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -107,20 +108,32 @@ func PublishWorkingCLI(state *PipelineState, targetDir string) (string, error) {
 	}
 
 	if err := CopyDir(workingDir, finalDir); err != nil {
+		// CopyDir may have created the destination before failing. It did not
+		// exist before this call, and a leftover tree makes the retry fail
+		// with "already exists".
+		_ = os.RemoveAll(finalDir)
 		return "", fmt.Errorf("publishing CLI: %w", err)
 	}
 
+	prevPublished := state.PublishedDir
 	state.PublishedDir = finalDir
+	// The destination did not exist before this call. Drop it if a later step
+	// fails so the next attempt is not rejected because the path already exists.
+	abandonPublish := func(err error) (string, error) {
+		state.PublishedDir = prevPublished
+		_ = os.RemoveAll(finalDir)
+		return "", err
+	}
 
 	if err := writeCLIManifestForPublish(state, finalDir); err != nil {
-		return "", err
+		return abandonPublish(err)
 	}
 
 	// Refresh the MCPB manifest.json for the final published location.
 	// Generate already wrote one alongside .printing-press.json; rewriting
 	// here picks up any provenance fields the publish step added.
-	if err := WriteMCPBManifest(finalDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write MCPB manifest.json: %v\n", err)
+	if err := EnsureMCPBManifest(finalDir); err != nil {
+		return abandonPublish(fmt.Errorf("writing MCPB manifest: %w", err))
 	}
 
 	if err := state.Save(); err != nil {
@@ -205,12 +218,15 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		RunID:                state.RunID,
 	}
 	var existingDescription string
+	toolsManifestExpected := false
 
 	// Carry forward metadata from the generated manifest when publish-time
 	// parsing is unavailable or lossy for the original spec format. NovelFeatures
 	// is carried forward as a defensive fallback in case research.json is absent;
 	// when both are available, research.json wins as the post-dogfood source of truth.
+	var existingRaw map[string]json.RawMessage
 	if existingData, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename)); err == nil {
+		_ = json.Unmarshal(existingData, &existingRaw)
 		var existing CLIManifest
 		if json.Unmarshal(existingData, &existing) == nil {
 			if state.RunID == "" && existing.RunID != "" {
@@ -234,16 +250,6 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 			}
 			if existing.PrinterName != "" {
 				m.PrinterName = existing.PrinterName
-			}
-			// Backfill the creator from the carried-forward legacy fields so a
-			// CLI generated before the creator model persists a creator on
-			// republish (the public registry reads the written manifest, not
-			// publish-time transient state).
-			if (m.Creator == nil || m.Creator.IsZero()) && (strings.TrimSpace(m.Printer) != "" || strings.TrimSpace(m.PrinterName) != "") {
-				m.Creator = &spec.Person{Handle: strings.TrimSpace(m.Printer), Name: strings.TrimSpace(m.PrinterName)}
-			}
-			if existing.CatalogEntry != "" {
-				m.CatalogEntry = existing.CatalogEntry
 			}
 			if existing.Category != "" {
 				m.Category = existing.Category
@@ -282,29 +288,13 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		}
 	}
 
-	// Catalog metadata must be present before parsing refreshes display_name:
-	// explicit spec display_name wins, but OpenAPI info.title-derived fallback
-	// should not clobber curated catalog display_name.
-	if entry, err := catalogpkg.LookupFS(catalog.FS, state.APIName); err == nil {
-		m.CatalogEntry = entry.Name
-		m.Category = entry.Category
-		m.Regions = append([]string(nil), entry.Regions...)
-		m.APILanguage = entry.APILanguage
-		if m.Description == "" {
-			m.Description = entry.Description
-		}
-		if entry.DisplayName != "" {
-			m.DisplayName = entry.DisplayName
-		}
-	}
-
 	// Detect spec format and compute checksum from the spec file archived
 	// alongside the CLI. generate writes spec.json for JSON inputs and
 	// spec.yaml for YAML inputs; --docs / --plan runs leave no archive and
 	// these fields stay empty.
 	if specFile, data, err := findArchivedSpec(state.EffectiveWorkingDir()); err == nil && specFile != "" {
 		m.SpecFormat = detectSpecFormat(data)
-		if checksum, err := specChecksum(specFile); err == nil {
+		if checksum, err := specChecksum(specFile, m.SpecFormat); err == nil {
 			m.SpecChecksum = checksum
 		}
 
@@ -324,7 +314,7 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 			parsed, parseErr = spec.ParseBytes(data)
 		}
 		if parseErr == nil {
-			applyPublishCatalogMetadata(parsed, state.APIName)
+			applyPublishSpecMetadata(parsed, state.APIName)
 			populateMCPMetadata(&m, parsed)
 			if m.Description == "" {
 				m.Description = naming.CompactDescription(parsed.Description)
@@ -337,12 +327,9 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 			m.Description = archivedSpecDescription(data)
 		}
 
-		// Fall back to spec.Category for synthetic CLIs not in the embedded
-		// catalog (mirrors the same fallback in WriteManifestForGenerate).
-		// The catalog lookup earlier in this function only fires for
-		// catalog-listed APIs; synthetic CLIs would otherwise lose the
-		// spec's category at publish time and break verify-skill's
-		// canonical-sections check.
+		// Fall back to spec.Category so CLIs keep their category at publish
+		// time and verify-skill's canonical-sections check stays aligned with
+		// the rendered README/SKILL install block.
 		if m.Category == "" && parsed != nil && parsed.Category != "" {
 			m.Category = parsed.Category
 		}
@@ -351,6 +338,7 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		// (auth-doctor, mcp-audit). Non-blocking: log warning on error
 		// but don't fail the publish.
 		if parsed != nil {
+			toolsManifestExpected = true
 			if tmErr := WriteToolsManifestWithDescription(dir, parsed, m.Description); tmErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not write tools manifest: %v\n", tmErr)
 			}
@@ -422,7 +410,41 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		}
 	}
 
-	return WriteCLIManifest(dir, m)
+	if m.Category == "" && state != nil && strings.TrimSpace(state.Category) != "" {
+		m.Category = strings.TrimSpace(state.Category)
+	}
+	if m.Category == "" && state != nil {
+		if rs, ok := loadGenerateResearchState(state.ResearchDir()); ok && strings.TrimSpace(rs.Category) != "" {
+			m.Category = strings.TrimSpace(rs.Category)
+		}
+	}
+	if strings.TrimSpace(m.Category) == "" {
+		cliName := m.CLIName
+		if cliName == "" && state != nil {
+			cliName = naming.CLI(state.APIName)
+		}
+		fmt.Fprintf(os.Stderr, "warning: promoting %s without a public-library category; pass generate --category <slug> so publish and verify-skill use the category-specific install path\n", cliName)
+	}
+
+	backfillPromoteManifestAttribution(&m)
+
+	clearFields := map[string]struct{}{}
+	if m.SpecURL != "" && m.SpecPath == "" {
+		clearFields["spec_path"] = struct{}{}
+	}
+	if m.SpecPath != "" && m.SpecURL == "" {
+		clearFields["spec_url"] = struct{}{}
+	}
+	if err := writeCLIManifestPreservingRawFields(dir, m, existingRaw, clearFields); err != nil {
+		return err
+	}
+	if err := syncToolsManifestNovelFeatures(dir, m.NovelFeatures); err != nil {
+		if os.IsNotExist(err) && !toolsManifestExpected {
+			return nil
+		}
+		return fmt.Errorf("syncing novel features to tools manifest: %w", err)
+	}
+	return nil
 }
 
 func archivedSpecDescription(data []byte) string {
@@ -435,21 +457,15 @@ func archivedSpecDescription(data []byte) string {
 	return naming.CompactDescription(probe.Description)
 }
 
-func applyPublishCatalogMetadata(parsed *spec.APISpec, apiName string) {
+func applyPublishSpecMetadata(parsed *spec.APISpec, apiName string) {
 	if parsed == nil || apiName == "" {
 		return
 	}
 	priorName := parsed.Name
 	if priorName != "" && priorName != apiName {
-		catalogmeta.RebaseAuthEnvPrefix(&parsed.Auth, priorName, apiName)
+		specmeta.RebaseAuthEnvPrefix(&parsed.Auth, priorName, apiName)
 	}
 	parsed.Name = apiName
-
-	entry, err := catalogpkg.LookupFS(catalog.FS, apiName)
-	if err != nil {
-		return
-	}
-	catalogmeta.ApplyRuntimeMetadata(parsed, entry)
 }
 
 // loadResearchForPromote returns the research.json relevant to the
@@ -639,14 +655,24 @@ func CopyDir(src, dst string) error {
 
 const publishableManuscriptMaxCaptureBytes int64 = 100 * 1024 * 1024
 
-// CopyPublishableManuscriptDir copies manuscript artifacts that may be bundled
-// into published CLIs. Raw HAR captures and huge capture files stay in local
-// runstate only because they can carry cookies, session identifiers, and PII.
-func CopyPublishableManuscriptDir(src, dst string) error {
-	return copyDirFiltered(src, dst, shouldSkipPublishableManuscriptFile)
+type PublishableManuscriptCopyOptions struct {
+	IncludeRawCaptures bool
 }
 
-func shouldSkipPublishableManuscriptFile(path string, info fs.FileInfo) bool {
+// CopyPublishableManuscriptDir copies manuscript artifacts that may be bundled
+// into published CLIs. Raw browser-sniff captures stay in local runstate by
+// default because they can carry cookies, session identifiers, and PII.
+func CopyPublishableManuscriptDir(src, dst string) error {
+	return CopyPublishableManuscriptDirWithOptions(src, dst, PublishableManuscriptCopyOptions{})
+}
+
+func CopyPublishableManuscriptDirWithOptions(src, dst string, opts PublishableManuscriptCopyOptions) error {
+	return copyDirFiltered(src, dst, func(path string, info fs.FileInfo) bool {
+		return shouldSkipPublishableManuscriptFile(path, info, opts)
+	})
+}
+
+func shouldSkipPublishableManuscriptFile(path string, info fs.FileInfo, opts PublishableManuscriptCopyOptions) bool {
 	// A `sources/` directory holds downloaded third-party reference repos — local
 	// research INPUT, not authored manuscript OUTPUT. Never publish copies of other
 	// projects' code: it is a licensing problem and a secret/PII vector (the only
@@ -657,10 +683,84 @@ func shouldSkipPublishableManuscriptFile(path string, info fs.FileInfo) bool {
 	if info.IsDir() && filepath.Base(path) == "sources" {
 		return true
 	}
+	if !info.IsDir() && info.Size() >= publishableManuscriptMaxCaptureBytes {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(filepath.Base(path)), ".pre-pii-scrub") {
+		return true
+	}
+	if opts.IncludeRawCaptures {
+		return false
+	}
+	if isRawBrowserSniffCapture(path, info) {
+		return true
+	}
 	if strings.EqualFold(filepath.Ext(path), ".har") {
 		return true
 	}
-	return info.Size() >= publishableManuscriptMaxCaptureBytes
+	return false
+}
+
+func isRawBrowserSniffCapture(path string, info fs.FileInfo) bool {
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	parentPath := filepath.Dir(clean)
+
+	if pathHasComponent(parentPath, "discovery") {
+		hyphenated, _ := filepath.Match("probe-*.json", base)
+		underscored, _ := filepath.Match("probe_*.json", base)
+		if hyphenated || underscored {
+			return true
+		}
+	}
+	if info.IsDir() && pathHasComponent(parentPath, "discovery") && base == "bundles" {
+		return true
+	}
+	if info.IsDir() && pathHasComponent(parentPath, "research") && strings.HasSuffix(base, "-browser-sniff-spec-samples") {
+		return true
+	}
+	return false
+}
+
+func pathHasComponent(path, component string) bool {
+	return slices.Contains(strings.Split(filepath.ToSlash(filepath.Clean(path)), "/"), component)
+}
+
+// A WalkDir child can disappear between enumeration and stat (Windows
+// GetFileAttributesEx on a vanished .gotmp during --force backup). Skip
+// that entry; keep real IO errors and a vanished source root fatal.
+func skipIfVanished(err error, isDir bool) error {
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if isDir {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+type copyDirWalkHook func(path string, d fs.DirEntry)
+
+var copyDirTestHook atomic.Pointer[copyDirWalkHook]
+
+func invokeCopyDirTestHook(path string, d fs.DirEntry) {
+	if p := copyDirTestHook.Load(); p != nil {
+		(*p)(path, d)
+	}
+}
+
+func SetCopyDirWalkHookForTest(fn func(path string, d fs.DirEntry)) func() {
+	prev := copyDirTestHook.Load()
+	var installed *copyDirWalkHook
+	if fn != nil {
+		hook := copyDirWalkHook(fn)
+		installed = &hook
+	}
+	copyDirTestHook.Store(installed)
+	return func() {
+		// Leave a later installation in place; restore only what this call set.
+		copyDirTestHook.CompareAndSwap(installed, prev)
+	}
 }
 
 func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInfo) bool) error {
@@ -685,8 +785,12 @@ func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInf
 	// callback sees them as symlink entries and we can validate them
 	// without descending into potentially huge or circular targets.
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		invokeCopyDirTestHook(path, d)
 		if walkErr != nil {
-			return walkErr
+			if path == src {
+				return walkErr
+			}
+			return skipIfVanished(walkErr, d != nil && d.IsDir())
 		}
 		if path == src {
 			return nil
@@ -718,7 +822,7 @@ func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInf
 		if d.Type()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(path)
 			if err != nil {
-				return err
+				return skipIfVanished(err, false)
 			}
 			ok, err := symlinkTargetWithinRoot(srcRoot, path, link)
 			if err != nil {
@@ -730,7 +834,7 @@ func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInf
 			if skipFile != nil {
 				info, err := d.Info()
 				if err != nil {
-					return err
+					return skipIfVanished(err, d.IsDir())
 				}
 				if skipFile(path, info) {
 					return nil
@@ -749,7 +853,7 @@ func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInf
 		if d.IsDir() {
 			info, err := d.Info()
 			if err != nil {
-				return err
+				return skipIfVanished(err, true)
 			}
 			// A filtered copy may prune whole subtrees (e.g. downloaded
 			// third-party `sources/` in manuscripts). The unfiltered CopyDir
@@ -762,12 +866,15 @@ func copyDirFiltered(src, dst string, skipFile func(path string, info fs.FileInf
 
 		info, err := d.Info()
 		if err != nil {
-			return err
+			return skipIfVanished(err, false)
 		}
 		if skipFile != nil && skipFile(path, info) {
 			return nil
 		}
-		return copyFile(path, target, info.Mode())
+		if err := copyFile(path, target, info.Mode()); err != nil {
+			return skipIfVanished(err, false)
+		}
+		return nil
 	})
 }
 

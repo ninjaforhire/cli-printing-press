@@ -21,6 +21,7 @@ import (
 	"github.com/mvanhorn/cli-printing-press/v4/internal/artifacts"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/platform"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/shellargs"
+	"golang.org/x/mod/modfile"
 )
 
 // LiveStatus is the outcome of one feature's live check.
@@ -142,20 +143,25 @@ type LiveCheckOptions struct {
 	// directory the run state owns (where research.json lives next to the
 	// run's manuscripts) and the printed CLI hasn't been promoted to its
 	// final library location. When blank the live check looks under CLIDir
-	// and then walks up a few parent levels (see findResearchDir) so the
+	// and then walks up a few parent levels (see FindResearchDir) so the
 	// standard pipeline layout — research.json at the run-dir level, CLI
 	// under <runRoot>/working/<api>-pp-cli — works without an explicit
 	// override.
 	ResearchDir string
 	// BinaryName, when non-empty, names the executable to run. Leave blank
-	// to let RunLiveCheck derive it from CLIDir (tries `<base>-pp-cli`,
-	// falls back to `<base>`).
+	// to let RunLiveCheck derive it from CLIDir (tries the manifest name,
+	// then `<base>-pp-cli`, and finally `<base>`).
 	BinaryName string
 	// Timeout bounds each feature invocation. Zero uses DefaultLiveCheckTimeout.
 	Timeout time.Duration
 	// Concurrency sets the parallel-feature worker count. Zero uses
 	// DefaultLiveCheckConcurrency. Set to 1 to force serial execution.
 	Concurrency int
+	// AllowDestructive permits live samples that mutate external state,
+	// including generated-command fallbacks and research-authored novel
+	// examples. Default skips those probes so Example strings cannot create
+	// leftover resources.
+	AllowDestructive bool
 }
 
 // RunLiveCheck samples novel feature Example commands against the real CLI.
@@ -166,7 +172,23 @@ type LiveCheckOptions struct {
 // check doesn't penalize the CLI.
 func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 	out := &LiveCheckResult{RanAt: time.Now().UTC()}
-	releaseHome, err := scopeSubprocessHome()
+	cliDir, err := ResolveTargetDir(opts.CLIDir)
+	if err != nil {
+		out.Unable = true
+		out.Reason = err.Error()
+		return out
+	}
+	opts.CLIDir = cliDir
+	if opts.ResearchDir != "" {
+		researchDir, err := ResolveTargetDir(opts.ResearchDir)
+		if err != nil {
+			out.Unable = true
+			out.Reason = fmt.Errorf("resolving research directory: %w", err).Error()
+			return out
+		}
+		opts.ResearchDir = researchDir
+	}
+	releaseHome, err := scopeSubprocessHome(findCLINames(opts.CLIDir)...)
 	if err != nil {
 		out.Unable = true
 		out.Reason = err.Error()
@@ -174,15 +196,9 @@ func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 	}
 	defer releaseHome()
 
-	if opts.CLIDir == "" {
-		out.Unable = true
-		out.Reason = "CLIDir is required"
-		return out
-	}
-
 	researchDir := opts.ResearchDir
 	if researchDir == "" {
-		researchDir = findResearchDir(opts.CLIDir)
+		researchDir = FindResearchDir(opts.CLIDir)
 	}
 	research, err := LoadResearch(researchDir)
 	if err != nil {
@@ -211,20 +227,30 @@ func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 		out.BinaryRefresh.BinaryPath = binaryPath
 	}
 	features := pickFeatures(research)
-	if len(features) == 0 {
+	checkFeatures := annotateLiveCheckFeatures(opts.CLIDir, features)
+	if len(checkFeatures) == 0 {
 		var fallbackErr error
-		features, fallbackErr = pickGeneratedCommandFeatures(binaryPath)
+		checkFeatures, fallbackErr = pickGeneratedCommandFeatures(binaryPath)
 		if fallbackErr != nil {
 			out.Unable = true
 			out.Reason = "no novel features with Example commands and no generated command fallback: " + fallbackErr.Error()
 			return out
 		}
-		if len(features) == 0 {
+		if len(checkFeatures) == 0 {
 			out.Unable = true
 			out.Reason = "no novel features with Example commands and no generated command leaves to sample"
 			return out
 		}
+	} else {
+		checkFeatures = enrichLiveCheckFeaturesFromAgentContext(binaryPath, checkFeatures)
 	}
+	probeBinaryPath, cleanupProbeBinary, snapshotErr := snapshotLiveCheckBinary(binaryPath)
+	if snapshotErr != nil {
+		out.Unable = true
+		out.Reason = "snapshotting live-check binary: " + snapshotErr.Error()
+		return out
+	}
+	defer cleanupProbeBinary()
 
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -234,11 +260,11 @@ func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 	if concurrency <= 0 {
 		concurrency = DefaultLiveCheckConcurrency
 	}
-	if concurrency > len(features) {
-		concurrency = len(features)
+	if concurrency > len(checkFeatures) {
+		concurrency = len(checkFeatures)
 	}
 
-	results := runFeaturesConcurrent(opts.CLIDir, binaryPath, annotateLiveCheckFeatures(opts.CLIDir, features), timeout, concurrency)
+	results := runFeaturesConcurrent(opts.CLIDir, probeBinaryPath, checkFeatures, timeout, concurrency, opts.AllowDestructive)
 	out.Features = results
 	for _, r := range results {
 		switch r.Status {
@@ -256,43 +282,8 @@ func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 	return out
 }
 
-// researchParentWalkDepth bounds how far above CLIDir the live check looks
-// for research.json. The standard pipeline lays out
-// <runRoot>/working/<api>-pp-cli, putting research.json two levels above
-// CLIDir; three is a small margin for layouts that add a wrapper directory
-// without inviting scans that could pick up unrelated research.json files
-// far above the working tree.
-const researchParentWalkDepth = 3
-
-// findResearchDir returns a directory containing research.json that the
-// live check can hand to LoadResearch. It first checks cliDir itself, then
-// walks up the parent chain up to researchParentWalkDepth levels. If no
-// research.json is found, cliDir is returned so the caller's error message
-// stays "no research.json: ... <cliDir>/research.json".
-//
-// The walk handles the canonical non-OpenAPI layout where research.json
-// sits at the run-dir level while the printed CLI lives under
-// <runRoot>/working/<api>-pp-cli.
-func findResearchDir(cliDir string) string {
-	if cliDir == "" {
-		return cliDir
-	}
-	dir := cliDir
-	for steps := 0; steps <= researchParentWalkDepth; steps++ {
-		if _, err := os.Stat(filepath.Join(dir, "research.json")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return cliDir
-}
-
 func refreshLiveCheckStageBinary(cliDir, name string) (LiveCheckBinaryRefresh, error) {
-	stagePath, stageCandidate := liveCheckExistingStageBinaryPath(cliDir, name)
+	stagePath, _ := liveCheckExistingStageBinaryPath(cliDir, name)
 	if stagePath == "" {
 		return LiveCheckBinaryRefresh{Action: "no_stage", Reason: "no staged binary found"}, nil
 	}
@@ -328,34 +319,10 @@ func refreshLiveCheckStageBinary(cliDir, name string) (LiveCheckBinaryRefresh, e
 		refresh.Reason = "staged binary is newer than Go sources"
 		return refresh, nil
 	}
-	if freshPath := liveCheckFreshRunnableBinaryPath(cliDir, stageCandidate, newestSource); freshPath != "" {
-		refresh.Action = "fresh_fallback"
-		refresh.BinaryPath = freshPath
-		refresh.Reason = "same-name runnable binary is newer than Go sources"
-		return refresh, nil
-	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(stagePath), "."+filepath.Base(stagePath)+".rebuild-*")
-	if err != nil {
-		refresh.Action = "failed"
-		return refresh, fmt.Errorf("creating staged rebuild temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		refresh.Action = "failed"
-		return refresh, fmt.Errorf("closing staged rebuild temp file: %w", err)
-	}
-	_ = os.Remove(tmpPath)
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if err := buildCLITo(cliDir, tmpPath); err != nil {
+	if err := rebuildLiveCheckBinary(cliDir, stagePath); err != nil {
 		refresh.Action = "failed"
 		return refresh, err
-	}
-	if err := replaceLiveCheckStageBinary(tmpPath, stagePath); err != nil {
-		refresh.Action = "failed"
-		return refresh, fmt.Errorf("replacing staged binary: %w", err)
 	}
 	refresh.Action = "rebuilt"
 	refresh.BinaryPath = stagePath
@@ -363,9 +330,65 @@ func refreshLiveCheckStageBinary(cliDir, name string) (LiveCheckBinaryRefresh, e
 	return refresh, nil
 }
 
-func replaceLiveCheckStageBinary(src, dst string) error {
+func rebuildLiveCheckBinary(cliDir, binaryPath string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(binaryPath), "."+filepath.Base(binaryPath)+".rebuild-*")
+	if err != nil {
+		return fmt.Errorf("creating binary rebuild temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("closing binary rebuild temp file: %w", err)
+	}
+	_ = os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := buildCLITo(cliDir, tmpPath); err != nil {
+		return err
+	}
+	if err := replaceLiveCheckBinary(tmpPath, binaryPath); err != nil {
+		return fmt.Errorf("replacing binary: %w", err)
+	}
+	return nil
+}
+
+func snapshotLiveCheckBinary(binaryPath string) (string, func(), error) {
+	// Keep probes on an immutable copy so a later staged refresh cannot replace
+	// the executable backing an in-flight probe.
+	info, err := os.Stat(binaryPath)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("statting resolved binary: %w", err)
+	}
+	data, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("reading resolved binary: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp(filepath.Dir(binaryPath), ".printing-press-live-check-")
+	if err != nil {
+		tempDir, err = os.MkdirTemp("", "printing-press-live-check-")
+	}
+	if err != nil {
+		return "", func() {}, fmt.Errorf("creating probe directory: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tempDir) }
+
+	dstPath := filepath.Join(tempDir, filepath.Base(binaryPath))
+	if err := os.WriteFile(dstPath, data, info.Mode().Perm()); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("writing probe binary: %w", err)
+	}
+	return dstPath, cleanup, nil
+}
+
+func replaceLiveCheckBinary(src, dst string) error {
 	if runtime.GOOS != "windows" {
 		return os.Rename(src, dst)
+	}
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return os.Rename(src, dst)
+	} else if err != nil {
+		return err
 	}
 
 	backup, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".old-*")
@@ -390,21 +413,6 @@ func replaceLiveCheckStageBinary(src, dst string) error {
 	return nil
 }
 
-func liveCheckFreshRunnableBinaryPath(cliDir, name string, newestSource time.Time) string {
-	for _, candidate := range liveCheckBinaryNames(cliDir, name) {
-		for _, path := range liveCheckBinaryCandidatePathsForName(cliDir, candidate, runtime.GOOS) {
-			info, err := os.Stat(path)
-			if err != nil || !isLiveCheckExecutableForGOOS(path, info.Mode(), runtime.GOOS) {
-				continue
-			}
-			if !info.ModTime().Before(newestSource) {
-				return path
-			}
-		}
-	}
-	return ""
-}
-
 func liveCheckExistingStageBinaryPath(cliDir, name string) (string, string) {
 	stagedDir := filepath.Join(cliDir, "build", "stage", "bin")
 	for _, candidate := range liveCheckBinaryNames(cliDir, name) {
@@ -422,52 +430,206 @@ func liveCheckExistingStageBinaryPath(cliDir, name string) (string, string) {
 }
 
 func newestLiveCheckSourceModTime(cliDir, cmdDir string) (time.Time, bool, error) {
+	newest, found, err := newestLiveCheckSourceUnder(cliDir)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	mayUseExternal, err := liveCheckMayUseExternalLocalModules(cliDir)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if !mayUseExternal {
+		return newest, found, nil
+	}
+	graphNewest, graphFound, err := newestLiveCheckBuildGraphModTime(cmdDir)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if graphFound && (!found || graphNewest.After(newest)) {
+		return graphNewest, true, nil
+	}
+	return newest, found, nil
+}
+
+func newestLiveCheckSourceUnder(root string) (time.Time, bool, error) {
 	var newest time.Time
 	found := false
-	for _, root := range []string{cmdDir, filepath.Join(cliDir, "internal")} {
-		if _, err := os.Stat(root); err != nil {
-			if os.IsNotExist(err) {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != root && entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		isModuleInput := filepath.Dir(path) == root && (entry.Name() == "go.mod" || entry.Name() == "go.sum")
+		if !isModuleInput && (filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go")) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !found || info.ModTime().After(newest) {
+			newest = info.ModTime()
+			found = true
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return newest, found, nil
+}
+
+func liveCheckMayUseExternalLocalModules(cliDir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(cliDir, "go.mod"))
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err == nil {
+		file, err := modfile.Parse("go.mod", data, nil)
+		if err != nil {
+			return false, err
+		}
+		for _, replacement := range file.Replace {
+			path := filepath.FromSlash(replacement.New.Path)
+			if replacement.New.Version == "" && (filepath.IsAbs(path) || path == "." || path == ".." || strings.HasPrefix(path, "."+string(os.PathSeparator)) || strings.HasPrefix(path, ".."+string(os.PathSeparator))) {
+				return true, nil
+			}
+		}
+	}
+	for dir := cliDir; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return false, nil
+}
+
+func newestLiveCheckBuildGraphModTime(cmdDir string) (time.Time, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./"+filepath.Base(cmdDir))
+	cmd.Dir = filepath.Dir(cmdDir)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return time.Time{}, false, fmt.Errorf("listing CLI build dependencies: %w\n%s", err, string(exitErr.Stderr))
+		}
+		return time.Time{}, false, fmt.Errorf("listing CLI build dependencies: %w", err)
+	}
+
+	type buildPackage struct {
+		Dir          string
+		GoFiles      []string
+		CgoFiles     []string
+		CFiles       []string
+		CXXFiles     []string
+		MFiles       []string
+		HFiles       []string
+		FFiles       []string
+		SFiles       []string
+		SwigFiles    []string
+		SwigCXXFiles []string
+		SysoFiles    []string
+		EmbedFiles   []string
+		Module       *struct {
+			Main    bool
+			Replace *struct {
+				Version string
+			}
+		}
+	}
+
+	var newest time.Time
+	found := false
+	seen := make(map[string]bool)
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var pkg buildPackage
+		if err := decoder.Decode(&pkg); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return time.Time{}, false, fmt.Errorf("decoding CLI build dependencies: %w", err)
+		}
+		if pkg.Module == nil || (!pkg.Module.Main && (pkg.Module.Replace == nil || pkg.Module.Replace.Version != "")) {
+			continue
+		}
+		files := append([]string{}, pkg.GoFiles...)
+		files = append(files, pkg.CgoFiles...)
+		files = append(files, pkg.CFiles...)
+		files = append(files, pkg.CXXFiles...)
+		files = append(files, pkg.MFiles...)
+		files = append(files, pkg.HFiles...)
+		files = append(files, pkg.FFiles...)
+		files = append(files, pkg.SFiles...)
+		files = append(files, pkg.SwigFiles...)
+		files = append(files, pkg.SwigCXXFiles...)
+		files = append(files, pkg.SysoFiles...)
+		files = append(files, pkg.EmbedFiles...)
+		for _, name := range files {
+			path := name
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(pkg.Dir, path)
+			}
+			path = filepath.Clean(path)
+			if seen[path] {
 				continue
 			}
-			return time.Time{}, false, err
-		}
-		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if entry.IsDir() || filepath.Ext(path) != ".go" {
-				return nil
-			}
-			info, err := entry.Info()
+			seen[path] = true
+			info, err := os.Stat(path)
 			if err != nil {
-				return err
+				return time.Time{}, false, err
 			}
 			if !found || info.ModTime().After(newest) {
 				newest = info.ModTime()
 				found = true
 			}
-			return nil
-		})
-		if err != nil {
-			return time.Time{}, false, err
 		}
 	}
 	return newest, found, nil
 }
 
 // resolveBinaryPath returns the absolute path to the CLI binary. When name
-// is non-empty it's used verbatim; otherwise RunLiveCheck tries the common
-// `<base>-pp-cli` naming convention and falls back to `<base>`.
+// is non-empty it's used verbatim; otherwise the manifest name is tried before
+// the common `<base>-pp-cli` naming convention and `<base>` fallback.
 func resolveBinaryPath(cliDir, name string) (string, error) {
 	return resolveBinaryPathForGOOS(cliDir, name, runtime.GOOS)
+}
+
+// ResolveScorerBinaryPath returns the runnable CLI binary used by scorer and
+// shipcheck. A staged binary wins over a newer-mtime root or makefile
+// candidate so a stale tree-root binary cannot hijack the live gate. An
+// explicit name wins; otherwise the manifest name is tried before
+// worktree-derived legacy names.
+func ResolveScorerBinaryPath(cliDir, name string) (string, error) {
+	return resolveBinaryPath(cliDir, name)
+}
+
+// ResolveScorerBinaryPathForGOOS is the platform-explicit form used by tests
+// and path-building callers that need to model another host executable
+// suffix.
+func ResolveScorerBinaryPathForGOOS(cliDir, name, goos string) (string, error) {
+	return resolveBinaryPathForGOOS(cliDir, name, goos)
 }
 
 func resolveBinaryPathForGOOS(cliDir, name, goos string) (string, error) {
 	candidates := liveCheckBinaryCandidatesForGOOS(cliDir, name, goos)
 	var nonExecutablePath string
 	for _, candidate := range liveCheckBinaryNames(cliDir, name) {
-		var bestPath string
-		var bestModTime time.Time
+		var stagedPath string
+		var fallbackPath string
+		var fallbackModTime time.Time
 		for _, path := range liveCheckBinaryCandidatePathsForName(cliDir, candidate, goos) {
 			info, err := os.Stat(path)
 			if err != nil {
@@ -479,15 +641,25 @@ func resolveBinaryPathForGOOS(cliDir, name, goos string) (string, error) {
 				}
 				continue
 			}
-			if bestPath == "" || info.ModTime().After(bestModTime) {
-				bestPath = path
-				bestModTime = info.ModTime()
+			if liveCheckPathIsStaged(cliDir, path) {
+				if stagedPath == "" {
+					stagedPath = path
+				}
+				continue
+			}
+			if fallbackPath == "" || info.ModTime().After(fallbackModTime) {
+				fallbackPath = path
+				fallbackModTime = info.ModTime()
 			}
 		}
-		if bestPath != "" {
-			absPath, err := filepath.Abs(bestPath)
+		chosen := stagedPath
+		if chosen == "" {
+			chosen = fallbackPath
+		}
+		if chosen != "" {
+			absPath, err := filepath.Abs(chosen)
 			if err != nil {
-				return "", fmt.Errorf("resolving binary path %q: %w", bestPath, err)
+				return "", fmt.Errorf("resolving binary path %q: %w", chosen, err)
 			}
 			return absPath, nil
 		}
@@ -496,6 +668,11 @@ func resolveBinaryPathForGOOS(cliDir, name, goos string) (string, error) {
 		return "", fmt.Errorf("binary %q is not executable", nonExecutablePath)
 	}
 	return "", fmt.Errorf("no runnable binary found in %q (tried %v)", cliDir, candidates)
+}
+
+func liveCheckPathIsStaged(cliDir, path string) bool {
+	stagedDir := filepath.Join(cliDir, "build", "stage", "bin")
+	return filepath.Dir(filepath.Clean(path)) == filepath.Clean(stagedDir)
 }
 
 func isLiveCheckExecutableForGOOS(path string, mode os.FileMode, goos string) bool {
@@ -524,16 +701,32 @@ func liveCheckBinaryCandidatesForGOOS(cliDir, name, goos string) []string {
 }
 
 func liveCheckBinaryNames(cliDir, name string) []string {
-	names := []string{name}
-	if name == "" {
-		base := filepath.Base(cliDir)
-		names = []string{base + "-pp-cli", base}
+	if strings.TrimSpace(name) != "" {
+		return []string{name}
 	}
+
+	names := make([]string, 0, 3)
+	seen := make(map[string]struct{})
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		names = append(names, candidate)
+	}
+	add(ReadCLIBinaryName(cliDir))
+	base := filepath.Base(cliDir)
+	add(base + "-pp-cli")
+	add(base)
 	return names
 }
 
 func liveCheckBinaryCandidatePathsForName(cliDir, candidate, goos string) []string {
-	// Candidate order breaks ties between equally fresh binaries:
+	// Layout priority, not mtime, chooses among existing binaries:
 	//   1. <cliDir>/build/stage/bin/<name>           validate-stage Unix
 	//   2. <cliDir>/build/stage/bin/<name>.exe       validate-stage Windows
 	//   3. <cliDir>/bin/<name>                       Makefile Unix
@@ -542,7 +735,8 @@ func liveCheckBinaryCandidatePathsForName(cliDir, candidate, goos string) []stri
 	//   6. <cliDir>/<name>.exe                       direct go-build Windows
 	// The generator's --validate "build runnable binary" gate emits the
 	// binary under build/stage/bin/. The generated Makefile writes bin/.
-	// Manual fix loops often rebuild directly into cliDir.
+	// Manual fix loops often rebuild directly into cliDir; a fresher mtime
+	// on that root copy must not beat a staged binary.
 	stagedDir := filepath.Join(cliDir, "build", "stage", "bin")
 	makefileBinDir := filepath.Join(cliDir, "bin")
 	if candidate == "" {
@@ -571,19 +765,70 @@ func liveCheckBinaryCandidatePathsForName(cliDir, candidate, goos string) []stri
 type liveCheckFeature struct {
 	NovelFeature
 	DataSourceStrategy string
+	Path               []string
+	Annotations        map[string]string
 }
 
 func annotateLiveCheckFeatures(cliDir string, features []NovelFeature) []liveCheckFeature {
 	strategies := novelCommandDataSourceStrategies(cliDir)
 	out := make([]liveCheckFeature, 0, len(features))
 	for _, f := range features {
-		leaf := lastPathSegment(commandPath(f.Command))
+		path := liveCheckFeaturePathFromNovel(f)
+		leaf := ""
+		if len(path) > 0 {
+			leaf = path[len(path)-1]
+		}
 		out = append(out, liveCheckFeature{
 			NovelFeature:       f,
 			DataSourceStrategy: strategies[leaf],
+			Path:               path,
 		})
 	}
 	return out
+}
+
+func liveCheckFeaturePathFromNovel(f NovelFeature) []string {
+	path := strings.Fields(commandPath(f.Command))
+	if len(path) > 0 {
+		return path
+	}
+	args, err := parseExampleArgs(f.Example)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			break
+		}
+		out = append(out, strings.ToLower(arg))
+	}
+	return out
+}
+
+func enrichLiveCheckFeaturesFromAgentContext(binaryPath string, features []liveCheckFeature) []liveCheckFeature {
+	out, err := runStdoutOnly(binaryPath, 15*time.Second, "agent-context")
+	if err != nil {
+		return features
+	}
+	paths, err := dogfoodExampleCommandPathsWithAnnotationsFromAgentContext(out)
+	if err != nil {
+		return features
+	}
+	index := make(map[string]dogfoodAgentCommandPath, len(paths))
+	for _, item := range paths {
+		index[strings.Join(item.Path, " ")] = item
+	}
+	for i, f := range features {
+		key := strings.Join(f.Path, " ")
+		item, ok := index[key]
+		if !ok {
+			continue
+		}
+		features[i].Path = item.Path
+		features[i].Annotations = item.Annotations
+	}
+	return features
 }
 
 func novelCommandDataSourceStrategies(cliDir string) map[string]string {
@@ -603,11 +848,10 @@ func novelCommandDataSourceStrategies(cliDir string) map[string]string {
 			continue
 		}
 		content := string(data)
-		m := dataSourceDirectiveRe.FindStringSubmatch(content)
-		if len(m) < 2 {
+		strategy, invalidReason := declaredDataSourceStrategy(content)
+		if invalidReason != "" {
 			continue
 		}
-		strategy := strings.ToLower(strings.TrimSpace(m[1]))
 		if strategy != "auto" && strategy != "local" && strategy != "live" {
 			continue
 		}
@@ -622,7 +866,7 @@ func novelCommandDataSourceStrategies(cliDir string) map[string]string {
 // runFeaturesConcurrent distributes the per-feature checks across a worker
 // pool. Results are collected in-order so LiveCheckResult.Features stays
 // stable across runs.
-func runFeaturesConcurrent(cliDir, binaryPath string, features []liveCheckFeature, timeout time.Duration, concurrency int) []LiveFeatureResult {
+func runFeaturesConcurrent(cliDir, binaryPath string, features []liveCheckFeature, timeout time.Duration, concurrency int, allowDestructive bool) []LiveFeatureResult {
 	results := make([]LiveFeatureResult, len(features))
 	type job struct{ idx int }
 	jobs := make(chan job, len(features))
@@ -635,7 +879,7 @@ func runFeaturesConcurrent(cliDir, binaryPath string, features []liveCheckFeatur
 	for range concurrency {
 		wg.Go(func() {
 			for j := range jobs {
-				results[j.idx] = runOneFeatureCheckWithDataSource(cliDir, binaryPath, features[j.idx], timeout)
+				results[j.idx] = runOneFeatureCheckWithDataSource(cliDir, binaryPath, features[j.idx], timeout, allowDestructive)
 			}
 		})
 	}
@@ -661,27 +905,31 @@ func pickFeatures(r *ResearchResult) []NovelFeature {
 	return out
 }
 
-func pickGeneratedCommandFeatures(binaryPath string) ([]NovelFeature, error) {
+func pickGeneratedCommandFeatures(binaryPath string) ([]liveCheckFeature, error) {
 	out, err := runStdoutOnly(binaryPath, 15*time.Second, "agent-context")
 	if err != nil {
 		return nil, fmt.Errorf("agent-context failed: %w", err)
 	}
-	paths, err := dogfoodExampleCommandPathsFromAgentContext(out)
+	paths, err := dogfoodExampleCommandPathsWithAnnotationsFromAgentContext(out)
 	if err != nil {
 		return nil, err
 	}
 	if len(paths) > 5 {
-		paths = sampleEvenlyCommandPaths(paths, 5)
+		paths = sampleEvenlyAgentCommandPaths(paths, 5)
 	}
 	binaryName := filepath.Base(binaryPath)
-	features := make([]NovelFeature, 0, len(paths))
-	for _, path := range paths {
-		command := strings.Join(path, " ")
-		features = append(features, NovelFeature{
-			Name:        command,
-			Command:     command,
-			Description: "Generated command " + command,
-			Example:     binaryName + " " + command + " --json",
+	features := make([]liveCheckFeature, 0, len(paths))
+	for _, item := range paths {
+		command := strings.Join(item.Path, " ")
+		features = append(features, liveCheckFeature{
+			NovelFeature: NovelFeature{
+				Name:        command,
+				Command:     command,
+				Description: "Generated command " + command,
+				Example:     binaryName + " " + command + " --json",
+			},
+			Path:        item.Path,
+			Annotations: item.Annotations,
 		})
 	}
 	return features, nil
@@ -699,14 +947,19 @@ func pickGeneratedCommandFeatures(binaryPath string) ([]NovelFeature, error) {
 // messaging) and needs structured access to *exec.ExitError +
 // DeadlineExceeded, so it runs exec inline.
 func runOneFeatureCheck(cliDir, binaryPath string, f NovelFeature, timeout time.Duration) LiveFeatureResult {
-	return runOneFeatureCheckWithDataSource(cliDir, binaryPath, liveCheckFeature{NovelFeature: f}, timeout)
+	return runOneFeatureCheckWithDataSource(cliDir, binaryPath, liveCheckFeature{NovelFeature: f}, timeout, false)
 }
 
-func runOneFeatureCheckWithDataSource(cliDir, binaryPath string, f liveCheckFeature, timeout time.Duration) LiveFeatureResult {
+func runOneFeatureCheckWithDataSource(cliDir, binaryPath string, f liveCheckFeature, timeout time.Duration, allowDestructive bool) LiveFeatureResult {
 	result := LiveFeatureResult{Name: f.Name, Command: f.Command, Example: f.Example}
 	fail := func(reason string) LiveFeatureResult {
 		result.Status = StatusFail
 		result.Reason = reason
+		return result
+	}
+	if !allowDestructive && liveCheckFeatureMutates(f) {
+		result.Status = StatusSkip
+		result.Reason = "mutating example requires --allow-destructive"
 		return result
 	}
 
@@ -780,6 +1033,30 @@ func runOneFeatureCheckWithDataSource(cliDir, binaryPath string, f liveCheckFeat
 	return result
 }
 
+func liveCheckFeatureMutates(f liveCheckFeature) bool {
+	path := f.Path
+	if len(path) == 0 {
+		path = liveCheckFeaturePathFromNovel(f.NovelFeature)
+	}
+	if len(f.Annotations) > 0 {
+		if annotationIsTrueValue(f.Annotations[mcpReadOnlyAnnotation]) {
+			return false
+		}
+		if annotationIsTrueValue(f.Annotations[mcpLocalWriteAnnotation]) {
+			return true
+		}
+		if method := strings.ToUpper(strings.TrimSpace(f.Annotations[endpointMethodAnnotation])); method != "" {
+			return commandMutates(f.Annotations, path)
+		}
+	}
+	if len(path) == 0 {
+		return false
+	}
+	// Unclassified leaves (no method annotation, absent from both verb lists)
+	// stay mutating so unknown research commands cannot run live by default.
+	return commandMutation(f.Annotations, path).mutating
+}
+
 func isUnsyncedLocalStoreFailure(stderr string) bool {
 	lower := strings.ToLower(stderr)
 	return strings.Contains(lower, "unable to open database file") ||
@@ -799,6 +1076,7 @@ func sampleOutputParts(parts ...string) string {
 	capRemaining := outputSampleMaxBytes
 	truncated := false
 	for _, part := range parts {
+		part = artifacts.RedactPIIJWTs(part)
 		if redacted, ok := artifacts.RedactPIIJSONKeys(part); ok {
 			part = redacted
 		}
@@ -824,6 +1102,9 @@ func sampleOutputParts(parts ...string) string {
 		captureRemaining -= len(part)
 	}
 	sample := artifacts.RedactPIIText(rawSample.String())
+	if truncated || captureRemaining == 0 {
+		sample = redactPartialJWTTail(sample)
+	}
 	if len(sample) > outputSampleMaxBytes {
 		sample = truncateUTF8(sample, outputSampleMaxBytes)
 		sample = completePartialRedactionSentinel(sample)
@@ -833,6 +1114,12 @@ func sampleOutputParts(parts ...string) string {
 		return sample + "…[truncated]"
 	}
 	return sample
+}
+
+var partialJWTTailRE = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2}$`)
+
+func redactPartialJWTTail(sample string) string {
+	return partialJWTTailRE.ReplaceAllString(sample, artifacts.PIIRedactedSentinel)
 }
 
 func completePartialRedactionSentinel(sample string) string {
@@ -1188,19 +1475,26 @@ func InsightCapFromLiveCheck(r *LiveCheckResult) *int {
 	return &cap
 }
 
-// MarshalJSON emits a rounded pass_rate_pct alongside the raw counters so
-// JSON consumers don't have to deal with floating-point noise. PassRate is
+// MarshalJSON emits a status and rounded pass_rate_pct alongside the raw
+// counters so JSON consumers can distinguish an unavailable probe from an
+// available probe without dealing with floating-point noise. PassRate is
 // hidden via json:"-" on the struct; this method computes the percentage
 // once using an alias to avoid infinite recursion.
 func (r *LiveCheckResult) MarshalJSON() ([]byte, error) {
 	type alias LiveCheckResult
+	status := "available"
+	if r == nil || r.Unable {
+		status = "unavailable"
+	}
 	return json.Marshal(&struct {
 		*alias
-		Checked     int `json:"checked"`
-		Evaluated   int `json:"evaluated"`
-		PassRatePct int `json:"pass_rate_pct"`
+		Status      string `json:"status"`
+		Checked     int    `json:"checked"`
+		Evaluated   int    `json:"evaluated"`
+		PassRatePct int    `json:"pass_rate_pct"`
 	}{
 		alias:       (*alias)(r),
+		Status:      status,
 		Checked:     r.Checked(),
 		Evaluated:   r.Evaluated(),
 		PassRatePct: int(r.PassRate*100 + 0.5),

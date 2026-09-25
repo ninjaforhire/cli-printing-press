@@ -176,8 +176,47 @@ func TestJSONStringBodyParamEmitsLocalValidation(t *testing.T) {
 	code := string(src)
 
 	require.Contains(t, code, `json.Unmarshal([]byte(bodyMetadata), &parsedMetadata)`)
-	require.Contains(t, code, `body["metadata"] = bodyMetadata`)
-	require.NotContains(t, code, `body["metadata"] = parsedMetadata`)
+	require.Contains(t, code, `bodyMap["metadata"] = parsedMetadata`)
+	require.NotContains(t, code, `bodyMap["metadata"] = bodyMetadata`)
+}
+
+func TestEncodedJSONStringBodyParamKeepsRawBytes(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("json-encoded-body-param")
+	apiSpec.Resources["items"] = spec.Resource{
+		Description: "Items",
+		Endpoints: map[string]spec.Endpoint{
+			"list": {
+				Method:      "GET",
+				Path:        "/items",
+				Description: "List items",
+			},
+			"create": {
+				Method:      "POST",
+				Path:        "/items",
+				Description: "Create item",
+				Body: []spec.Param{
+					{Name: "metadata", Type: "string", Description: "Metadata as a JSON-encoded string"},
+					{Name: "settings", Type: "string", Description: "Settings as a stringified JSON"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "json-encoded-body-param-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	src, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "items_create.go"))
+	require.NoError(t, err)
+	code := string(src)
+
+	require.Contains(t, code, `json.Unmarshal([]byte(bodyMetadata), &parsedMetadata)`)
+	require.Contains(t, code, `bodyMap["metadata"] = bodyMetadata`)
+	require.NotContains(t, code, `bodyMap["metadata"] = parsedMetadata`)
+	require.Contains(t, code, `json.Unmarshal([]byte(bodySettings), &parsedSettings)`)
+	require.Contains(t, code, `bodyMap["settings"] = bodySettings`)
+	require.NotContains(t, code, `bodyMap["settings"] = parsedSettings`)
 }
 
 func TestHTMLStringBodyParamDoesNotEmitJSONValidation(t *testing.T) {
@@ -221,7 +260,8 @@ func TestHTMLStringBodyParamDoesNotEmitJSONValidation(t *testing.T) {
 	code := string(src)
 
 	require.Contains(t, code, `cmd.Flags().StringVar(&bodyDataHtmlText, "data-html-text"`)
-	require.Contains(t, code, `nestedData["html_text"] = bodyDataHtmlText`)
+	require.Contains(t, code, `body = map[string]any{"data": bodyMap}`)
+	require.Contains(t, code, `bodyMap["html_text"] = bodyDataHtmlText`)
 	require.NotContains(t, code, `parsedDataHtmlText`)
 	require.NotContains(t, code, `parsing --data-html-text JSON`)
 }

@@ -1,0 +1,4 @@
+# Reviewed false positives: fake credentials inside upstream test fixtures.
+internal/browsersniff/redact_test.go:stripe-access-token:219
+internal/generator/client_credential_domain_test.go:jwt:309
+internal/pipeline/subprocess_env_test.go:generic-api-key:258

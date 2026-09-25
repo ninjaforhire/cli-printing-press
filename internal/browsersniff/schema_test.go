@@ -102,9 +102,9 @@ func TestInferRequestSchema(t *testing.T) {
 			body:        "q=hello&page=1&limit=20",
 			contentType: "application/x-www-form-urlencoded",
 			want: []spec.Param{
-				{Name: "limit", Type: "integer", Required: true, Description: ""},
-				{Name: "page", Type: "integer", Required: true, Description: ""},
-				{Name: "q", Type: "string", Required: true, Description: ""},
+				{Name: "limit", Type: "integer", Required: true, Default: "20", Description: ""},
+				{Name: "page", Type: "integer", Required: true, Default: "1", Description: ""},
+				{Name: "q", Type: "string", Required: true, Default: "hello", Description: ""},
 			},
 		},
 		{
@@ -115,6 +115,15 @@ func TestInferRequestSchema(t *testing.T) {
 				{Name: "active", Type: "boolean", Required: true, Description: ""},
 				{Name: "count", Type: "integer", Required: true, Description: ""},
 				{Name: "name", Type: "string", Required: true, Description: ""},
+			},
+		},
+		{
+			name:        "raw json under form content type is modeled as json fields",
+			body:        `{"email":"ada@example.com","remember":true}`,
+			contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+			want: []spec.Param{
+				{Name: "email", Type: "string", Required: true, Description: "", Format: "email"},
+				{Name: "remember", Type: "boolean", Required: true, Description: ""},
 			},
 		},
 		{

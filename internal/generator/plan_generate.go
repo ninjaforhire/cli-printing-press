@@ -57,6 +57,17 @@ func (planGoModData) UsesBrowserHTTPTransport() bool {
 	return false
 }
 
+func (planGoModData) UsesBrowserHTTP3Transport() bool {
+	return false
+}
+
+// HasAuthCommand mirrors the rootData field the go.mod template uses for
+// auth-gated surfaces. Plan scaffolds emit no auth and no filelock_windows.go
+// import of golang.org/x/sys/windows, so they take the no-auth go.mod branch.
+func (planGoModData) HasAuthCommand() bool {
+	return false
+}
+
 func (planGoModData) HasHTMLExtraction() bool {
 	return false
 }
@@ -65,6 +76,24 @@ type planStreamingData struct{}
 
 func (planStreamingData) Enabled() bool {
 	return false
+}
+
+var planScaffoldRootCommands = map[string]struct{}{
+	"doctor":  {},
+	"version": {},
+}
+
+// GeneratedPlanCommandCount reports how many command files GenerateFromPlan
+// will emit for user-declared plan commands after scaffold-owned names are
+// filtered out.
+func GeneratedPlanCommandCount(commands []PlanCommand) int {
+	topLevel, parents := partitionCommands(commands)
+	count := len(topLevel)
+	for _, parent := range parents {
+		count++
+		count += len(parent.SubCommands)
+	}
+	return count
 }
 
 // GenerateFromPlan creates a CLI scaffold from a parsed plan spec.
@@ -93,16 +122,18 @@ func GenerateFromPlan(planSpec *PlanSpec, outputDir string) error {
 
 	// Build template FuncMap (subset of the full generator's FuncMap)
 	funcs := template.FuncMap{
-		"title":           cases.Title(language.English).String,
-		"lower":           strings.ToLower,
-		"upper":           strings.ToUpper,
-		"pascal":          toPascal,
-		"camel":           toCamel,
-		"snake":           naming.Snake,
-		"kebab":           toKebab,
-		"currentYear":     func() string { return strconv.Itoa(time.Now().Year()) },
-		"copyrightHolder": func() string { return copyrightHolderString(creator, "", owner) },
-		"modulePath":      func() string { return naming.CLI(cliName) },
+		"title":              cases.Title(language.English).String,
+		"lower":              strings.ToLower,
+		"upper":              strings.ToUpper,
+		"pascal":             toPascal,
+		"camel":              toCamel,
+		"snake":              naming.Snake,
+		"kebab":              toKebab,
+		"currentYear":        func() string { return strconv.Itoa(time.Now().Year()) },
+		"copyrightHolder":    func() string { return copyrightHolderString(creator, "", owner) },
+		"modulePath":         func() string { return naming.CLI(cliName) },
+		"goDirectiveVersion": resolveCurrentGoDirectiveVersion,
+		"goToolchainVersion": resolveCurrentGoToolchainVersion,
 		// Stub: plan-generated scaffolds never declare auth env vars. The full
 		// generator's hasNonCookieAuth (which inspects the real spec.AuthConfig)
 		// is registered separately on its own FuncMap.
@@ -242,9 +273,16 @@ func GenerateFromPlan(planSpec *PlanSpec, outputDir string) error {
 		return fmt.Errorf("running go mod tidy: %w", err)
 	}
 
-	// Pin golang.org/x/net to a patched release when it resolved transitively
-	// below the safe version (see ensureSafeXNet).
+	// Pin golang.org/x/net, golang.org/x/text, and github.com/enetx/http to
+	// safe releases when they resolved transitively below the floors (see
+	// ensureSafeXNet, ensureSafeXText, and ensureSafeEnetxHTTP).
 	if err := ensureSafeXNet(outputDir); err != nil {
+		return err
+	}
+	if err := ensureSafeXText(outputDir); err != nil {
+		return err
+	}
+	if err := ensureSafeEnetxHTTP(outputDir); err != nil {
 		return err
 	}
 
@@ -260,11 +298,14 @@ func partitionCommands(commands []PlanCommand) (topLevel []PlanCommand, parents 
 
 	for _, cmd := range commands {
 		if parent := cmd.Parent(); parent != "" {
+			if isPlanScaffoldRootCommand(parent) {
+				continue
+			}
 			parentMap[parent] = append(parentMap[parent], cmd)
 			if parentDescs[parent] == "" {
 				parentDescs[parent] = parent + " commands"
 			}
-		} else {
+		} else if !isPlanScaffoldRootCommand(cmd.Leaf()) {
 			// Check if this command is also a parent of other commands
 			topLevel = append(topLevel, cmd)
 		}
@@ -306,6 +347,11 @@ func partitionCommands(commands []PlanCommand) (topLevel []PlanCommand, parents 
 	}
 
 	return filteredTopLevel, parents
+}
+
+func isPlanScaffoldRootCommand(name string) bool {
+	_, ok := planScaffoldRootCommands[strings.ToLower(strings.TrimSpace(name))]
+	return ok
 }
 
 // resolveOwnerForExisting returns the owner attribution for a regeneration
@@ -533,7 +579,7 @@ func readManifestAttribution(outputDir string) manifestAttribution {
 // resolveCreatorForExisting returns the creator for a regen against an existing
 // tree, preferring persisted attribution over re-derivation so a regen never
 // silently flips the creator to whoever is running the generator:
-//  1. manifest `creator` object
+//  1. manifest `creator` object (backfilling only an empty handle)
 //  2. manifest legacy fields (printer/printer_name, then owner/owner_name)
 //  3. copyright-header parse (manifest-less legacy trees)
 //  4. resolveCreatorForNew() (git config)
@@ -546,7 +592,21 @@ func resolveCreatorForExisting(outputDir, apiName string) spec.Person {
 	}
 	switch {
 	case !a.Creator.IsZero():
-		return a.Creator
+		c := a.Creator
+		// A persisted creator with a name but no handle (printed before
+		// github.user resolved) would otherwise lock in an unpublishable
+		// record: publish-validate rejects an empty handle and a plain regen
+		// never re-derives it. Backfill only the missing handle, preferring the
+		// same-lineage legacy printer field, then git config / gh. A populated
+		// handle is never touched, so manifest-as-authority still holds.
+		if c.Handle == "" {
+			if a.Printer != "" {
+				c.Handle = a.Printer
+			} else if h := resolvePrinterForNew(); h != "" {
+				c.Handle = h
+			}
+		}
+		return c
 	case a.Printer != "":
 		return spec.Person{Handle: a.Printer, Name: a.PrinterName}
 	case a.Owner != "":

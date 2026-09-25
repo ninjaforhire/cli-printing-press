@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 )
 
@@ -26,6 +27,10 @@ type TableDef struct {
 
 	JSONOnlyFallback    bool
 	OriginalColumnCount int
+
+	// Fingerprint storage is only for typed responses with no identity
+	// field. Unflagged resources still fail ExtractResourceID as today.
+	ParameterKeyed bool
 }
 
 type ColumnDef struct {
@@ -33,7 +38,18 @@ type ColumnDef struct {
 	Type       string
 	PrimaryKey bool
 	NotNull    bool
+	// Generated marks a SQLite generated column. Writers must omit it from
+	// INSERT/UPDATE; the engine computes it from other columns on read.
+	Generated bool
 }
+
+const (
+	storeBareIDColumn = "bare_id"
+	// VIRTUAL so existing databases can ADD COLUMN on open. SQLite rejects
+	// ALTER TABLE ADD of a STORED generated column; the matching index
+	// materializes the value for lookups.
+	storeBareIDType = `TEXT GENERATED ALWAYS AS (substr(id, 1, coalesce(nullif(instr(id, char(0)), 0) - 1, length(id)))) VIRTUAL`
+)
 
 type IndexDef struct {
 	Name      string
@@ -54,6 +70,45 @@ var baseTableColumns = []ColumnDef{
 // SQLite defaults to SQLITE_MAX_COLUMN=2000. Keep typed domain tables below
 // that hard limit with room for generator-added columns and future schema drift.
 const maxStoreDomainTableColumns = 1500
+
+// frameworkStoreObjectNames owns SQLite schema names that domain projections
+// must not reuse. A collision is routed through the generic resources table so
+// the API resource remains syncable without colliding with framework tables or
+// indexes.
+var frameworkStoreObjectNames = map[string]struct{}{
+	"resources":             {},
+	"resources_fts":         {},
+	"resources_fts_data":    {},
+	"resources_fts_idx":     {},
+	"resources_fts_content": {},
+	"resources_fts_docsize": {},
+	"resources_fts_config":  {},
+	"resources_v2":          {},
+	"sync_state":            {},
+	"idx_resources_type":    {},
+	"idx_resources_synced":  {},
+}
+
+var learnStoreObjectNames = map[string]struct{}{
+	"search_learnings":               {},
+	"entity_lookups":                 {},
+	"search_patterns":                {},
+	"learning_playbooks":             {},
+	"learn_candidates":               {},
+	"learn_events":                   {},
+	"learn_recall_misses":            {},
+	"idx_learn_query":                {},
+	"idx_learn_unique":               {},
+	"idx_entity_lookup_canonical":    {},
+	"idx_entity_lookup_kind":         {},
+	"idx_patterns_query_template":    {},
+	"idx_patterns_unique":            {},
+	"idx_playbooks_source":           {},
+	"idx_playbooks_last_observed_at": {},
+	"idx_learn_candidates_status":    {},
+	"idx_learn_candidates_family":    {},
+	"idx_learn_events_event_ts":      {},
+}
 
 // BuildSchema generates domain-specific table definitions from the API spec.
 // High-gravity entities (many endpoints, text fields, temporal fields) get
@@ -81,9 +136,10 @@ func BuildSchema(s *spec.APISpec) []TableDef {
 		tableName := toSnakeCase(name)
 
 		table := TableDef{
-			Name:     tableName,
-			Resource: name,
-			Columns:  append([]ColumnDef(nil), baseTableColumns...),
+			Name:           tableName,
+			Resource:       name,
+			Columns:        append([]ColumnDef(nil), baseTableColumns...),
+			ParameterKeyed: resourceIsParameterKeyed(name, resource, fields),
 		}
 
 		if gravity >= 2 {
@@ -161,6 +217,7 @@ func BuildSchema(s *spec.APISpec) []TableDef {
 				effectiveName = spec.ShardedSubResourceTableName(name, subName)
 			}
 			subTable := buildSubResourceTable(effectiveName, subResource, tableName)
+			subTable.ParameterKeyed = resourceIsParameterKeyed(effectiveName, subResource, collectResponseFields(s, subResource))
 			tables = append(tables, subTable)
 		}
 	}
@@ -182,6 +239,7 @@ func BuildSchema(s *spec.APISpec) []TableDef {
 		}
 	}
 	tables = deduped
+	routeReservedStoreTablesToGenericOnly(tables, reservedStoreObjectNames(s))
 
 	tables = append(tables, TableDef{
 		Name:     "sync_state",
@@ -195,6 +253,82 @@ func BuildSchema(s *spec.APISpec) []TableDef {
 	})
 
 	return tables
+}
+
+func resourceIsParameterKeyed(name string, resource spec.Resource, fields []spec.TypeField) bool {
+	for _, endpoint := range resource.Endpoints {
+		if strings.TrimSpace(endpoint.IDField) != "" {
+			return false
+		}
+	}
+	if len(fields) == 0 {
+		return false
+	}
+	return !responseFieldsHaveStoreIdentity(name, fields)
+}
+
+func responseFieldsHaveStoreIdentity(resourceName string, fields []spec.TypeField) bool {
+	names := make(map[string]struct{}, len(fields)*2)
+	for _, field := range fields {
+		names[strings.ToLower(strings.TrimSpace(field.Name))] = struct{}{}
+		names[strings.ToLower(toSnakeCase(field.Name))] = struct{}{}
+	}
+	for _, key := range []string{"id", "gid", "sid", "uid", "uuid", "guid", "api_id", "name", "slug", "key", "code"} {
+		if _, ok := names[key]; ok {
+			return true
+		}
+	}
+	base := strings.ToLower(toSnakeCase(strings.TrimSpace(resourceName)))
+	bases := []string{base}
+	if strings.HasSuffix(base, "ies") && len(base) > 3 {
+		bases = append(bases, base[:len(base)-3]+"y")
+	} else if strings.HasSuffix(base, "s") && len(base) > 1 {
+		bases = append(bases, strings.TrimSuffix(base, "s"))
+	}
+	for _, stem := range bases {
+		for _, suffix := range []string{"_id", "_code", "_key", "_slug"} {
+			if _, ok := names[stem+suffix]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func reservedStoreObjectNames(s *spec.APISpec) map[string]struct{} {
+	names := make(map[string]struct{}, len(frameworkStoreObjectNames)+len(learnStoreObjectNames)+5)
+	for name := range frameworkStoreObjectNames {
+		names[name] = struct{}{}
+	}
+	for name := range learnStoreObjectNames {
+		names[name] = struct{}{}
+	}
+	prefix := naming.Snake(s.Name)
+	for _, suffix := range []string{
+		"_stream_frames",
+		"_stream_metadata",
+		"_rebase_log",
+		"_stream_metadata_status",
+		"_rebase_log_created",
+	} {
+		names[prefix+suffix] = struct{}{}
+	}
+	return names
+}
+
+func routeReservedStoreTablesToGenericOnly(tables []TableDef, reserved map[string]struct{}) {
+	for i := range tables {
+		if _, collision := reserved[tables[i].Name]; !collision {
+			continue
+		}
+		tables[i].Columns = append([]ColumnDef(nil), baseTableColumns...)
+		tables[i].Indexes = nil
+		tables[i].FTS5 = false
+		tables[i].FTS5Fields = nil
+		tables[i].FTS5Triggers = false
+		tables[i].JSONOnlyFallback = false
+		tables[i].OriginalColumnCount = 0
+	}
 }
 
 // computeDataGravity scores 0-12 based on endpoint count, response field
@@ -394,7 +528,7 @@ func hasTypeField(fields []spec.TypeField, name string) bool {
 // parent_id column between id and data.
 func buildSubResourceTable(name string, r spec.Resource, parentTable string) TableDef {
 	tableName := toSnakeCase(name)
-	parentCol := parentTable + "_id"
+	parentCol := parentFKColumnName(parentTable)
 
 	columns := make([]ColumnDef, 0, len(baseTableColumns)+1)
 	columns = append(columns, baseTableColumns[0]) // id
@@ -434,4 +568,10 @@ func sqlStringLiteral(s string) string {
 // toSnakeCase aliases spec.ToSnakeCase; shared so profiler/schema agree.
 func toSnakeCase(s string) string {
 	return spec.ToSnakeCase(s)
+}
+
+// Hyphenated parent resource names must produce the same typed FK column
+// that dependent sync injects; both sides call this.
+func parentFKColumnName(parentTable string) string {
+	return strings.ReplaceAll(parentTable, "-", "_") + "_id"
 }

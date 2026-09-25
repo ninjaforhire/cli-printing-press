@@ -54,16 +54,21 @@ func TestRecipeNarrativeEmitsMCPIntentTools(t *testing.T) {
 	require.Contains(t, intents, `mcplib.NewTool("rank_with_numeric_limit"`)
 	require.Contains(t, intents, `mcplib.WithNumber("limit"`)
 	require.Contains(t, intents, `cobratree.RunCLICommand(ctx, recipeCLIPath, args)`)
+	require.Contains(t, intents, `cobratree.ToolResultFromCLICommand(out)`)
 	require.NotContains(t, intents, "CombinedOutput")
-	require.NotContains(t, intents, `mcplib.NewTool("plain_lookup"`)
+	require.Contains(t, intents, `mcplib.NewTool("plain_lookup"`)
+	require.Contains(t, intents, `mcplib.WithString("id"`)
 	require.NotContains(t, intents, `mcplib.NewTool("piped_analysis"`)
 
 	_ = readGeneratedFile(t, outputDir, "internal", "mcp", "recipe_intents_test.go")
 
 	shellout := readGeneratedFile(t, outputDir, "internal", "mcp", "cobratree", "shellout.go")
 	require.Contains(t, shellout, `exec.CommandContext(ctx, binPath, args...)`)
-	require.Contains(t, shellout, `cmd.Stdout = &stdout`)
-	require.Contains(t, shellout, `cmd.Stderr = &stderr`)
+	require.Contains(t, shellout, `const shelloutCaptureLimit = bound.MaxBytes + 1`)
+	require.Contains(t, shellout, `stdout := newCappedCapture()`)
+	require.Contains(t, shellout, `stderr := newCappedCapture()`)
+	require.Contains(t, shellout, `cmd.Stdout = stdout`)
+	require.Contains(t, shellout, `cmd.Stderr = stderr`)
 	require.NotContains(t, shellout, "CombinedOutput")
 
 	runGoCommandRequired(t, outputDir, "test", "./internal/mcp")
@@ -105,6 +110,51 @@ func TestRecipeIntentDerivationSkipsTrivialAndUnsafeRecipes(t *testing.T) {
 	require.Equal(t, "DryRun2", intents[0].Params[4].GoName)
 }
 
+func TestRecipeIntentDerivationDropsDestinationFlags(t *testing.T) {
+	t.Parallel()
+
+	intents := buildRecipeIntents("demo", &ReadmeNarrative{
+		Recipes: []Recipe{
+			{Title: "Analytics over custom store", Command: "demo-pp-cli analytics --db=<path> --agent"},
+			{Title: "Analytics with output file", Command: "demo-pp-cli analytics --output=report.json --window=7d --agent"},
+			{Title: "Analytics space-separated db", Command: "demo-pp-cli analytics --db /tmp/evil.db --window=30d --json"},
+			{Title: "Export destinations", Command: "demo-pp-cli export --audit-dir=/tmp/audit --receipt-file=/tmp/r.json --o=out.json --limit=5 --json"},
+		},
+	}, nil)
+
+	require.Len(t, intents, 3)
+
+	require.Equal(t, "analytics_with_output_file", intents[0].Name)
+	require.Equal(t, []string{"analytics", "--agent"}, intents[0].Command)
+	require.Len(t, intents[0].Params, 1)
+	require.Equal(t, "window", intents[0].Params[0].FlagName)
+	require.Equal(t, "7d", intents[0].Params[0].Default)
+	for _, arg := range intents[0].Args {
+		require.NotEqual(t, "output", arg.Param.FlagName)
+		require.NotEqual(t, "db", arg.Param.FlagName)
+		require.NotEqual(t, "--output", arg.Token)
+		require.NotEqual(t, "report.json", arg.Token)
+	}
+
+	require.Equal(t, "analytics_space_separated_db", intents[1].Name)
+	require.Equal(t, []string{"analytics", "--json"}, intents[1].Command)
+	require.Len(t, intents[1].Params, 1)
+	require.Equal(t, "window", intents[1].Params[0].FlagName)
+	require.Equal(t, "30d", intents[1].Params[0].Default)
+	for _, arg := range intents[1].Args {
+		require.NotEqual(t, "db", arg.Param.FlagName)
+		require.NotEqual(t, "/tmp/evil.db", arg.Token)
+	}
+
+	require.Equal(t, "export_destinations", intents[2].Name)
+	require.Equal(t, []string{"export", "--json"}, intents[2].Command)
+	require.Len(t, intents[2].Params, 1)
+	require.Equal(t, "limit", intents[2].Params[0].FlagName)
+	for _, arg := range intents[2].Args {
+		require.NotContains(t, []string{"audit-dir", "receipt-file", "o", "output", "db"}, arg.Param.FlagName)
+	}
+}
+
 func TestRecipeIntentDerivationSkipsAmbiguousSeparatedFlagValue(t *testing.T) {
 	t.Parallel()
 
@@ -115,6 +165,179 @@ func TestRecipeIntentDerivationSkipsAmbiguousSeparatedFlagValue(t *testing.T) {
 	}, nil)
 
 	require.Empty(t, intents)
+}
+
+func TestRecipeIntentDerivationBindsPositionals(t *testing.T) {
+	t.Parallel()
+
+	intents := buildRecipeIntents("demo", &ReadmeNarrative{
+		Recipes: []Recipe{
+			{Title: "Scan site", Command: "demo-pp-cli advice https://example.com --copy --json"},
+			{Title: "Get thing", Command: "demo-pp-cli get 12345678 --json"},
+			{Title: "Upgrade release", Command: "demo-pp-cli upgrade v1.2.3 --json"},
+			{Title: "Lookup slug", Command: "demo-pp-cli recipes my-best-brownies --json"},
+			{Title: "Cite dataset", Command: "demo-pp-cli cite zenodo:1261813 --json"},
+			{Title: "Cite DOI", Command: "demo-pp-cli cite-doi doi:10.5281/zenodo.1261813 --json"},
+			{Title: "Unbindable word", Command: "demo-pp-cli team add engineering --role=owner --json"},
+		},
+	}, nil)
+
+	require.Len(t, intents, 6)
+	require.Equal(t, []string{"advice", "--json"}, intents[0].Command)
+	require.Len(t, intents[0].Params, 2)
+	require.True(t, intents[0].Params[0].Positional)
+	require.True(t, intents[0].Params[0].Required)
+	require.Equal(t, "url", intents[0].Params[0].InputName)
+	require.Equal(t, "Url", intents[0].Params[0].GoName)
+	require.Equal(t, "copy", intents[0].Params[1].InputName)
+	require.Equal(t, recipeIntentParamBoolean, intents[0].Params[1].Type)
+	require.Len(t, intents[0].Args, 4)
+	require.True(t, intents[0].Args[0].Static)
+	require.Equal(t, "advice", intents[0].Args[0].Token)
+	require.True(t, intents[0].Args[1].Param.Positional)
+	require.Equal(t, "url", intents[0].Args[1].Param.InputName)
+	require.Equal(t, "copy", intents[0].Args[2].Param.FlagName)
+	require.True(t, intents[0].Args[3].Static)
+	require.Equal(t, "--json", intents[0].Args[3].Token)
+
+	require.Equal(t, []string{"get", "--json"}, intents[1].Command)
+	require.True(t, intents[1].Params[0].Positional)
+	require.Equal(t, "id", intents[1].Params[0].InputName)
+
+	require.Equal(t, []string{"upgrade", "--json"}, intents[2].Command)
+	require.True(t, intents[2].Params[0].Positional)
+	require.Equal(t, "version", intents[2].Params[0].InputName)
+
+	require.Equal(t, []string{"recipes", "--json"}, intents[3].Command)
+	require.True(t, intents[3].Params[0].Positional)
+	require.Equal(t, "slug", intents[3].Params[0].InputName)
+
+	require.Equal(t, []string{"cite", "--json"}, intents[4].Command)
+	require.True(t, intents[4].Params[0].Positional)
+	require.Equal(t, "ref", intents[4].Params[0].InputName)
+	require.True(t, intents[4].Params[0].Required)
+	require.False(t, intents[4].Args[1].Static)
+	require.Equal(t, "ref", intents[4].Args[1].Param.InputName)
+
+	require.Equal(t, []string{"cite-doi", "--json"}, intents[5].Command)
+	require.True(t, intents[5].Params[0].Positional)
+	require.Equal(t, "ref", intents[5].Params[0].InputName)
+	require.False(t, intents[5].Args[1].Static)
+}
+
+func TestRecipePositionalInputNameWhitespaceBeforeShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		token string
+		name  string
+		ok    bool
+	}{
+		{`SELECT count(*)/2 FROM t`, "value", true},
+		{`SELECT time('now')`, "value", true},
+		{`SELECT CAST(x AS INT)`, "value", true},
+		{"12345", "id", true},
+		{"https://example.com", "url", true},
+		{"https://example.com/path", "url", true},
+		{"zenodo:1261813", "ref", true},
+		{"my-best-brownies", "slug", true},
+		{"v1.2.3", "version", true},
+		{"engineering", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.token, func(t *testing.T) {
+			got, ok := recipePositionalInputName(tc.token)
+			require.Equal(t, tc.ok, ok)
+			require.Equal(t, tc.name, got)
+		})
+	}
+}
+
+func TestRecipeIntentDerivationBindsWhitespacePositionalAsValue(t *testing.T) {
+	t.Parallel()
+
+	intents := buildRecipeIntents("demo", &ReadmeNarrative{
+		Recipes: []Recipe{
+			{Title: "SQL hours", Command: `demo-pp-cli sql "SELECT count(*)/2 FROM t" --agent`},
+			{Title: "Get thing", Command: "demo-pp-cli get 12345 --json"},
+			{Title: "Fetch url", Command: "demo-pp-cli fetch https://example.com --json"},
+		},
+	}, nil)
+
+	require.Len(t, intents, 3)
+	require.Equal(t, []string{"sql", "--agent"}, intents[0].Command)
+	require.True(t, intents[0].Params[0].Positional)
+	require.True(t, intents[0].Params[0].Required)
+	require.Equal(t, "value", intents[0].Params[0].InputName)
+	require.False(t, intents[0].Args[1].Static)
+	require.Equal(t, "value", intents[0].Args[1].Param.InputName)
+	require.NotContains(t, intents[0].Command, "SELECT count(*)/2 FROM t")
+
+	require.Equal(t, "id", intents[1].Params[0].InputName)
+	require.Equal(t, "url", intents[2].Params[0].InputName)
+}
+
+func TestRecipeIntentGenerationBindsColonRefPositional(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("researchrecipes")
+	outputDir := filepath.Join(t.TempDir(), "researchrecipes-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{MCP: true}
+	gen.Narrative = &ReadmeNarrative{
+		Recipes: []Recipe{{
+			Title:       "Cite dataset",
+			Command:     "researchrecipes-pp-cli cite zenodo:1261813 --json",
+			Explanation: "Cite a dataset by ref.",
+		}},
+	}
+
+	require.NoError(t, gen.Generate())
+
+	intents := readGeneratedFile(t, outputDir, "internal", "mcp", "intents.go")
+	require.Contains(t, intents, `mcplib.WithString("ref"`)
+	require.Contains(t, intents, `appendRecipePositional(args, input["ref"], true)`)
+	require.NotContains(t, intents, "zenodo:1261813")
+	require.Contains(t, intents, `mcplib.WithOpenWorldHintAnnotation(true)`)
+
+	runGoCommandRequired(t, outputDir, "test", "./internal/mcp")
+}
+
+func TestRecipeIntentGenerationBindsPositionalHandlerArgs(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("positionrecipes")
+	outputDir := filepath.Join(t.TempDir(), "positionrecipes-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{MCP: true}
+	gen.Narrative = &ReadmeNarrative{
+		Recipes: []Recipe{{
+			Title:       "Scan site",
+			Command:     "positionrecipes-pp-cli advice https://example.com --copy --json",
+			Explanation: "Scan a site and return copy-paste fixes.",
+		}},
+	}
+
+	require.NoError(t, gen.Generate())
+
+	intents := readGeneratedFile(t, outputDir, "internal", "mcp", "intents.go")
+	require.Contains(t, intents, `mcplib.WithString("url"`)
+	require.Contains(t, intents, `appendRecipePositional(args, input["url"], true)`)
+	require.NotContains(t, intents, `mcplib.WithString("args"`)
+	require.NotContains(t, intents, "https://example.com")
+	adviceIdx := strings.Index(intents, `args = append(args, "advice")`)
+	urlIdx := strings.Index(intents, `appendRecipePositional(args, input["url"], true)`)
+	copyIdx := strings.Index(intents, `appendRecipeBoolFlag(args, "copy", input["copy"], true)`)
+	jsonIdx := strings.Index(intents, `args = append(args, "--json")`)
+	require.NotEqual(t, -1, adviceIdx)
+	require.NotEqual(t, -1, urlIdx)
+	require.NotEqual(t, -1, copyIdx)
+	require.NotEqual(t, -1, jsonIdx)
+	require.Less(t, adviceIdx, urlIdx)
+	require.Less(t, urlIdx, copyIdx)
+	require.Less(t, copyIdx, jsonIdx)
+
+	runGoCommandRequired(t, outputDir, "test", "./internal/mcp")
 }
 
 func TestRecipeIntentDerivationSkipsShellVariables(t *testing.T) {

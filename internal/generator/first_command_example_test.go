@@ -301,7 +301,7 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 			want: "jobs list --action example-value",
 		},
 		{
-			name: "path placeholder sharing query param name does not keep default",
+			name: "path placeholder sharing query param name still uses declared default",
 			resources: map[string]spec.Resource{
 				"reports": {
 					Endpoints: map[string]spec.Endpoint{
@@ -316,7 +316,7 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 					},
 				},
 			},
-			want: "reports list --mode example-value",
+			want: "reports list --mode summary",
 		},
 		{
 			name: "path query default keeps required param default",
@@ -337,7 +337,7 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 			want: "reports list --mode summary",
 		},
 		{
-			name: "non-dispatch string default still uses synthetic value",
+			name: "non-dispatch string default uses the declared default",
 			resources: map[string]spec.Resource{
 				"search": {
 					Endpoints: map[string]spec.Endpoint{
@@ -352,10 +352,10 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 					},
 				},
 			},
-			want: "search list --query example-value",
+			want: "search list --query cats",
 		},
 		{
-			name: "numeric default still uses synthetic value",
+			name: "numeric default uses the declared default",
 			resources: map[string]spec.Resource{
 				"items": {
 					Endpoints: map[string]spec.Endpoint{
@@ -370,7 +370,7 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 					},
 				},
 			},
-			want: "items list --limit 50",
+			want: "items list --limit 100",
 		},
 		{
 			name: "required body field uses public flag name",
@@ -389,6 +389,45 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 				},
 			},
 			want: "stores create --store-code example-value",
+		},
+		{
+			// A JSON-typed string body flag (the command emits a json.Valid
+			// guard) must not advertise the scalar "example-value" placeholder,
+			// which fails that guard on first run. It gets a minimal valid-JSON
+			// value instead, single-quoted for shell safety.
+			name: "json body field uses valid-json placeholder",
+			resources: map[string]spec.Resource{
+				"lists": {
+					Endpoints: map[string]spec.Endpoint{
+						"add": {
+							Method: "POST",
+							Path:   "/lists/add.php",
+							Body: []spec.Param{
+								{Name: "lists", Required: true, Type: "string", Description: "JSON array of list objects"},
+							},
+						},
+						"refresh": {Method: "POST", Path: "/lists/refresh"},
+					},
+				},
+			},
+			want: "lists add --lists '[]'",
+		},
+		{
+			name: "json body field with bracketed description uses array placeholder",
+			resources: map[string]spec.Resource{
+				"items": {
+					Endpoints: map[string]spec.Endpoint{
+						"bulk": {
+							Method: "POST",
+							Path:   "/items/bulk",
+							Body: []spec.Param{
+								{Name: "payload", Required: true, Type: "string", Description: `[{"id":1,"name":"foo"}]`},
+							},
+						},
+					},
+				},
+			},
+			want: "items --payload '[]'",
 		},
 		{
 			name: "promoted single-endpoint resource keeps positionals",
@@ -467,6 +506,18 @@ func TestFirstCommandExampleHonorsPromotion(t *testing.T) {
 				},
 			},
 			want: "purchase-orders list",
+		},
+		{
+			name: "snake_case resource key is kebab-cased (non-promoted)",
+			resources: map[string]spec.Resource{
+				"time_entries": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {Method: "GET", Path: "/time_entries"},
+						"get":  {Method: "GET", Path: "/time_entries/{id}"},
+					},
+				},
+			},
+			want: "time-entries list",
 		},
 	}
 	for _, tc := range tests {

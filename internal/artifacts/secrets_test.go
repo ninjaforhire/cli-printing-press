@@ -49,6 +49,62 @@ func TestRedactArchivedSpecSecretsKeepsPlaceholders(t *testing.T) {
 	require.Equal(t, string(input), got)
 }
 
+func TestRedactArchivedSpecSecretsRedactsJWTFormGitHubInstallationToken(t *testing.T) {
+	jwt := testGitHubInstallationJWT()
+	opaque := testSecret("ghs", "_", strings.Repeat("x", 40))
+	input := []byte(strings.Join([]string{
+		"Authorization: Bearer " + jwt + ". See the docs.",
+		"Authorization: Bearer " + opaque,
+		"Authorization: Bearer " + jwt + ".Next-step",
+	}, "\n"))
+
+	got := string(RedactArchivedSpecSecrets(input))
+
+	require.NotContains(t, got, jwt)
+	require.NotContains(t, got, opaque)
+	require.Contains(t, got, "Authorization: Bearer <REDACTED_GITHUB_TOKEN_EXAMPLE>. See the docs.")
+	require.Contains(t, got, "Authorization: Bearer <REDACTED_GITHUB_TOKEN_EXAMPLE>")
+	require.Contains(t, got, "Authorization: Bearer <REDACTED_GITHUB_TOKEN_EXAMPLE>.Next-step")
+}
+
+func TestRedactLiveOutputSecretsRedactsConfiguredAndVendorCredentials(t *testing.T) {
+	authSecret := "auth-secret-value-1234567890"
+	vendorSecret := "sk_live_" + strings.Repeat("a", 20)
+	input := []byte("auth=" + authSecret + " vendor=" + vendorSecret)
+
+	got := string(RedactLiveOutputSecrets(input, authSecret))
+
+	require.NotContains(t, got, authSecret)
+	require.NotContains(t, got, vendorSecret)
+	require.Contains(t, got, LiveOutputAuthEnvRedacted)
+	require.Contains(t, got, LiveOutputVendorKeyRedacted)
+}
+
+func TestRedactLiveOutputSecretsLeavesUnmatchedOutputUnchanged(t *testing.T) {
+	input := []byte("request failed with status 503")
+
+	require.Equal(t, input, RedactLiveOutputSecrets(input, "auth-secret-value-1234567890"))
+}
+
+func TestRedactLiveOutputSecretsPreservesShortValuesAndPlaceholders(t *testing.T) {
+	placeholder := "AKIAIOSFODNN7EXAMPLE"
+	awsSecret := testSecret("AKIA", "1234567890ABCDEF")
+	input := []byte("mode=test placeholder=" + placeholder + " real=" + awsSecret)
+
+	got := RedactLiveOutputSecrets(input, "test")
+
+	require.Equal(t, "mode=test placeholder="+placeholder+" real="+LiveOutputVendorKeyRedacted, string(got))
+}
+
+func TestRedactLiveOutputSecretsRedactsPartialAuthAtCaptureBoundary(t *testing.T) {
+	authSecret := "auth-secret-" + strings.Repeat("x", 5000)
+	input := []byte("prefix " + authSecret[:len(authSecret)-100])
+
+	got := RedactLiveOutputSecrets(input, authSecret)
+
+	require.Equal(t, "prefix "+LiveOutputAuthEnvRedacted, string(got))
+}
+
 func TestFindVendorPrefixSecretsReportsFileAndLine(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".manuscripts", "run-1", "research"), 0o755))
@@ -69,6 +125,34 @@ func TestFindVendorPrefixSecretsReportsFileAndLine(t *testing.T) {
 	require.Equal(t, "openrouter-api-key", byPath["spec.json"].Kind)
 	require.Equal(t, 1, byPath[".manuscripts/run-1/research/openapi.json"].Line)
 	require.Equal(t, "stripe-secret-key", byPath[".manuscripts/run-1/research/openapi.json"].Kind)
+}
+
+func TestFindVendorPrefixSecretsDetectsJWTFormGitHubInstallationToken(t *testing.T) {
+	root := t.TempDir()
+	jwt := testGitHubInstallationJWT()
+	opaqueGhs := testSecret("ghs", "_", strings.Repeat("x", 40))
+	opaqueGhp := testSecret("ghp", "_", strings.Repeat("y", 40))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "jwt.txt"), []byte("token="+jwt+". See the docs.\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "opaque-ghs.txt"), []byte("token="+opaqueGhs+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "opaque-ghp.txt"), []byte("token="+opaqueGhp+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "jwt-hyphen.txt"), []byte("token="+jwt+".Next-step\n"), 0o644))
+
+	findings, err := FindVendorPrefixSecrets(root)
+	require.NoError(t, err)
+	require.Len(t, findings, 4)
+
+	byPath := map[string]VendorPrefixSecretFinding{}
+	for _, finding := range findings {
+		byPath[finding.Path] = finding
+	}
+	require.Equal(t, "github-token", byPath["jwt.txt"].Kind)
+	require.Equal(t, "github-token", byPath["opaque-ghs.txt"].Kind)
+	require.Equal(t, "github-token", byPath["opaque-ghp.txt"].Kind)
+	require.Equal(t, "github-token", byPath["jwt-hyphen.txt"].Kind)
+	require.Equal(t, secretFingerprint(jwt), byPath["jwt.txt"].Fingerprint)
+	require.Equal(t, secretFingerprint(jwt), byPath["jwt-hyphen.txt"].Fingerprint)
+	require.Equal(t, secretFingerprint(opaqueGhs), byPath["opaque-ghs.txt"].Fingerprint)
+	require.Equal(t, secretFingerprint(opaqueGhp), byPath["opaque-ghp.txt"].Fingerprint)
 }
 
 func TestFindVendorPrefixSecretsIgnoresPlaceholdersAndBinaryFiles(t *testing.T) {
@@ -119,6 +203,61 @@ func TestFindVendorPrefixSecretsDetectsMailchimpLinearAndAnthropic(t *testing.T)
 	require.False(t, linearShortFlagged, "linear payload one char short of 40 must not match")
 	_, anthropicShortFlagged := byPath["anthropic-short.txt"]
 	require.False(t, anthropicShortFlagged, "anthropic payload one char short of 40 must not match")
+}
+
+func TestFindPackageSecretsDetectsCredentialNamedOpaqueValues(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Join([]string{
+		`{"auth":{"user":{"api_key":"550e8400-e29b-41d4-a716-446655440000"}}}`,
+		`{"api_info":{"secret":"abcdefghijklmnopqrstuvwxyz1234567890"}}`,
+		`{"event_type":"customer.updated","sort_key":"created_at","api_key":"short-id"}`,
+	}, "\n")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "sample.json"), []byte(content), 0o644))
+
+	findings, err := FindPackageSecrets(root, nil)
+	require.NoError(t, err)
+	require.Len(t, findings, 2)
+	require.Equal(t, "opaque-credential:api-key", findings[0].Kind)
+	require.Equal(t, 1, findings[0].Line)
+	require.Equal(t, "opaque-credential:secret", findings[1].Kind)
+	require.Equal(t, 2, findings[1].Line)
+}
+
+func TestFindPackageSecretsAllowsAnnotatedPublicVendorPrefixSecret(t *testing.T) {
+	root := t.TempDir()
+	publicKey := testSecret("AI", "za", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "internal"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "internal", "client.go"),
+		[]byte(`const firebaseKey = "`+publicKey+`" // pp:public-secret Firebase web API key is documented public; access is gated by rules.`+"\n"),
+		0o644,
+	))
+
+	result, err := FindPackageSecretsWithSuppressions(root, nil)
+	require.NoError(t, err)
+	require.Empty(t, result.Findings)
+	require.Len(t, result.Suppressions, 1)
+	require.Equal(t, "internal/client.go", result.Suppressions[0].Path)
+	require.Equal(t, 1, result.Suppressions[0].Line)
+	require.Equal(t, "google-api-key", result.Suppressions[0].Kind)
+	require.Contains(t, result.Suppressions[0].Reason, "documented public")
+}
+
+func TestFindPackageSecretsRequiresPublicSecretReason(t *testing.T) {
+	root := t.TempDir()
+	publicKey := testSecret("AI", "za", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "internal"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "internal", "client.go"),
+		[]byte(`const firebaseKey = "`+publicKey+`" // pp:public-secret`+"\n"),
+		0o644,
+	))
+
+	result, err := FindPackageSecretsWithSuppressions(root, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Findings, 1)
+	require.Empty(t, result.Suppressions)
+	require.Equal(t, "google-api-key", result.Findings[0].Kind)
 }
 
 func TestFindSpecDeclaredCookieSecretsReportsCookieNameOnly(t *testing.T) {
@@ -179,4 +318,14 @@ func TestFindPackageSecretsCombinesVendorPrefixAndDeclaredCookies(t *testing.T) 
 
 func testSecret(parts ...string) string {
 	return strings.Join(parts, "")
+}
+
+// JWT-form GitHub App installation token: ghs_ + three base64url segments.
+// The header is deliberately shorter than 36 characters so the legacy
+// alphanumeric-only {36,} class cannot match across the first dot.
+func testGitHubInstallationJWT() string {
+	header := strings.Repeat("A", 20)
+	payload := testSecret(strings.Repeat("B", 40), "_", strings.Repeat("C", 39))
+	sig := testSecret(strings.Repeat("D", 40), "-", strings.Repeat("E", 39))
+	return testSecret("ghs", "_", header, ".", payload, ".", sig)
 }

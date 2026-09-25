@@ -8,7 +8,7 @@ The Printing Press has a fast path and a managed path.
 
 The fast path is the `/printing-press` skill. It runs the flow end to end in one session, produces a CLI plus an MCP server, and reports back. The high-level step list lives in `README.md` under "How It Works."
 
-The managed path is the 9-phase pipeline. It breaks the same work into phases the user can stop at, resume, re-run, and inspect. Each phase has its own plan file, its own artifacts directory, and its own gate. This is what `printing-press pipeline` creates. It is also how this contract should be read: the fast path compresses these phases, it does not replace them.
+The managed path is the 9-phase pipeline. It breaks the same work into phases the user can stop at, resume, re-run, and inspect. Each phase has its own plan file, its own artifacts directory, and its own gate. This is what `printing-press print` creates. It is also how this contract should be read: the fast path compresses these phases, it does not replace them.
 
 Both paths converge on the same quality bar. A CLI produced by the fast path should score the same as one produced by the managed path.
 
@@ -27,6 +27,8 @@ Every managed run gets three sibling directories under the run root:
 - `proofs/`    review-phase artifacts: dogfood, verification, scorecard
 
 The working CLI tree lives separately under the API's output directory until `ship` promotes it.
+
+`pipeline/state.json` records run identity (`api_name`, `run_id`, working-directory pointers) and optional operator inputs that later phases cannot recover from the archived spec. `category` is the public-library slug from `generate --category`. Ship/promote copies it into `.printing-press.json`. A missing category still promotes, with a warning. The research-directory `state.json` may carry the same `category` so generate can persist it before a runstate working dir exists.
 
 ## Phase status model
 
@@ -74,7 +76,6 @@ Purpose: discover and score the existing CLI landscape for the target API before
 
 Inputs:
 - Validated spec URL from preflight
-- `catalog/<api>.yaml` if the API is catalog-known (for `known_alternatives`)
 
 Outputs:
 - `research.json` in the pipeline directory with:
@@ -110,7 +111,7 @@ Freshness ownership:
 - Freshness metadata belongs in the existing JSON provenance envelope at `meta.freshness`. It describes current-cache freshness for the covered path only; it must not be described as full historical backfill or API-specific enrichment.
 
 Gates:
-- All eight generator quality gates pass: `go mod tidy`, default-mode `govulncheck`, `go vet`, `go build`, binary build, `--help`, version, `doctor`
+- All ten generator quality gates pass: `go mod tidy`, safe `golang.org/x/net`, fresh generated `go test -count=1 ./...`, default-mode `govulncheck`, `go vet`, `go build`, binary build, `--help`, version, `doctor`
 
 Artifacts:
 - Full CLI source tree in the output directory
@@ -149,7 +150,7 @@ Outputs:
 
 Gates:
 - Overlay merge completes without conflicts
-- All eight generator quality gates pass again after regeneration, including default-mode `govulncheck`
+- All ten generator quality gates pass again after regeneration, including safe `golang.org/x/net`, fresh generated `go test -count=1 ./...`, and default-mode `govulncheck`
 
 Artifacts:
 - Merged spec (format follows the source spec)
@@ -265,7 +266,7 @@ Artifacts:
 Two other Printing Press entrypoints run flows that share structure with the managed pipeline:
 
 - `printing-press run` drives `MakeBestCLI` in `internal/pipeline/fullrun.go`. It compresses the full flow into one call and reports a single `FullRunResult`. Its internal step list (research, generate, polish, coverage, dogfood, verification, workflow-verify, scorecard, fix plans, publish) maps to the managed phases but does not use the phase state machine.
-- The `/printing-press` skill uses its own high-level Phase 0..5 layout documented in `README.md`. That layout is a compression of the same work, not a competing contract.
+- The `/printing-press` skill executes 21 files under `skills/printing-press/phases/` keyed by filename stems (`10-generate`, not "Phase 2"). Receipts start at `02-run-initialization`. The Phase 0..5 diagram in `README.md` is a compression map of that workflow, not the receipt IDs.
 
 Both flows should produce artifacts that match the shape described here for the phases they cover.
 

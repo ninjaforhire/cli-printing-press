@@ -5,6 +5,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golden-api-cookie-auth-pp-cli/internal/cliutil"
 )
 
 // cookieJar wraps an http.CookieJar so writes (server Set-Cookie response
@@ -38,16 +41,177 @@ type persistedCookie struct {
 // LoadCookieJar returns a persistent cookie jar pre-populated from the canonical
 // cookie file on disk. Falls back to an empty in-memory jar when no file exists.
 func LoadCookieJar() http.CookieJar {
-	inner, _ := cookiejar.New(nil)
-	path := cookieJarPath()
-	jar := &cookieJar{inner: inner, path: path}
+	jar := newCookieJar()
 	jar.loadFromDisk()
 	return jar
 }
 
+// NewCookieJar returns an empty in-memory jar without loading or persisting
+// cookies. Config.Load uses it when an env or external-store override has
+// replaced a browser session, so an old browser jar cannot ride along or be
+// contaminated by response cookies.
+func NewCookieJar() http.CookieJar {
+	jar, _ := cookiejar.New(nil)
+	return jar
+}
+
+func newCookieJar() *cookieJar {
+	inner, _ := cookiejar.New(nil)
+	path := cookieJarPath()
+	return &cookieJar{inner: inner, path: path}
+}
+
 func cookieJarPath() string {
-	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".local", "share", "golden-api-cookie-auth-pp-cli", "cookies.json")
+	dir, err := cliutil.DataDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "cookies.json")
+}
+
+// ClearCookieJar removes the persisted session cookies for this printed CLI.
+// Logout must clear both config credentials and the jar because net/http can
+// otherwise continue sending a valid cookie after the config is cleared.
+func ClearCookieJar() error {
+	path := cookieJarPath()
+	if path == "" {
+		return nil
+	}
+	data, err := json.Marshal([]persistedCookie{})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// looksLikeCookieJar reports whether s is a cookie-jar string ("name=value;
+// name=value") rather than a bare token. The session env var and the browser
+// AccessToken both store the full Cookie header, so the seed is gated on a real
+// "name=value" pair. A bare "=" is too loose: a base64-padded JWT ("eyJ...Q==")
+// contains "=" yet is a single bearer token, and strings.Cut would split it into
+// a bogus {name:"eyJ...Q", value:"="} cookie. So require the first segment to be
+// a valid name=value pair whose name is a legal cookie-name token; that screens
+// out JWT/bearer values while still passing a single legit "name=value" cookie.
+func looksLikeCookieJar(s string) bool {
+	first, _, _ := strings.Cut(s, ";")
+	name, value, ok := strings.Cut(strings.TrimSpace(first), "=")
+	if !ok || value == "" {
+		return false
+	}
+	return isCookieName(strings.TrimSpace(name))
+}
+
+// isCookieName reports whether s is a non-empty RFC 6265 cookie-name token
+// (RFC 2616 token: no controls, spaces, or separators). It additionally rejects
+// "." and "/": these are valid token bytes but appear in JWT/bearer values
+// (header.payload.signature, base64url "/"), which a padded "==" suffix would
+// otherwise sneak past as a name=value pair. Server-set cookie names do not use
+// them in practice, so screening them out separates a real session jar from a
+// bearer token without rejecting legitimate single cookies.
+func isCookieName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b <= 0x20 || b >= 0x7f {
+			return false
+		}
+		switch b {
+		case '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"',
+			'/', '[', ']', '?', '=', '{', '}', '.':
+			return false
+		}
+	}
+	return true
+}
+
+// parseCookieJar splits a Cookie-header-style string ("name=value; name=value")
+// into cookies. Pairs without "=" or with an empty name are skipped; values are
+// sanitized to the bytes net/http's jar accepts.
+func parseCookieJar(s string) []*http.Cookie {
+	parts := strings.Split(s, ";")
+	cookies := make([]*http.Cookie, 0, len(parts))
+	for _, part := range parts {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{
+			Name:  name,
+			Value: sanitizeCookieValue(strings.TrimSpace(value)),
+		})
+	}
+	return cookies
+}
+
+// SeedCookieJar seeds jar with the cookies in a Cookie-header-style credential
+// string scoped to the spec's canonical cookie domain, so a session captured
+// via the env var, set-token, or credentials file still rides requests to that
+// https host. Seeding the jar (rather than setting a static Cookie header) lets
+// net/http absorb Set-Cookie rotation — Cloudflare __cf_bm, AWS ALB AWSALB —
+// across a multi-request session that a static header would let go stale.
+// A no-op when the credential is empty, is not a cookie-jar string, or
+// baseURL is not an https host on the canonical cookie domain.
+func SeedCookieJar(jar http.CookieJar, baseURL, cookieStr string) {
+	seedCookieJar(jar, baseURL, cookieStr, ".cookie-auth.example")
+}
+
+// SeedCookieJarForDomain seeds a captured cookie session for the captured
+// domain and its subdomains, while still requiring callers to choose the
+// capture root explicitly.
+func SeedCookieJarForDomain(jar http.CookieJar, baseURL, cookieStr, domain string) {
+	seedCookieJar(jar, baseURL, cookieStr, strings.TrimPrefix(strings.TrimSpace(domain), "."))
+}
+
+func seedCookieJar(jar http.CookieJar, baseURL, cookieStr, cookieDomain string) {
+	if jar == nil || !looksLikeCookieJar(cookieStr) {
+		return
+	}
+	cookieDomain = strings.TrimPrefix(strings.TrimSpace(cookieDomain), ".")
+	if cookieDomain == "" {
+		return
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	if !strings.EqualFold(u.Scheme, "https") || !seedHostMatchesDomain(u.Hostname(), cookieDomain) {
+		fmt.Fprintf(os.Stderr, "warning: base URL %q is not an https %s host — not sending your session cookie to it\n", baseURL, cookieDomain)
+		return
+	}
+	cookies := parseCookieJar(cookieStr)
+	if len(cookies) == 0 {
+		return
+	}
+	for _, cookie := range cookies {
+		cookie.Domain = cookieDomain
+		cookie.Secure = true
+	}
+	// Seed the in-memory jar only — never persist. The wrapper's SetCookies
+	// writes through to cookies.json (persistLocked -> mergeAndWriteCookieRows),
+	// which would clobber fresher rotation-refreshed values (Cloudflare __cf_bm,
+	// AWS ALB AWSALB) already on disk with the stale env/credential ones. Seeding
+	// the inner jar (as loadFromDisk does) keeps the credential live for the
+	// session without touching the persisted set.
+	if cj, ok := jar.(*cookieJar); ok {
+		cj.inner.SetCookies(u, cookies)
+		return
+	}
+	jar.SetCookies(u, cookies)
+}
+
+func seedHostMatchesDomain(host, domain string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if host == "" || domain == "" {
+		return false
+	}
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 // sanitizeCookieValue strips bytes that net/http's cookie jar rejects per
@@ -108,6 +272,19 @@ func mergeAndWriteCookieRows(path string, rows []persistedCookie) error {
 		idx[r.Domain+"|"+r.Path+"|"+r.Name] = i
 	}
 	for _, r := range rows {
+		filtered := all[:0]
+		for _, existing := range all {
+			if shouldReplaceShadowingCookie(existing, r) {
+				delete(idx, existing.Domain+"|"+existing.Path+"|"+existing.Name)
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		all = filtered
+		idx = make(map[string]int, len(all))
+		for i, existing := range all {
+			idx[existing.Domain+"|"+existing.Path+"|"+existing.Name] = i
+		}
 		key := r.Domain + "|" + r.Path + "|" + r.Name
 		if i, ok := idx[key]; ok {
 			all[i] = r
@@ -124,6 +301,18 @@ func mergeAndWriteCookieRows(path string, rows []persistedCookie) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+func shouldReplaceShadowingCookie(existing, incoming persistedCookie) bool {
+	if existing.Name != incoming.Name || existing.Path != incoming.Path {
+		return false
+	}
+	return normalizedWWWCookieDomain(existing.Domain) == normalizedWWWCookieDomain(incoming.Domain)
+}
+
+func normalizedWWWCookieDomain(domain string) string {
+	domain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	return strings.TrimPrefix(domain, "www.")
 }
 
 func (j *cookieJar) loadFromDisk() {

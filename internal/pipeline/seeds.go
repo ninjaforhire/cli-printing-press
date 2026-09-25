@@ -48,11 +48,10 @@ Discover existing CLI tools for the {{.APIName}} API and assess whether generati
 
 ## Steps
 
-1. Check catalog/{{.APIName}}.yaml for known_alternatives field
-2. Search GitHub for "{{.APIName}} cli" repos sorted by stars
-3. Deduplicate and score alternatives
-4. If novelty score <= 3, flag: "Official CLI exists - consider whether this CLI adds value"
-5. Write research.json
+1. Search GitHub for "{{.APIName}} cli" repos sorted by stars
+2. Deduplicate and score alternatives
+3. If novelty score <= 3, flag: "Official CLI exists - consider whether this CLI adds value"
+4. Write research.json
 
 ## Prior Phase Outputs
 
@@ -61,7 +60,6 @@ Discover existing CLI tools for the {{.APIName}} API and assess whether generati
 ## Codebase Pointers
 
 - Research logic: internal/pipeline/research.go
-- Catalog entries: catalog/
 - Known specs registry: internal/pipeline/discover.go
 `,
 	PhaseComparative: `---
@@ -175,7 +173,7 @@ Generate the first working {{.APIName}} CLI from the validated OpenAPI spec.
 ## What This Phase Must Produce
 
 - Generated CLI source tree in {{.OutputDir}}
-- All eight generator quality gates passing, including default-mode govulncheck
+- All ten generator quality gates passing, including safe golang.org/x/net, fresh generated go test (-count=1 ./...), and default-mode govulncheck
 - Working CLI binary for {{.APIName}}
 
 ## Prior Phase Outputs
@@ -250,7 +248,7 @@ Merge the enrichments into the source spec and regenerate the CLI without losing
 
 - Re-generated CLI in {{.OutputDir}} using the merged overlay
 - Merged spec artifact suitable for regeneration
-- All eight quality gates still passing after regeneration, including default-mode govulncheck
+- All ten quality gates still passing after regeneration, including safe golang.org/x/net, fresh generated go test (-count=1 ./...), and default-mode govulncheck
 
 ## Prior Phase Outputs
 

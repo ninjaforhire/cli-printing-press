@@ -85,8 +85,11 @@ type PipelineState struct {
 	Phases                       map[string]PhaseState `json:"phases"`
 	SpecPath                     string                `json:"spec_path,omitempty"`
 	SpecURL                      string                `json:"spec_url,omitempty"`
+	Category                     string                `json:"category,omitempty"`                // archived specs omit this; generate persists it for promote
 	DogfoodTimeout               int                   `json:"dogfood_timeout_seconds,omitempty"` // default 600 (10 min)
 	DogfoodTier                  int                   `json:"dogfood_tier,omitempty"`            // max tier to run (1-3, default 1)
+	PhaseReceiptLog              string                `json:"phase_receipt_log,omitempty"`
+	PrintingPressBin             string                `json:"printing_press_bin,omitempty"`
 }
 
 const currentStateVersion = 3

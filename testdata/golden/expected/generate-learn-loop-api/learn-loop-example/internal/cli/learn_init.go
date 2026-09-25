@@ -31,15 +31,22 @@ import (
 
 // newLearnConfig returns the per-CLI entity extractor Config the
 // teach / recall / normalize call sites pass into the learn package.
-// Reads the printed-CLI's spec.Learn.TickerPatterns and Stopwords;
-// patterns that fail to compile at runtime (defense in depth — spec
-// parse already validated them) log a warning and are skipped.
+// Reads the printed-CLI's spec.Learn.TickerPatterns, Stopwords, and
+// Synonyms; patterns that fail to compile at runtime (defense in
+// depth — spec parse already validated them) log a warning and are
+// skipped. Declared synonyms register on both the returned Config and
+// the store package's write-side normalizer.
 func newLearnConfig() *entities.Config {
 	cfg := entities.NewConfig()
+	var tickerPatterns []*regexp.Regexp
 	if re, err := regexp.Compile(`^EXAMPLE-[A-Z0-9]+(-[A-Z0-9]+)*$`); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: learn-loop-example-pp-cli: ticker pattern %q failed to compile: %v\n", `^EXAMPLE-[A-Z0-9]+(-[A-Z0-9]+)*$`, err)
 	} else {
 		cfg.RegisterTickerPattern(re)
+		tickerPatterns = append(tickerPatterns, re)
+	}
+	if len(tickerPatterns) > 0 {
+		store.RegisterTickerPatterns(tickerPatterns)
 	}
 	cfg.RegisterStopwords(
 		"filler1",
@@ -90,4 +97,32 @@ func runLearnInitOnce(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "warning: learn-loop-example-pp-cli: learn init: %v\n", err)
 		}
 	})
+}
+
+// learnCommonIdentityFields is the ordered, domain-neutral list
+// ResourceEntitiesFromJSON walks when a resource has no more specific
+// identity key. Missing JSON keys are skipped, so one list can serve
+// every collection.
+var learnCommonIdentityFields = []string{
+	"name", "title", "display_name", "full_name", "short_name", "label",
+	"slug", "key", "code", "id", "address",
+}
+
+// learnResourceTypeFields returns the per-resource identity-field map
+// passed to Recall so entity_match can be exact when the stored JSON
+// actually carries the identity.
+func learnResourceTypeFields() map[string][]string {
+	return map[string][]string{
+		"games":   {"game_key", "name", "title", "display_name", "full_name", "short_name", "label", "slug", "key", "code", "id", "address"},
+		"leagues": {"name", "title", "display_name", "full_name", "short_name", "label", "slug", "key", "code", "id", "address"},
+	}
+}
+
+// learnIdentityFieldsFor returns the identity fields for one resource
+// type, falling back to the common list when the type is unknown.
+func learnIdentityFieldsFor(resourceType string) []string {
+	if fields, ok := learnResourceTypeFields()[resourceType]; ok && len(fields) > 0 {
+		return fields
+	}
+	return append([]string(nil), learnCommonIdentityFields...)
 }

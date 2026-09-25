@@ -101,7 +101,8 @@ func TestGenerateLearnPackageGatedOff(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := minimalSpec("learn-gated")
-	apiSpec.Learn.Enabled = false
+	// Post-flip: opt out so this test exercises the non-learn shape it asserts.
+	apiSpec.Learn.Disabled = true
 	outputDir := filepath.Join(t.TempDir(), "learn-gated-pp-cli")
 	gen := New(apiSpec, outputDir)
 	gen.VisionSet = VisionTemplateSet{Store: true}
@@ -160,6 +161,10 @@ func TestGenerateLearnCLICommandsCompileAndTest(t *testing.T) {
 
 	apiSpec := minimalSpec("learn-cli")
 	apiSpec.Learn.Enabled = true
+	apiSpec.Learn.TickerPatterns = []string{
+		`^EXAMPLE-[A-Z0-9]+(-[A-Z0-9]+)*$`,
+		`^\d{1,3}(\.\d{1,3}){3}$`,
+	}
 	outputDir := filepath.Join(t.TempDir(), "learn-cli-pp-cli")
 	gen := New(apiSpec, outputDir)
 	gen.VisionSet = VisionTemplateSet{Store: true}
@@ -179,6 +184,44 @@ func TestGenerateLearnCLICommandsCompileAndTest(t *testing.T) {
 	// so they don't depend on cobra registration and are included in
 	// the filter.
 	runGoCommand(t, outputDir, "test", "-run", "^(TestTeach|TestRecall|TestLearnings|TestSkipLearnHook|TestNewLearnConfig|TestInitLearn|TestPlaybook)", "./internal/cli/...")
+}
+
+func TestGenerateLearnCommandExamplesAreRunnableOnFirstLine(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("learn-examples")
+	apiSpec.Learn.Enabled = true
+	outputDir := filepath.Join(t.TempDir(), "learn-examples-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true}
+	require.NoError(t, gen.Generate())
+
+	teachSrc := readEmitted(t, outputDir, "internal", "cli", "teach.go")
+	assertTeachFamilyProbeSurface(t, teachSrc, `Use:   "teach"`,
+		`--query=find items in category;--resource-type=items;--resource=GROUP-category`,
+		`learn-examples-pp-cli teach --query "find items in category" --resource-type items --resource GROUP-category`)
+	assertTeachFamilyProbeSurface(t, teachSrc, `Use:   "teach-pattern"`,
+		`--query-template=items in {entity};--resource-template=GROUP-{entity:category};--resource-type=items;--entity-kind=category;--strategy=substitute`,
+		`learn-examples-pp-cli teach-pattern --query-template "items in {entity}" --resource-template "GROUP-{entity:category}" --resource-type items --entity-kind category --strategy substitute`)
+	assertTeachFamilyProbeSurface(t, teachSrc, `Use:   "teach-lookup"`,
+		`--kind=country;--canonical=United States;--value=USA`,
+		`learn-examples-pp-cli teach-lookup --kind country --canonical "United States" --value USA`)
+	require.Contains(t, teachSrc, "func teachEmitsJSON(")
+	require.Contains(t, teachSrc, "quietFlag.Changed && flags.quiet",
+		"root --quiet=false must not suppress JSON merely because the flag changed")
+	require.NotContains(t, teachSrc, `flags.asJSON && !flags.quiet`)
+	require.NotContains(t, teachSrc, `teach --query "<question>"`)
+	require.NotContains(t, teachSrc, `--resource-type <type>`)
+
+	playbookSrc := readEmitted(t, outputDir, "internal", "cli", "teach_playbook.go")
+	assertTeachFamilyProbeSurface(t, playbookSrc, `Use:   "teach-playbook"`,
+		`--query=find items in category;--notes=example playbook note`,
+		`learn-examples-pp-cli teach-playbook --query "find items in category" --notes "example playbook note"`)
+	assertTeachFamilyProbeSurface(t, playbookSrc, `Use:   "amend"`,
+		`--query=find items in category;--add-note=example correction`,
+		`learn-examples-pp-cli playbook amend --query "find items in category" --add-note "example correction"`)
+	require.NotContains(t, playbookSrc, `QUERY="$(cat /path/to/question.txt)"`)
+	require.NotContains(t, playbookSrc, `--playbook-file ~/playbooks/`)
 }
 
 // TestGenerateLearnInitWiresSpec verifies that the emitted learn_init.go
@@ -221,6 +264,9 @@ func TestGenerateLearnInitWiresSpec(t *testing.T) {
 		`{Canonical: "US", Values: []string{"USA", "America"}}`,
 		`lookups.SeedFromConfig(db, seeds)`,
 		`learnInitOnce`,
+		`store.RegisterTickerPatterns(tickerPatterns)`,
+		`func learnResourceTypeFields()`,
+		`func learnIdentityFieldsFor(`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("learn_init.go missing %q\n--- emitted ---\n%s", want, got)
@@ -252,5 +298,8 @@ func TestGenerateLearnInitEmptyConfigOmitsImports(t *testing.T) {
 	}
 	if strings.Contains(got, `/learn/lookups"`) {
 		t.Errorf("learn_init.go must not import lookups when no EntityLookupSeeds declared\n--- emitted ---\n%s", got)
+	}
+	if strings.Contains(got, "store.RegisterTickerPatterns") {
+		t.Errorf("learn_init.go must not register ticker patterns when none are declared\n--- emitted ---\n%s", got)
 	}
 }

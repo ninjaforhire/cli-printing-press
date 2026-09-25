@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mvanhorn/cli-printing-press/v4/internal/pipeline"
 )
 
 // TestExtractSubcommandWords pins the wordlist rule against the bash
@@ -130,6 +132,45 @@ func TestLoadCommands_Shapes(t *testing.T) {
 		}
 		if len(got) != 1 || got[0].Command != "mycli x" {
 			t.Errorf("expected single non-empty command, got %+v", got)
+		}
+	})
+
+	t.Run("prose code spans with cli binary are included", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, `{"api_name":"demo-api","narrative":{
+			"headline":"Use `+"`demo-api-pp-cli reports status --json`"+` for status and `+"`--json`"+` for machine output.",
+			"value_prop":"HTTP `+"`429`"+` is not a command.",
+			"auth_narrative":"Refresh credentials with `+"`demo-api-cli auth refresh`"+`.",
+			"when_to_use":"Prefer `+"`demo-api-pp-cli search --query foo`"+` when exploring.",
+			"troubleshoots":[{"fix":"Run `+"`demo-api-pp-cli doctor`"+` before retrying."}],
+			"quickstart":[{"command":"demo-api-pp-cli widgets list"}],
+			"recipes":[{"command":"demo-api-pp-cli widgets export"}]
+		}}`)
+
+		got, err := loadCommands(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var sections []Section
+		var commands []string
+		for _, cmd := range got {
+			sections = append(sections, cmd.Section)
+			commands = append(commands, cmd.Command)
+		}
+		wantSections := []Section{
+			SectionQuickstart,
+			SectionRecipes,
+			SectionHeadline,
+			SectionAuthNarrative,
+			SectionWhenToUse,
+			SectionTroubleshoot,
+		}
+		if !reflect.DeepEqual(sections, wantSections) {
+			t.Fatalf("sections = %#v, want %#v; commands=%#v", sections, wantSections, commands)
+		}
+		if slices.Contains(commands, "--json") || slices.Contains(commands, "429") {
+			t.Fatalf("flag-only and non-command code spans should be ignored, got %#v", commands)
 		}
 	})
 }
@@ -463,6 +504,23 @@ func TestValidateWithOptions_FullExamplesUsesTemplateVarEnvOverrides(t *testing.
 
 	if report.HasFailures() {
 		t.Fatalf("full example should seed manifest override env names, got %+v", report)
+	}
+}
+
+func TestDiscoverTemplateVarEnvFindsManifestAboveStagedBinary(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "build", "stage", "bin", "notion-pp-cli")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
+		t.Fatalf("creating staged binary directory: %v", err)
+	}
+	manifest := `{"api_name":"notion","endpoint_template_vars":["workspace"],"endpoint_template_env_overrides":{"workspace":"NOTION_WORKSPACE"}}`
+	if err := os.WriteFile(filepath.Join(root, pipeline.CLIManifestFilename), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("writing root manifest: %v", err)
+	}
+
+	got := discoverTemplateVarEnv(binary)
+	if want := []templateVarEnvEntry{{Name: "NOTION_WORKSPACE", Value: "workspace_placeholder"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("discoverTemplateVarEnv() = %#v, want %#v", got, want)
 	}
 }
 

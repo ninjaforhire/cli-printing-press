@@ -1,26 +1,31 @@
 module {{modulePath}}
 
-go 1.26
+go {{goDirectiveVersion}}
 
-toolchain go1.26.5
+toolchain {{goToolchainVersion}}
 
 require (
 {{- if .UsesBrowserHTTPTransport}}
-	github.com/enetx/surf v1.0.199
+	github.com/refraction-networking/utls v1.8.2
+{{- end}}
+{{- if .UsesBrowserHTTP3Transport}}
+	github.com/quic-go/quic-go v0.60.0
 {{- end}}
 {{- if eq .Auth.Subtype "auth0_spa_in_memory"}}
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
 {{- end}}
+{{- if eq .Auth.Subtype "google_service_account"}}
+	golang.org/x/oauth2 v0.36.0
+{{- end}}
 {{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed") .Streaming.Enabled}}
 	github.com/gorilla/websocket v1.5.3
 {{- end}}
 	github.com/spf13/cobra v1.9.1
-{{- if .HasHTMLExtraction}}
-	golang.org/x/net v0.55.0
-{{- end}}
-{{- if eq .Config.Format "toml"}}
+	github.com/spf13/pflag v1.0.6
 	github.com/pelletier/go-toml/v2 v2.2.4
+{{- if or .HasHTMLExtraction (and .UsesBrowserHTTPTransport (not .UsesBrowserHTTP3Transport))}}
+	golang.org/x/net v0.56.0
 {{- end}}
 )
 
@@ -29,5 +34,37 @@ require modernc.org/sqlite v1.37.0
 {{- end}}
 
 {{- if .VisionSet.MCP}}
-require github.com/mark3labs/mcp-go v0.47.0
+require github.com/mark3labs/mcp-go v0.57.0
+{{- end}}
+
+{{- if .HasAuthCommand}}
+
+// x/sys is a DIRECT dependency for token-bearing bundles: the read-time
+// credentials-perms guard's Windows surface (internal/cliutil/creds_perms_windows.go)
+// imports golang.org/x/sys/windows. Emitted as a direct require (no // indirect)
+// so a freshly generated bundle's go.mod is correct out of the box, WITHOUT a
+// manual `go mod tidy`. The version matches the transitive floor below so a
+// single x/sys version is pinned. NOTE (go mod tidy GOOS caveat): the import is
+// behind `//go:build windows`, so running `go mod tidy` under GOOS=linux/darwin
+// re-marks this // indirect (that GOOS compiles no file that imports it); under
+// GOOS=windows it stays direct. That is tolerated churn, NOT a bug to "fix".
+require golang.org/x/sys v0.46.0
+{{- else}}
+
+// x/sys is a DIRECT dependency even without auth: filelock_windows.go
+// imports golang.org/x/sys/windows. Emitted as a direct require (no
+// // indirect) so a Windows cross-compile of a freshly generated bundle
+// succeeds without a manual `go mod tidy`. The version matches the
+// transitive floor. NOTE (go mod tidy GOOS caveat): the import is behind
+// `//go:build windows`, so tidy under GOOS=linux/darwin re-marks this
+// // indirect; under GOOS=windows it stays direct.
+require golang.org/x/sys v0.46.0
+{{- end}}
+{{- if .UsesBrowserHTTPTransport}}
+
+// Floor x/crypto, pulled in only transitively via the Chrome TLS stack, above
+// its vulnerable versions (osv flags module presence; govulncheck reachability
+// = 0 for these REST CLIs). Emitted only when the Chrome transport is present,
+// so MVS keeps the floor; tidy drops it for CLIs without it.
+require golang.org/x/crypto v0.56.0 // indirect
 {{- end}}

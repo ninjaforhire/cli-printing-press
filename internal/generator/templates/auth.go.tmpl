@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +24,9 @@ import (
 
 	"{{modulePath}}/internal/cliutil"
 	"{{modulePath}}/internal/config"
+{{- if or (authURLNeedsTemplateSubstitution .Auth.TokenURL) (authURLNeedsTemplateSubstitution .Auth.AuthorizationURL)}}
+	"{{modulePath}}/internal/client"
+{{- end}}
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +34,7 @@ func newAuthCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
 		Short: {{printf "%q" (authCommandShort .APISpec)}},
+		Annotations: map[string]string{"pp:parent-group": "true"},
 		RunE:  parentNoSubcommandRunE(flags),
 	}
 
@@ -52,9 +58,9 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
 {{- if .Auth.KeyURL}}
-			fmt.Fprintln(w, "Register an app and copy your credentials at: {{.Auth.KeyURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "Register an app and copy your credentials at: %s" .Auth.KeyURL)}})
 {{- else if .WebsiteURL}}
-			fmt.Fprintln(w, "See API docs for OAuth app registration: {{.WebsiteURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "See API docs for OAuth app registration: %s" .WebsiteURL)}})
 {{- else}}
 			fmt.Fprintln(w, "No setup URL is configured for this CLI; check the API's docs.")
 {{- end}}
@@ -72,7 +78,7 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 				return nil
 			}
 {{- if or .Auth.KeyURL .WebsiteURL}}
-			launchURL := {{if .Auth.KeyURL}}"{{.Auth.KeyURL}}"{{else}}"{{.WebsiteURL}}"{{end}}
+			launchURL := {{if .Auth.KeyURL}}{{printf "%q" .Auth.KeyURL}}{{else}}{{printf "%q" .WebsiteURL}}{{end}}
 			if cliutil.IsVerifyEnv() {
 				fmt.Fprintf(w, "would launch: %s\n", launchURL)
 				return nil
@@ -126,14 +132,22 @@ func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 			"mcp:hidden": "true",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOAuthLogin(cmd, flags, clientID, clientSecret, port, redirectOverride)
+			clientIDFromFlag := clientID != ""
+			clientSecretFromFlag := clientSecret != ""
+			if clientID == "" {
+				clientID = os.Getenv("{{envName .Name}}_CLIENT_ID")
+			}
+			if clientSecret == "" {
+				clientSecret = os.Getenv("{{envName .Name}}_CLIENT_SECRET")
+			}
+			return runOAuthLogin(cmd, flags, clientID, clientSecret, port, clientIDFromFlag, clientSecretFromFlag, redirectOverride)
 		},
 	}
 
-	cmd.Flags().StringVar(&clientID, "client-id", os.Getenv("{{envName .Name}}_CLIENT_ID"), "OAuth2 client ID")
-	cmd.Flags().StringVar(&clientSecret, "client-secret", os.Getenv("{{envName .Name}}_CLIENT_SECRET"), "OAuth2 client secret")
+	cmd.Flags().StringVar(&clientID, "client-id", "", "OAuth2 client ID")
+	cmd.Flags().StringVar(&clientSecret, "client-secret", "", "OAuth2 client secret")
 	cmd.Flags().IntVar(&port, "port", 8085, "Local callback server port")
-	cmd.Flags().StringVar(&redirectOverride, "redirect-uri", os.Getenv("{{envName .Name}}_REDIRECT_URI"), "Registered OAuth2 redirect URI, for providers that reject http://localhost redirects (e.g. Intuit production). Must be a page that forwards the callback query string to http://localhost:<port>/callback")
+	cmd.Flags().StringVar(&redirectOverride, "redirect-uri", os.Getenv("{{envName .Name}}_REDIRECT_URI"), "Registered OAuth2 redirect URI for providers that reject loopback callbacks; must forward the callback query string to http://127.0.0.1:<port>/callback")
 
 	return cmd
 }
@@ -141,8 +155,9 @@ func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 // validateRedirectOverride rejects unsafe --redirect-uri values before any
 // auth code can be routed through them: the URI must be absolute, carry no
 // fragment or userinfo, and use https unless the host is loopback. A typo or
-// poisoned <NAME>_REDIRECT_URI env var could otherwise send the authorization
-// code through an unintended endpoint or downgrade it to cleartext.
+// poisoned redirect-URI environment variable could otherwise send the
+// authorization code through an unintended endpoint or downgrade it to
+// cleartext.
 func validateRedirectOverride(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -162,7 +177,7 @@ func validateRedirectOverride(raw string) error {
 	return nil
 }
 
-func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret string, port int, redirectOverride string) error {
+func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret string, port int, clientIDFromFlag, clientSecretFromFlag bool, redirectOverride string) error {
 	w := cmd.OutOrStdout()
 	if redirectOverride != "" {
 		if err := validateRedirectOverride(redirectOverride); err != nil {
@@ -172,6 +187,13 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	cfg, err := config.Load(flags.configPath)
 	if err != nil {
 		return err
+	}
+	// Credential-free probes cannot construct an authorize URL. Keep supplied
+	// or configured client IDs on the detailed verify path below so it still
+	// emits PKCE params.
+	if (dryRunOK(flags) || cliutil.IsVerifyEnv()) && clientID == "" && cfg.ClientID == "" {
+		fmt.Fprintln(w, `{"status":"dry_run","action":"auth login","would":"start OAuth2 authorization-code flow (PKCE without client secret), open browser, capture loopback callback"}`)
+		return nil
 	}
 	clientID, clientSecret, err = resolveOAuthCredentials(cmd, flags, cfg, clientID, clientSecret)
 	if err != nil {
@@ -184,18 +206,41 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	}
 	state := hex.EncodeToString(stateBytes)
 
+	// RFC 7636 PKCE: with no client secret this is a public client, and a
+	// bare authorization_code grant reaches the token endpoint with no
+	// client authentication at all — providers reject that. When a secret
+	// is configured, keep the plain Authorization Code flow unchanged.
+	codeVerifier := ""
+	if clientSecret == "" {
+		codeVerifier, err = generatePKCEVerifier()
+		if err != nil {
+			return err
+		}
+	}
+
 	authURL := ""
 {{- if .Auth.AuthorizationURL}}
 	authURL = cfg.AuthorizationURL
 	if authURL == "" {
-		authURL = "{{.Auth.AuthorizationURL}}"
+		authURL = {{printf "%q" .Auth.AuthorizationURL}}
 	}
+{{- if authURLNeedsTemplateSubstitution .Auth.AuthorizationURL}}
+	resolvedAuthURL, authResolveErr := client.ResolveTemplateURL(authURL, cfg.TemplateVars)
+	if authResolveErr != nil {
+		return authResolveErr
+	}
+	authURL = resolvedAuthURL
+{{- end}}
 {{- end}}
 {{- $refreshMech := .Auth.ParseRefreshTokenMechanism}}
 	params := url.Values{
 		"client_id":     {clientID},
 		"response_type": {"code"},
 		"state":         {state},
+	}
+	if codeVerifier != "" {
+		params.Set("code_challenge", pkceCodeChallengeS256(codeVerifier))
+		params.Set("code_challenge_method", "S256")
 	}
 {{- if eq $refreshMech.Kind "query"}}
 	params.Set({{printf "%q" $refreshMech.Key}}, {{printf "%q" $refreshMech.Value}})
@@ -218,7 +263,7 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 		if redirectOverride != "" {
 			params.Set("redirect_uri", redirectOverride)
 		} else {
-			params.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", port))
+			params.Set("redirect_uri", fmt.Sprintf("http://127.0.0.1:%d/callback", port))
 		}
 		fmt.Fprintf(w, "would launch: %s\n", authURL+"?"+params.Encode())
 		return nil
@@ -232,10 +277,12 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 
 	// Derive the redirect URI from the live listener address so an OS-assigned
 	// ephemeral port (--port 0) is reflected in both the auth request and the
-	// token exchange below. When --redirect-uri is set (providers that reject
-	// localhost redirects), that registered URI is sent to the provider instead;
-	// the local listener still receives the forwarded callback.
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+	// token exchange below. Use 127.0.0.1, not "localhost": RFC 8252 §7.3
+	// prescribes the loopback IP literal, and some providers reject
+	// "localhost" redirect URIs outright. When --redirect-uri is set, that
+	// registered URI is sent to the provider instead; the local listener still
+	// receives the forwarded callback.
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", listener.Addr().(*net.TCPAddr).Port)
 	if redirectOverride != "" {
 		redirectURI = redirectOverride
 	}
@@ -290,8 +337,15 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 {{- if .Auth.TokenURL}}
 	tokenURL = cfg.TokenURL
 	if tokenURL == "" {
-		tokenURL = "{{.Auth.TokenURL}}"
+		tokenURL = {{printf "%q" .Auth.TokenURL}}
 	}
+{{- if authURLNeedsTemplateSubstitution .Auth.TokenURL}}
+	resolved, resolveErr := client.ResolveTemplateURL(tokenURL, cfg.TemplateVars)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	tokenURL = resolved
+{{- end}}
 {{- end}}
 	tokenParams := url.Values{
 		"grant_type":   {"authorization_code"},
@@ -301,29 +355,36 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 		"client_id":    {clientID},
 {{- end}}
 	}
-{{- if not .Auth.UsesBasicClientAuth}}
+{{- if .Auth.UsesBasicClientAuth}}
+	if clientSecret == "" {
+		tokenParams.Set("code_verifier", codeVerifier)
+	}
+{{- else}}
 	if clientSecret != "" {
 		tokenParams.Set("client_secret", clientSecret)
+	} else {
+		tokenParams.Set("code_verifier", codeVerifier)
 	}
 {{- end}}
-{{- if .Auth.UsesBasicClientAuth}}
 
-	tokenReq, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(tokenParams.Encode()))
+	// The browser-wait timeout above does not apply here; the token exchange
+	// is a plain server-to-server POST and gets its own short network timeout,
+	// while cmd.Context() keeps it cancellable from the terminal.
+	tokenReq, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, tokenURL, strings.NewReader(tokenParams.Encode()))
 	if err != nil {
 		return fmt.Errorf("building token request: %w", err)
 	}
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Intuit's token endpoint returns HTTP 500 (not 4xx) when the Accept
-	// header is missing; other providers ignore it, so always send it.
+	// Some token endpoints require an explicit JSON response preference and
+	// fail non-obviously when it is absent; other providers ignore it.
 	tokenReq.Header.Set("Accept", "application/json")
-	// Intuit and other strict providers require client credentials in an HTTP
-	// Basic Authorization header at the token endpoint, not the form body.
+{{- if .Auth.UsesBasicClientAuth}}
+	// Strict providers require client credentials in an HTTP Basic
+	// Authorization header at the token endpoint, not the form body.
 	tokenReq.SetBasicAuth(clientID, clientSecret)
-	resp, err := http.DefaultClient.Do(tokenReq)
-{{- else}}
-
-	resp, err := http.PostForm(tokenURL, tokenParams)
 {{- end}}
+	tokenClient := cliutil.OAuthTokenHTTPClient(&http.Client{Timeout: 30 * time.Second})
+	resp, err := tokenClient.Do(tokenReq)
 	if err != nil {
 		return fmt.Errorf("exchanging code for token: %w", err)
 	}
@@ -357,6 +418,7 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	if tokenResp.ExpiresIn > 0 {
 		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	}
+	cfg.MarkCredentialsExplicit(clientIDFromFlag, clientSecretFromFlag)
 	if err := cfg.SaveTokens(clientID, clientSecret, tokenResp.AccessToken, tokenResp.RefreshToken, expiry); err != nil {
 		return fmt.Errorf("saving tokens: %w", err)
 	}
@@ -407,9 +469,9 @@ func resolveOAuthCredentials(cmd *cobra.Command, flags *rootFlags, cfg *config.C
 
 func printOAuthCredentialHint(w io.Writer) {
 {{- if .Auth.KeyURL}}
-	fmt.Fprintln(w, "Create OAuth credentials at: {{.Auth.KeyURL}}")
+	fmt.Fprintln(w, {{printf "%q" (printf "Create OAuth credentials at: %s" .Auth.KeyURL)}})
 {{- else if .WebsiteURL}}
-	fmt.Fprintln(w, "See API docs for OAuth app registration: {{.WebsiteURL}}")
+	fmt.Fprintln(w, {{printf "%q" (printf "See API docs for OAuth app registration: %s" .WebsiteURL)}})
 {{- else}}
 	fmt.Fprintln(w, "No setup URL is configured for this CLI; check the API's docs.")
 {{- end}}
@@ -436,6 +498,8 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 
 			w := cmd.OutOrStdout()
 			authed := cfg.AccessToken != ""
+			refusals := cfg.CredentialRefusalSummaries()
+			credentialRefused := len(refusals) > 0
 			// JSON envelope: {authenticated, verified, source, config}.
 			if flags.asJSON {
 				out := map[string]any{
@@ -444,7 +508,25 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 					"source":        cfg.AuthSource,
 					"config":        cfg.Path,
 				}
-				return printJSONFiltered(w, out, flags)
+				if credentialRefused {
+					out["credential_refused"] = true
+					out["credential_refusals"] = refusals
+				}
+				if printErr := printJSONFiltered(w, out, flags); printErr != nil {
+					return printErr
+				}
+				if !authed && credentialRefused {
+					return authErr(cfg.CredentialRefusalError())
+				}
+				return nil
+			}
+
+			if !authed && credentialRefused {
+				fmt.Fprintf(w, "  %s Credentials present but refused.\n", red("FAIL"))
+				for _, refusal := range refusals {
+					fmt.Fprintf(w, "  %s\n", refusal)
+				}
+				return authErr(cfg.CredentialRefusalError())
 			}
 
 			if !authed {
@@ -504,6 +586,24 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// generatePKCEVerifier returns a fresh RFC 7636 code verifier: 32 bytes of
+// CSPRNG output, base64url-encoded without padding (43 chars, within the
+// 43-128 range the RFC requires).
+func generatePKCEVerifier() (string, error) {
+	verifierBytes := make([]byte, 32)
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return "", fmt.Errorf("generating PKCE verifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(verifierBytes), nil
+}
+
+// pkceCodeChallengeS256 derives the S256 code challenge for a verifier:
+// base64url(SHA-256(verifier)) without padding.
+func pkceCodeChallengeS256(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func openBrowser(url string) {

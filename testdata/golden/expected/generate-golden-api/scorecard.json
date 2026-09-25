@@ -3,38 +3,37 @@
     "api_name": "printing-press-golden",
     "competitor_scores": null,
     "gap_report": [
-      "mcp_description_quality scored 3/10 - needs improvement",
-      "MCP: 10 tools (1 public, 9 auth-required) — readiness: full"
+      "MCP: 11 tools (1 public, 10 auth-required) — readiness: full"
     ],
-    "overall_grade": "A",
+    "overall_grade": "A (2 of 24 dimensions unverified: path_validity, auth_protocol)",
     "steinberger": {
       "agent_native": 10,
       "agent_workflow_readiness": 9,
       "auth": 10,
       "auth_protocol": 0,
-      "breadth": 7,
+      "breadth": 9,
       "cache_freshness": 10,
       "data_pipeline_integrity": 10,
       "dead_code": 5,
       "doctor": 10,
       "error_handling": 10,
-      "insight": 8,
+      "insight": 9,
       "live_api_verification": 0,
       "local_cache": 10,
-      "mcp_description_quality": 3,
+      "mcp_description_quality": 7,
       "mcp_quality": 10,
       "mcp_remote_transport": 10,
       "mcp_surface_strategy": 0,
-      "mcp_token_efficiency": 7,
+      "mcp_token_efficiency": 10,
       "mcp_tool_design": 0,
       "output_modes": 10,
       "path_validity": 0,
-      "percentage": 89,
+      "percentage": 97,
       "readme": 8,
       "sync_correctness": 10,
       "terminal_ux": 9,
-      "total": 89,
-      "type_fidelity": 2,
+      "total": 97,
+      "type_fidelity": 5,
       "vision": 9,
       "workflows": 10
     },
@@ -44,6 +43,10 @@
       "path_validity",
       "auth_protocol",
       "live_api_verification"
+    ],
+    "unverified_dimensions": [
+      "path_validity",
+      "auth_protocol"
     ]
   }
 }

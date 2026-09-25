@@ -19,14 +19,15 @@ import (
 )
 
 // OAuth2 client_credentials grant: 2-legged server-to-server flow.
-// POST to TokenURL with form-encoded client_id/client_secret. No user
+// POST to TokenURL with HTTP Basic client authentication. No user
 // redirect, no refresh_token. The client re-mints when within 60s of expiry.
 
 func newAuthCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Manage authentication for Printing Press Oauth2",
-		RunE:  parentNoSubcommandRunE(flags),
+		Use:         "auth",
+		Short:       "Manage authentication for Printing Press Oauth2",
+		Annotations: map[string]string{"pp:parent-group": "true"},
+		RunE:        parentNoSubcommandRunE(flags),
 	}
 
 	cmd.AddCommand(newAuthLoginCmd(flags))
@@ -67,6 +68,8 @@ Credentials default to PRINTING_PRESS_OAUTH2_CLIENT_ID (Client ID) and PRINTING_
 				return nil
 			}
 
+			clientIDFromFlag := clientID != ""
+			clientSecretFromFlag := clientSecret != ""
 			if clientID == "" {
 				clientID = strings.TrimSpace(os.Getenv("PRINTING_PRESS_OAUTH2_CLIENT_ID"))
 			}
@@ -99,6 +102,7 @@ Credentials default to PRINTING_PRESS_OAUTH2_CLIENT_ID (Client ID) and PRINTING_
 			if tok.ExpiresIn > 0 {
 				expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 			}
+			cfg.MarkCredentialsExplicit(clientIDFromFlag, clientSecretFromFlag)
 			if err := cfg.SaveTokens(clientID, clientSecret, tok.AccessToken, "", expiry); err != nil {
 				return configErr(fmt.Errorf("saving token: %w", err))
 			}
@@ -124,19 +128,24 @@ type tokenResponse struct {
 }
 
 func resolveClientCredentialsScope() string {
-	if scope := os.Getenv("PRINTING_PRESS_OAUTH2_OAUTH_SCOPE"); scope != "" {
+	if scope := cliutil.EnvOverride("PRINTING_PRESS_OAUTH2_OAUTH_SCOPE"); scope != "" {
 		return scope
 	}
 	return "read write"
+}
+
+func resolveClientCredentialsUserAgent() string {
+	if ua := strings.TrimSpace(cliutil.EnvOverride("PRINTING_PRESS_OAUTH2_USER_AGENT")); ua != "" {
+		return ua
+	}
+	return "printing-press-oauth2-pp-cli/1.0.0"
 }
 
 // mintClientCredentialsToken POSTs grant_type=client_credentials to the
 // token endpoint and returns the parsed token response.
 func mintClientCredentialsToken(httpClient *http.Client, tokenURL, clientID, clientSecret string) (*tokenResponse, error) {
 	form := url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
+		"grant_type": {"client_credentials"},
 	}
 	if scope := resolveClientCredentialsScope(); scope != "" {
 		form.Set("scope", scope)
@@ -146,8 +155,10 @@ func mintClientCredentialsToken(httpClient *http.Client, tokenURL, clientID, cli
 		return nil, fmt.Errorf("building token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", resolveClientCredentialsUserAgent())
+	req.SetBasicAuth(clientID, clientSecret)
 
-	resp, err := httpClient.Do(req)
+	resp, err := cliutil.OAuthTokenHTTPClient(httpClient).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("calling token endpoint: %w", err)
 	}
@@ -181,6 +192,8 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 			w := cmd.OutOrStdout()
 			header := cfg.AuthHeader()
 			authed := header != ""
+			refusals := cfg.CredentialRefusalSummaries()
+			credentialRefused := len(refusals) > 0
 			// JSON envelope: {authenticated, verified, source, config}. When not
 			// authenticated, write the envelope first then return authErr
 			// so exit code carries the auth-failure signal.
@@ -191,13 +204,27 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 					"source":        cfg.AuthSource,
 					"config":        cfg.Path,
 				}
+				if credentialRefused {
+					out["credential_refused"] = true
+					out["credential_refusals"] = refusals
+				}
 				if printErr := printJSONFiltered(w, out, flags); printErr != nil {
 					return printErr
+				}
+				if !authed && credentialRefused {
+					return authErr(cfg.CredentialRefusalError())
 				}
 				if !authed {
 					return authErr(fmt.Errorf("no credentials configured"))
 				}
 				return nil
+			}
+			if !authed && credentialRefused {
+				fmt.Fprintln(w, red("Credentials present but refused"))
+				for _, refusal := range refusals {
+					fmt.Fprintf(w, "  %s\n", refusal)
+				}
+				return authErr(cfg.CredentialRefusalError())
 			}
 			if !authed {
 				fmt.Fprintln(w, red("Not authenticated"))
@@ -222,30 +249,54 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 
 func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:     "set-token <token>",
-		Short:   "Save an API token to the config file (override the OAuth flow)",
-		Example: "  printing-press-oauth2-pp-cli auth set-token <bearer-jwt>",
-		Args:    cobra.ExactArgs(1),
+		Use:   "set-token",
+		Short: "Save an API token to the credentials file (override the OAuth flow)",
+		Long: "Save an API token to the credentials file (override the OAuth flow).\n\n" +
+			"The token is read from stdin so it never appears in process arguments or shell history.",
+		Example: "  echo \"$TOKEN\" | printing-press-oauth2-pp-cli auth set-token\n  printing-press-oauth2-pp-cli auth set-token < token-file",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			token, err := readSecretFromStdin(cmd.InOrStdin())
+			if err != nil {
+				return authErr(err)
+			}
 			cfg, err := config.Load(flags.configPath)
 			if err != nil {
 				return configErr(err)
 			}
 			cfg.AuthHeaderVal = ""
-			if err := cfg.SaveTokens("", "", args[0], "", cfg.TokenExpiry); err != nil {
+			if err := cfg.SaveTokens("", "", token, "", cfg.TokenExpiry); err != nil {
 				return configErr(fmt.Errorf("saving token: %w", err))
 			}
-			// JSON envelope: {saved, config_path}.
+			savePath := credentialSavePath(cfg)
+			// JSON envelope: {saved, config_path, credentials_path}.
 			if flags.asJSON {
-				return printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+				out := map[string]any{
 					"saved":       true,
 					"config_path": cfg.Path,
-				}, flags)
+				}
+				if !cfg.AgentcookieManagedByExternalStore() {
+					out["credentials_path"] = savePath
+				}
+				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", cfg.Path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", savePath)
 			return nil
 		},
 	}
+}
+
+func credentialSavePath(cfg *config.Config) string {
+	if cfg != nil && cfg.AgentcookieManagedByExternalStore() {
+		return cfg.Path
+	}
+	if path, err := cliutil.CredentialsFilePath(); err == nil {
+		return path
+	}
+	if cfg != nil {
+		return cfg.Path
+	}
+	return ""
 }
 
 func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {

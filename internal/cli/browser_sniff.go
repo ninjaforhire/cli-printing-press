@@ -9,9 +9,20 @@ import (
 	"strings"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/browsersniff"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/spf13/cobra"
 )
+
+// browserSniffConfigPath matches the runtime slug-derived path so the README
+// and config surface agree even when --name is a display title.
+func browserSniffConfigPath(name string) string {
+	slug := naming.Slug(name)
+	if slug == "" {
+		return ""
+	}
+	return fmt.Sprintf("~/.config/%s-pp-cli/config.toml", slug)
+}
 
 func newBrowserSniffCmd() *cobra.Command {
 	var harPath string
@@ -36,6 +47,9 @@ func newBrowserSniffCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("loading capture: %w", err)
 			}
+			if len(capture.Entries) == 0 {
+				return fmt.Errorf("capture %s contains no entries; capture traffic again or choose a docs-only/spec path", harPath)
+			}
 
 			if authFrom != "" {
 				authCapture, err := browsersniff.ParseEnriched(authFrom)
@@ -56,7 +70,7 @@ func newBrowserSniffCmd() *cobra.Command {
 
 			if name != "" {
 				apiSpec.Name = name
-				apiSpec.Config.Path = fmt.Sprintf("~/.config/%s-pp-cli/config.toml", name)
+				apiSpec.Config.Path = browserSniffConfigPath(name)
 			}
 
 			if outputPath == "" {
@@ -65,7 +79,7 @@ func newBrowserSniffCmd() *cobra.Command {
 			if analysisOutputPath == "" {
 				analysisOutputPath = browsersniff.DefaultTrafficAnalysisPath(outputPath)
 			}
-			if samplesOutputPath == "" {
+			if samplesOutputPath == "" && !cmd.Flags().Changed("samples-output") {
 				samplesOutputPath = browsersniff.DefaultSamplesPath(outputPath)
 			}
 
@@ -76,6 +90,7 @@ func newBrowserSniffCmd() *cobra.Command {
 			browsersniff.ApplyReachabilityDefaults(apiSpec, trafficAnalysis)
 
 			droppedEndpoints := browsersniff.FilterEndpointsByMinSamplesWithOptions(apiSpec, capture, minSamples, analyzeOptions)
+			browsersniff.AddReservedResourceNameWarnings(apiSpec, trafficAnalysis)
 
 			samplesWritten, err := writeBrowserSniffOutputs(apiSpec, trafficAnalysis, capture, outputPath, analysisOutputPath, samplesOutputPath, analyzeOptions)
 			if err != nil {
@@ -107,7 +122,7 @@ func newBrowserSniffCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "Override the auto-detected API name")
 	cmd.Flags().StringVar(&blocklist, "blocklist", "", "Comma-separated additional hostnames to filter (extends the default analytics/telemetry blocklist)")
 	cmd.Flags().StringVar(&include, "include", "", "Comma-separated host or path substrings to rescue from default filtering; matches win over --blocklist and the static-asset suffix demotion")
-	cmd.Flags().BoolVar(&preserveHosts, "preserve-hosts", false, "Keep secondary API hosts in the generated spec with per-endpoint base_url overrides instead of selecting only the dominant host")
+	cmd.Flags().BoolVar(&preserveHosts, "preserve-hosts", false, "Keep secondary API hosts in the generated spec instead of selecting only the dominant host. Surviving routes already keep their own origin when it differs from the spec base URL")
 	cmd.Flags().IntVar(&minSamples, "min-samples", 1, "Drop endpoints with fewer than N paired samples from the emitted spec; the dropped endpoints remain in the traffic-analysis sidecar for audit. Default 1 leaves behavior unchanged; 2+ is recommended for production capture")
 	cmd.Flags().StringVar(&authFrom, "auth-from", "", "Path to an enriched capture file to import auth from")
 	_ = cmd.MarkFlagRequired("har")

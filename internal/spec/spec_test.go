@@ -153,6 +153,118 @@ resources:
 	assert.True(t, param.DispatchParamSet)
 }
 
+func TestParsePagePagination(t *testing.T) {
+	t.Parallel()
+
+	yamlSpec := []byte(`
+name: page-pagination
+base_url: https://api.example.com
+auth:
+  type: none
+resources:
+  photos:
+    endpoints:
+      list:
+        method: GET
+        path: /photos
+        params:
+          - name: page
+            type: integer
+          - name: per_page
+            type: integer
+            default: 25
+        pagination:
+          type: page
+          cursor_param: page
+          limit_param: per_page
+        response:
+          type: array
+`)
+	s, err := ParseBytes(yamlSpec)
+	require.NoError(t, err)
+
+	list := s.Resources["photos"].Endpoints["list"]
+	require.NotNil(t, list.Pagination)
+	assert.Equal(t, "page", list.Pagination.Type)
+	assert.Equal(t, "page", list.Pagination.CursorParam)
+	assert.Equal(t, "per_page", list.Pagination.LimitParam)
+}
+
+func TestParsePaginationCursorFieldAlias(t *testing.T) {
+	t.Parallel()
+
+	yamlSpec := []byte(`
+name: cursor-pagination
+base_url: https://api.example.com
+auth:
+  type: none
+resources:
+  contacts:
+    endpoints:
+      list:
+        method: GET
+        path: /contacts
+        response:
+          type: array
+          item: Contact
+        response_path: results
+        pagination:
+          type: cursor
+          cursor_param: after
+          cursor_field: paging.next.after
+          limit_param: limit
+`)
+	s, err := ParseBytes(yamlSpec)
+	require.NoError(t, err)
+
+	list := s.Resources["contacts"].Endpoints["list"]
+	require.NotNil(t, list.Pagination)
+	assert.Equal(t, "paging.next.after", list.Pagination.NextCursorPath)
+	assert.Equal(t, "results", list.ResponsePath)
+}
+
+func TestParseEndpointExampleAndHappyArgs(t *testing.T) {
+	t.Parallel()
+
+	yamlSpec := []byte(`
+name: fixture-api
+base_url: https://api.example.com
+auth:
+  type: none
+resources:
+  geography:
+    endpoints:
+      counties:
+        method: GET
+        path: /geography/counties
+        example: "fixture-api-pp-cli geography counties --zip 60614"
+        happy_args: "--zip=60614"
+        happy_stdin: '{"query":"synthetic"}'
+        live_dogfood_requires_tier: enterprise
+        params:
+          - name: zip
+            type: string
+            required: true
+      states:
+        method: GET
+        path: /geography/states
+`)
+
+	s, err := ParseBytes(yamlSpec)
+	require.NoError(t, err)
+
+	counties := s.Resources["geography"].Endpoints["counties"]
+	assert.Equal(t, "fixture-api-pp-cli geography counties --zip 60614", counties.Example)
+	assert.Equal(t, "--zip=60614", counties.HappyArgs)
+	assert.Equal(t, `{"query":"synthetic"}`, counties.HappyStdin)
+	assert.Equal(t, "enterprise", counties.LiveDogfoodRequiresTier)
+
+	states := s.Resources["geography"].Endpoints["states"]
+	assert.Empty(t, states.Example)
+	assert.Empty(t, states.HappyArgs)
+	assert.Empty(t, states.LiveDogfoodRequiresTier)
+}
+
 func TestDispatchParamFalseSurvivesRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -348,6 +460,50 @@ resources:
 	require.IsType(t, map[string]any{}, param.ItemTemplate)
 	template := param.ItemTemplate.(map[string]any)
 	assert.Equal(t, "required", template["type"])
+}
+
+func TestParseObjectSchemaArrayBodyItemTypes(t *testing.T) {
+	yamlSpec := []byte(`
+name: typed-array-body
+base_url: https://api.example.com
+auth:
+  type: none
+resources:
+  messages:
+    endpoints:
+      send:
+        method: POST
+        path: /messages
+        body:
+          schema:
+            type: object
+            properties:
+              tags:
+                type: array
+                items:
+                  type: string
+              recipients:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    email:
+                      type: string
+`)
+	s, err := ParseBytes(yamlSpec)
+	require.NoError(t, err)
+
+	body := s.Resources["messages"].Endpoints["send"].Body
+	byName := map[string]Param{}
+	for _, param := range body {
+		byName[param.Name] = param
+	}
+
+	assert.Equal(t, "array", byName["tags"].Type)
+	assert.Equal(t, "string", byName["tags"].ItemType)
+	assert.Equal(t, "array", byName["recipients"].Type)
+	assert.Equal(t, "object", byName["recipients"].ItemType)
+	require.Len(t, byName["recipients"].Fields, 1)
 }
 
 func TestParseCSVArrayObjectTemplateMustBeObject(t *testing.T) {
@@ -768,6 +924,267 @@ func TestValidationRejectsUnknownSource(t *testing.T) {
 	}
 
 	require.ErrorContains(t, s.Validate(), `source "local-postgres" is not supported; valid values: local-sqlite`)
+}
+
+func TestValidateAuthConfigRejectsUnusableDeclarations(t *testing.T) {
+	baseSpec := func(auth AuthConfig) APISpec {
+		return APISpec{
+			Name:    "auth-api",
+			BaseURL: "https://api.example.com",
+			Auth:    auth,
+			Resources: map[string]Resource{
+				"items": {Endpoints: map[string]Endpoint{"list": {Method: "GET", Path: "/items"}}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		auth    AuthConfig
+		wantErr string
+	}{
+		{
+			name: "cookie auth with declared cookie",
+			auth: AuthConfig{Type: "cookie", Cookies: []string{"session"}},
+		},
+		{
+			name: "composed auth with declared cookie",
+			auth: AuthConfig{
+				Type:    "composed",
+				Format:  "Session {session}|{csrf}",
+				Cookies: []string{"session", "csrf"},
+			},
+		},
+		{
+			name:    "cookie auth without cookies",
+			auth:    AuthConfig{Type: "cookie"},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name: "header-carried cookie auth with request credential",
+			auth: AuthConfig{
+				Type:   "cookie",
+				Header: "Authorization",
+				In:     "header",
+				Format: "Bearer {token}",
+				EnvVarSpecs: []AuthEnvVar{{
+					Name:     "FOO_TOKEN",
+					Kind:     AuthEnvVarKindPerCall,
+					Required: true,
+				}},
+			},
+		},
+		{
+			name: "header-carried cookie auth with legacy env var",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "X-API-Key",
+				In:      "header",
+				Format:  "{token}",
+				EnvVars: []string{"FOO_API_KEY"},
+			},
+		},
+		{
+			name: "header-carried cookie auth rejects format without placeholder",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				In:      "header",
+				Format:  "Token ",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.format must contain a placeholder like {token} (got "Token ")`,
+		},
+		{
+			name: "header-carried cookie auth rejects malformed placeholder",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				In:      "header",
+				Format:  "Token {token} {tenant-id}",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.format contains invalid placeholder syntax`,
+		},
+		{
+			name: "header-carried cookie auth rejects unmapped placeholder",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				In:      "header",
+				Format:  "Token {missing}",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.format placeholder "{missing}" has no env_var mapping`,
+		},
+		{
+			name: "cookie auth without cookies still rejects Cookie header",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Cookie",
+				In:      "header",
+				Format:  "{token}",
+				EnvVars: []string{"FOO_COOKIE"},
+			},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name: "cookie auth without cookies rejects non-header placement",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				In:      "cookie",
+				Format:  "Bearer {token}",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name: "cookie auth without cookies rejects missing format",
+			auth: AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				In:      "header",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name: "cookie auth without cookies rejects flow input",
+			auth: AuthConfig{
+				Type:   "cookie",
+				Header: "Authorization",
+				In:     "header",
+				Format: "Bearer {token}",
+				EnvVarSpecs: []AuthEnvVar{{
+					Name: "FOO_CLIENT_ID",
+					Kind: AuthEnvVarKindAuthFlowInput,
+				}},
+			},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name:    "composed auth without cookies",
+			auth:    AuthConfig{Type: "composed"},
+			wantErr: `auth.type is "composed" but auth.cookies is empty`,
+		},
+		{
+			name:    "cookie auth with blank cookie",
+			auth:    AuthConfig{Type: "cookie", Cookies: []string{" "}},
+			wantErr: `auth.type is "cookie" but auth.cookies is empty`,
+		},
+		{
+			name:    "cookie auth with a blank cookie entry",
+			auth:    AuthConfig{Type: "cookie", Cookies: []string{"session", " "}},
+			wantErr: `auth.cookies contains an empty cookie name`,
+		},
+		{
+			name: "standard token placeholder",
+			auth: AuthConfig{
+				Type:    "bearer_token",
+				Format:  "Bearer {token}",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+		},
+		{
+			name: "rich per-call env placeholder",
+			auth: AuthConfig{
+				Type:   "bearer_token",
+				Format: "Bearer {foo_token}",
+				EnvVarSpecs: []AuthEnvVar{{
+					Name:     "COMPANY_FOO_TOKEN",
+					Kind:     AuthEnvVarKindPerCall,
+					Required: true,
+				}},
+			},
+		},
+		{
+			name: "access token placeholder with flow input",
+			auth: AuthConfig{
+				Type:   "bearer_token",
+				Format: "Bearer {access_token}",
+				EnvVarSpecs: []AuthEnvVar{{
+					Name: "FOO_CLIENT_ID",
+					Kind: AuthEnvVarKindAuthFlowInput,
+				}},
+			},
+		},
+		{
+			name: "access token placeholder with per-call credential",
+			auth: AuthConfig{
+				Type:   "bearer_token",
+				Format: "Bearer {access_token}",
+				EnvVarSpecs: []AuthEnvVar{{
+					Name:     "FOO_TOKEN",
+					Kind:     AuthEnvVarKindPerCall,
+					Required: true,
+				}},
+			},
+		},
+		{
+			name: "canonical and raw env var placeholders",
+			auth: AuthConfig{
+				Type:    "api_key",
+				Format:  "Contact {pp_contact_email} ({COMPANY_PP_CONTACT_EMAIL})",
+				EnvVars: []string{"COMPANY_PP_CONTACT_EMAIL"},
+			},
+		},
+		{
+			name: "api key format without credential mapping",
+			auth: AuthConfig{
+				Type:   "api_key",
+				Format: "Bearer {token}",
+			},
+			wantErr: `auth.format placeholder "{token}" has no env_var mapping; declare an auth env-var credential`,
+		},
+		{
+			name: "basic auth aliases",
+			auth: AuthConfig{
+				Type:    "api_key",
+				Format:  "Basic {username}:{password}",
+				EnvVars: []string{"TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"},
+			},
+		},
+		{
+			name: "unmapped placeholder",
+			auth: AuthConfig{
+				Type:    "api_key",
+				Format:  "Contact {email}",
+				EnvVars: []string{"COMPANY_PP_CONTACT_EMAIL"},
+			},
+			wantErr: `auth.format placeholder "{email}" has no env_var mapping; expected one of: {COMPANY_PP_CONTACT_EMAIL, pp_contact_email, token}`,
+		},
+		{
+			name: "format without placeholder",
+			auth: AuthConfig{
+				Type:    "bearer_token",
+				Format:  "Bearer ",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.format must contain a placeholder like {token} (got "Bearer ")`,
+		},
+		{
+			name: "format with malformed placeholder",
+			auth: AuthConfig{
+				Type:    "bearer_token",
+				Format:  "Bearer {token} {tenant-id}",
+				EnvVars: []string{"FOO_TOKEN"},
+			},
+			wantErr: `auth.format contains invalid placeholder syntax`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := baseSpec(tt.auth)
+			err := candidate.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 // validateAdditionalAuthHeaders covers six distinct error paths; this table
@@ -1448,6 +1865,71 @@ func TestThrottlingValidate(t *testing.T) {
 	}
 }
 
+func TestQuerySyncValidate(t *testing.T) {
+	full := func() *QuerySyncConfig {
+		return &QuerySyncConfig{
+			Path:          "/query",
+			QueryTemplate: "select * from {entity} startposition {start} maxresults {limit}",
+			VersionParam:  "minorversion",
+			VersionValue:  "75",
+			EnvelopeKey:   "QueryResponse",
+			PageSize:      1000,
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*QuerySyncConfig)
+		nilCfg  bool
+		wantErr string
+	}{
+		{name: "absent hint is a no-op", nilCfg: true},
+		{name: "full config is valid", mutate: func(*QuerySyncConfig) {}},
+		{
+			name:    "missing path is rejected",
+			mutate:  func(q *QuerySyncConfig) { q.Path = "" },
+			wantErr: "query_sync.path is required",
+		},
+		{
+			name:    "missing query_template is rejected",
+			mutate:  func(q *QuerySyncConfig) { q.QueryTemplate = "" },
+			wantErr: "query_sync.query_template is required",
+		},
+		{
+			name:    "query_template missing {start} is rejected",
+			mutate:  func(q *QuerySyncConfig) { q.QueryTemplate = "select * from {entity} maxresults {limit}" },
+			wantErr: "{start} placeholder",
+		},
+		{
+			name: "query_template missing {entity} is rejected",
+			mutate: func(q *QuerySyncConfig) {
+				q.QueryTemplate = "select * from Widget startposition {start} maxresults {limit}"
+			},
+			wantErr: "{entity} placeholder",
+		},
+		{
+			name:    "version_param without value is rejected",
+			mutate:  func(q *QuerySyncConfig) { q.VersionValue = "" },
+			wantErr: "must be set together",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg *QuerySyncConfig
+			if !tt.nilCfg {
+				cfg = full()
+				tt.mutate(cfg)
+			}
+			err := validateQuerySync(cfg)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestAuthPrefixValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1492,12 +1974,21 @@ func TestAuthSubtypeValidate(t *testing.T) {
 			auth: AuthConfig{Type: "bearer_token", Subtype: AuthSubtypeAuth0SPAInMemory},
 		},
 		{
+			name: "google_service_account with bearer_token is valid",
+			auth: AuthConfig{Type: "bearer_token", Subtype: AuthSubtypeGoogleServiceAccount},
+		},
+		{
 			name: "auth0_spa_in_memory with empty Type is valid",
 			auth: AuthConfig{Subtype: AuthSubtypeAuth0SPAInMemory},
 		},
 		{
 			name:    "auth0_spa_in_memory with api_key is rejected",
 			auth:    AuthConfig{Type: "api_key", Subtype: AuthSubtypeAuth0SPAInMemory},
+			wantErr: `requires auth.type "bearer_token"`,
+		},
+		{
+			name:    "google_service_account with api_key is rejected",
+			auth:    AuthConfig{Type: "api_key", Subtype: AuthSubtypeGoogleServiceAccount},
 			wantErr: `requires auth.type "bearer_token"`,
 		},
 		{
@@ -1580,7 +2071,30 @@ func TestOAuth2GrantValidate(t *testing.T) {
 	}{
 		{name: "empty is valid (defaults to authorization_code)", cfg: AuthConfig{}},
 		{name: "explicit authorization_code is valid", cfg: AuthConfig{OAuth2Grant: OAuth2GrantAuthorizationCode}},
+		{
+			name: "authorization_code rejects placeholder token URL host",
+			cfg: AuthConfig{
+				OAuth2Grant: OAuth2GrantAuthorizationCode,
+				TokenURL:    "https://{tenant}.example.com/oauth/token",
+			},
+			wantErr: "unresolved placeholder",
+		},
+		{
+			name: "empty default grant rejects placeholder token URL host",
+			cfg: AuthConfig{
+				TokenURL: "https://{tenant}.example.com/oauth/token",
+			},
+			wantErr: "unresolved placeholder",
+		},
 		{name: "client_credentials is valid", cfg: AuthConfig{OAuth2Grant: OAuth2GrantClientCredentials}},
+		{
+			name: "client_credentials rejects placeholder token URL host",
+			cfg: AuthConfig{
+				OAuth2Grant: OAuth2GrantClientCredentials,
+				TokenURL:    "https://{tenant}.example.com/oauth/token",
+			},
+			wantErr: "unresolved placeholder",
+		},
 		{
 			name: "device_code is valid with required endpoints",
 			cfg: AuthConfig{
@@ -1633,6 +2147,15 @@ func TestOAuth2GrantValidate(t *testing.T) {
 			wantErr: `auth.token_url uses http://`,
 		},
 		{
+			name: "device_code rejects placeholder token URL host",
+			cfg: AuthConfig{
+				OAuth2Grant:            OAuth2GrantDeviceCode,
+				DeviceAuthorizationURL: "https://login.example.com/device",
+				TokenURL:               "https://{tenant}.example.com/token",
+			},
+			wantErr: "unresolved placeholder",
+		},
+		{
 			name:    "typo (e.g. authorisation) is rejected",
 			cfg:     AuthConfig{OAuth2Grant: "authorisation_code"},
 			wantErr: "not recognized",
@@ -1640,7 +2163,7 @@ func TestOAuth2GrantValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateOAuth2Grant(tt.cfg)
+			err := validateOAuth2Grant(tt.cfg, nil)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -1649,6 +2172,83 @@ func TestOAuth2GrantValidate(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestOAuth2GrantValidateRegisteredTemplateVars(t *testing.T) {
+	registered := []string{"tenant", "domain"}
+	tokenURL := "https://{tenant}.{domain}/auth/token"
+
+	t.Run("registered vars are accepted", func(t *testing.T) {
+		err := validateOAuth2Grant(AuthConfig{
+			OAuth2Grant: OAuth2GrantClientCredentials,
+			TokenURL:    tokenURL,
+		}, registered)
+		require.NoError(t, err)
+	})
+
+	t.Run("device urls with registered vars are accepted", func(t *testing.T) {
+		err := validateOAuth2Grant(AuthConfig{
+			OAuth2Grant:            OAuth2GrantDeviceCode,
+			DeviceAuthorizationURL: "https://{tenant}.{domain}/auth/device",
+			TokenURL:               tokenURL,
+		}, registered)
+		require.NoError(t, err)
+	})
+
+	t.Run("refresh token url with registered vars is accepted", func(t *testing.T) {
+		err := validateOAuth2Refresh(AuthConfig{
+			Type:     AuthTypeOAuth2Refresh,
+			TokenURL: tokenURL,
+		}, registered)
+		require.NoError(t, err)
+	})
+
+	t.Run("unregistered placeholder is still rejected", func(t *testing.T) {
+		err := validateOAuth2Grant(AuthConfig{
+			OAuth2Grant: OAuth2GrantClientCredentials,
+			TokenURL:    "https://{tenant}.{unknown}/auth/token",
+		}, registered)
+		require.ErrorContains(t, err, "unresolved placeholder")
+	})
+
+	t.Run("angle brackets are still rejected", func(t *testing.T) {
+		err := validateOAuth2Grant(AuthConfig{
+			OAuth2Grant: OAuth2GrantClientCredentials,
+			TokenURL:    "https://{tenant}.<domain>/auth/token",
+		}, registered)
+		require.ErrorContains(t, err, "unresolved placeholder")
+	})
+}
+
+func TestValidateAcceptsTemplatedAuthTokenURLFromBaseURL(t *testing.T) {
+	s := APISpec{
+		Name:    "tenant-oauth",
+		Version: "1.0.0",
+		BaseURL: "https://{tenant}.{domain}/api",
+		EndpointTemplateVarDefaults: map[string]string{
+			"tenant": "demo",
+			"domain": "example.com",
+		},
+		Auth: AuthConfig{
+			Type:        "oauth2",
+			Header:      "Authorization",
+			Format:      "Bearer {token}",
+			OAuth2Grant: OAuth2GrantClientCredentials,
+			TokenURL:    "https://{tenant}.{domain}/auth/token",
+			EnvVars:     []string{"TENANT_OAUTH_CLIENT_ID", "TENANT_OAUTH_CLIENT_SECRET"},
+		},
+		Resources: map[string]Resource{
+			"items": {Endpoints: map[string]Endpoint{
+				"list": {Method: "GET", Path: "/items"},
+			}},
+		},
+	}
+	require.NoError(t, s.Validate())
+	assert.Equal(t, []string{"tenant", "domain"}, s.EndpointTemplateVars)
+
+	s.Auth.TokenURL = "https://{tenant}.{other}/auth/token"
+	err := s.Validate()
+	require.ErrorContains(t, err, "unresolved placeholder")
 }
 
 func TestSessionHandshakeValidate(t *testing.T) {
@@ -2357,7 +2957,7 @@ resources:
 		assert.Equal(t, []string{"customerId", "authToken"}, s.Auth.Cookies)
 	})
 
-	t.Run("cookie auth without cookies field is nil", func(t *testing.T) {
+	t.Run("cookie auth without cookies field is rejected", func(t *testing.T) {
 		t.Parallel()
 		input := `name: notionapi
 base_url: https://api.notion.so
@@ -2374,10 +2974,77 @@ resources:
         path: /pages
         description: List pages
 `
+		_, err := ParseBytes([]byte(input))
+		require.ErrorContains(t, err, `auth.type is "cookie" but auth.cookies is empty`)
+	})
+
+	t.Run("unknown auth key is surfaced by name", func(t *testing.T) {
+		t.Parallel()
+		input := `name: notionapi
+base_url: https://api.notion.so
+auth:
+  type: cookie
+  cookie_domain: ".notion.so"
+  required_cookies:
+    - token_v2
+resources:
+  pages:
+    endpoints:
+      list:
+        method: GET
+        path: /pages
+`
+		_, err := ParseBytes([]byte(input))
+		require.ErrorContains(t, err, `auth contains unknown field "required_cookies"`)
+	})
+
+	t.Run("auth YAML merge is accepted and validated", func(t *testing.T) {
+		t.Parallel()
+		input := `name: merged-auth
+base_url: https://api.example.com
+auth_defaults: &auth_defaults
+  type: bearer_token
+  header: Authorization
+  env_vars:
+    - MERGED_AUTH_TOKEN
+auth:
+  <<: *auth_defaults
+  format: "Bearer {token}"
+resources:
+  pages:
+    endpoints:
+      list:
+        method: GET
+        path: /pages
+`
 		s, err := ParseBytes([]byte(input))
 		require.NoError(t, err)
-		assert.Equal(t, "cookie", s.Auth.Type)
-		assert.Nil(t, s.Auth.Cookies)
+		assert.Equal(t, "bearer_token", s.Auth.Type)
+		assert.Equal(t, []string{"MERGED_AUTH_TOKEN"}, s.Auth.EnvVars)
+	})
+
+	t.Run("unknown auth key in YAML merge is surfaced", func(t *testing.T) {
+		t.Parallel()
+		input := `name: merged-auth
+base_url: https://api.example.com
+auth_defaults: &auth_defaults
+  type: bearer_token
+  required_cookies:
+    - token_v2
+auth:
+  <<: *auth_defaults
+  format: "Bearer {token}"
+  env_vars:
+    - MERGED_AUTH_TOKEN
+resources:
+  pages:
+    endpoints:
+      list:
+        method: GET
+        path: /pages
+`
+		_, err := ParseBytes([]byte(input))
+		require.ErrorContains(t, err, `auth contains unknown field "required_cookies"`)
 	})
 
 	t.Run("invalid YAML still returns error", func(t *testing.T) {
@@ -2395,6 +3062,57 @@ description: Missing base_url and resources
 		_, err := ParseBytes([]byte(input))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "base_url is required")
+	})
+
+	t.Run("duplicate top-level keys fail clearly", func(t *testing.T) {
+		t.Parallel()
+		input := `name: duplicateapi
+base_url: https://api.example.com
+resources:
+  users:
+    endpoints:
+      list:
+        method: GET
+        path: /users
+resources:
+  teams:
+    endpoints:
+      list:
+        method: GET
+        path: /teams
+`
+		_, err := ParseBytes([]byte(input))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate top-level key(s): resources")
+	})
+
+	t.Run("resource-shaped entries under types fail clearly", func(t *testing.T) {
+		t.Parallel()
+		input := `name: misroutedapi
+base_url: https://api.example.com
+resources:
+  users:
+    endpoints:
+      list:
+        method: GET
+        path: /users
+types:
+  Team:
+    fields:
+      id:
+        type: string
+  misplaced_widgets:
+    description: Appended at the wrong indentation level
+    endpoints:
+      list:
+        method: GET
+        path: /widgets
+`
+		_, err := ParseBytes([]byte(input))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resource-shaped entry under 'types:'")
+		assert.Contains(t, err.Error(), "misplaced_widgets")
+		assert.Contains(t, err.Error(), "wrong indentation")
 	})
 }
 
@@ -3056,6 +3774,32 @@ learn: {}
 		assert.Empty(t, s.Learn.EntityLookupSeeds)
 	})
 
+	t.Run("enabled false records explicit legacy opt-out", func(t *testing.T) {
+		input := `
+name: demo
+base_url: http://x
+auth:
+  type: none
+config:
+  format: toml
+  path: ~/.config/demo/config.toml
+resources:
+  items:
+    description: "Items"
+    endpoints:
+      list:
+        method: GET
+        path: /items
+learn:
+  enabled: false
+`
+		s, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+		require.NoError(t, s.Validate())
+		assert.False(t, s.Learn.Enabled)
+		assert.True(t, s.Learn.EnabledSet)
+	})
+
 	t.Run("absent block: omitting learn yields zero-value LearnConfig", func(t *testing.T) {
 		input := `
 name: demo
@@ -3093,6 +3837,22 @@ resources:
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ticker_patterns[0]")
 		assert.Contains(t, err.Error(), "not a valid Go regexp")
+	})
+
+	t.Run("greedy lowercase ticker pattern rejected against seeded playbook examples", func(t *testing.T) {
+		s := APISpec{
+			Name:      "demo",
+			BaseURL:   "http://x",
+			Resources: map[string]Resource{"items": {Endpoints: map[string]Endpoint{"list": {Method: "GET", Path: "/items"}}}},
+			Learn: LearnConfig{
+				Enabled:        true,
+				TickerPatterns: []string{`^[a-z0-9]{2,12}$`},
+			},
+		}
+		err := s.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ticker_patterns[0]")
+		assert.Contains(t, err.Error(), "alpha example query")
 	})
 
 	t.Run("bad seed kind with whitespace rejected", func(t *testing.T) {
@@ -3179,6 +3939,185 @@ resources:
 		}
 		require.NoError(t, s.Validate())
 		assert.Equal(t, []string{"valid", "also-valid"}, s.Learn.Stopwords)
+	})
+}
+
+func TestLearnConfigDisabledAndSynonyms(t *testing.T) {
+	learnSpecYAML := func(learnBlock string) []byte {
+		return []byte(`
+name: demo
+base_url: http://x
+auth:
+  type: none
+config:
+  format: toml
+  path: ~/.config/demo/config.toml
+resources:
+  items:
+    description: "Items"
+    endpoints:
+      list:
+        method: GET
+        path: /items
+` + learnBlock)
+	}
+
+	t.Run("disabled round-trips through parse and marshal", func(t *testing.T) {
+		s, err := ParseBytes(learnSpecYAML("learn:\n  disabled: true\n"))
+		require.NoError(t, err)
+		assert.True(t, s.Learn.Disabled)
+		assert.False(t, s.Learn.Enabled)
+
+		out, err := yaml.Marshal(s.Learn)
+		require.NoError(t, err)
+		assert.Contains(t, string(out), "disabled: true")
+
+		var back LearnConfig
+		require.NoError(t, yaml.Unmarshal(out, &back))
+		assert.True(t, back.Disabled)
+	})
+
+	t.Run("disabled true with enabled true rejected as contradictory, naming both fields", func(t *testing.T) {
+		_, err := ParseBytes(learnSpecYAML("learn:\n  disabled: true\n  enabled: true\n"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "learn.disabled")
+		assert.Contains(t, err.Error(), "learn.enabled")
+	})
+
+	t.Run("enabled false alone parses cleanly as a legacy opt-out", func(t *testing.T) {
+		s, err := ParseBytes(learnSpecYAML("learn:\n  enabled: false\n"))
+		require.NoError(t, err)
+		assert.False(t, s.Learn.Enabled)
+		assert.True(t, s.Learn.EnabledSet)
+		assert.False(t, s.Learn.Disabled)
+
+		out, err := yaml.Marshal(s.Learn)
+		require.NoError(t, err)
+		assert.Contains(t, string(out), "enabled: false")
+
+		var back LearnConfig
+		require.NoError(t, yaml.Unmarshal(out, &back))
+		assert.False(t, back.Enabled)
+		assert.True(t, back.EnabledSet)
+	})
+
+	t.Run("synonyms round-trip through parse", func(t *testing.T) {
+		s, err := ParseBytes(learnSpecYAML("learn:\n  enabled: true\n  synonyms:\n    last night: yesterday\n"))
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"last night": "yesterday"}, s.Learn.Synonyms)
+	})
+
+	synonymCases := []struct {
+		name     string
+		synonyms map[string]string
+		wantErr  string
+	}{
+		{
+			name:     "valid lowercase pair accepted",
+			synonyms: map[string]string{"last night": "yesterday"},
+		},
+		{
+			name:     "empty key rejected",
+			synonyms: map[string]string{"": "yesterday"},
+			wantErr:  "learn.synonyms",
+		},
+		{
+			name:     "empty value rejected",
+			synonyms: map[string]string{"last night": ""},
+			wantErr:  "learn.synonyms",
+		},
+		{
+			name:     "uppercase key rejected",
+			synonyms: map[string]string{"Last Night": "yesterday"},
+			wantErr:  "lowercase",
+		},
+		{
+			name:     "uppercase value rejected",
+			synonyms: map[string]string{"last night": "Yesterday"},
+			wantErr:  "lowercase",
+		},
+		{
+			name:     "self-referential pair rejected",
+			synonyms: map[string]string{"yesterday": "yesterday"},
+			wantErr:  "itself",
+		},
+		{
+			name:     "chained pair rejected: a value must not itself be a key",
+			synonyms: map[string]string{"last night": "yesterday", "yesterday": "prior day"},
+			wantErr:  "chain",
+		},
+	}
+	for _, tc := range synonymCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := APISpec{
+				Name:      "demo",
+				BaseURL:   "http://x",
+				Resources: map[string]Resource{"items": {Endpoints: map[string]Endpoint{"list": {Method: "GET", Path: "/items"}}}},
+				Learn: LearnConfig{
+					Enabled:  true,
+					Synonyms: tc.synonyms,
+				},
+			}
+			err := s.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestApplyLearnLoopDefault(t *testing.T) {
+	base := func() *APISpec {
+		return &APISpec{Name: "demo"}
+	}
+
+	t.Run("learn-less spec defaults Enabled on and writes the info line", func(t *testing.T) {
+		s := base()
+		var buf bytes.Buffer
+		s.ApplyLearnLoopDefault(&buf)
+		assert.True(t, s.Learn.Enabled)
+		assert.Contains(t, buf.String(), "defaulting self-learning loop on (opt out with learn.disabled: true)")
+	})
+
+	t.Run("disabled spec short-circuits with no change and no output", func(t *testing.T) {
+		s := base()
+		s.Learn.Disabled = true
+		var buf bytes.Buffer
+		s.ApplyLearnLoopDefault(&buf)
+		assert.False(t, s.Learn.Enabled)
+		assert.True(t, s.Learn.Disabled)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("explicit enabled false short-circuits with no change and no output", func(t *testing.T) {
+		s := base()
+		s.Learn.EnabledSet = true
+		var buf bytes.Buffer
+		s.ApplyLearnLoopDefault(&buf)
+		assert.False(t, s.Learn.Enabled)
+		assert.True(t, s.Learn.EnabledSet)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("explicitly enabled spec is a no-op with no output", func(t *testing.T) {
+		s := base()
+		s.Learn.Enabled = true
+		s.Learn.Stopwords = []string{"the"}
+		var buf bytes.Buffer
+		s.ApplyLearnLoopDefault(&buf)
+		assert.True(t, s.Learn.Enabled)
+		assert.Equal(t, []string{"the"}, s.Learn.Stopwords)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var s *APISpec
+		var buf bytes.Buffer
+		s.ApplyLearnLoopDefault(&buf)
+		assert.Empty(t, buf.String())
 	})
 }
 
@@ -3452,6 +4391,40 @@ func TestMCPIntentsValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// TestValidateIntentsRejectsIllegalParamName pins that intent param names are
+// validated against the Anthropic MCP tool property-key grammar
+// (MCPPropertyKeyPattern): intent params are emitted verbatim as MCP schema
+// keys, and an illegal key (e.g. the fathom-style recorded_by[]) bricks the
+// calling agent session at schema load (HelpFlow/aos-build#165).
+func TestValidateIntentsRejectsIllegalParamName(t *testing.T) {
+	t.Parallel()
+	s := APISpec{
+		Name:    "demo",
+		BaseURL: "http://x",
+		Resources: map[string]Resource{
+			"items": {
+				Endpoints: map[string]Endpoint{
+					"get":  {Method: "GET", Path: "/items/{id}"},
+					"list": {Method: "GET", Path: "/items"},
+				},
+			},
+		},
+		MCP: MCPConfig{Intents: []Intent{{
+			Name:        "get_item",
+			Description: "Get an item",
+			Params:      []IntentParam{{Name: "recorded_by[]", Type: "string", Required: true, Description: "id"}},
+			Steps: []IntentStep{
+				{Endpoint: "items.get", Capture: "item"},
+			},
+			Returns: "item",
+		}}},
+	}
+	err := s.Validate()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "recorded_by[]")
+	require.ErrorContains(t, err, MCPPropertyKeyPattern)
 }
 
 func TestMCPOrchestrationValidation(t *testing.T) {
@@ -3852,6 +4825,7 @@ func TestHTMLResponseExtractionValidation(t *testing.T) {
 	require.NoError(t, base.Validate())
 	assert.True(t, base.HasHTMLExtraction())
 	assert.True(t, base.Resources["posts"].Endpoints["list"].UsesHTMLResponse())
+	assert.True(t, base.Resources["posts"].Endpoints["list"].LacksJSONSyncEnumeration())
 
 	csvSpec := validHTMLSpec()
 	ep := csvSpec.Resources["posts"].Endpoints["list"]
@@ -3860,16 +4834,49 @@ func TestHTMLResponseExtractionValidation(t *testing.T) {
 	csvSpec.Resources["posts"].Endpoints["list"] = ep
 	require.NoError(t, csvSpec.Validate())
 	assert.True(t, csvSpec.Resources["posts"].Endpoints["list"].UsesCSVResponse())
+	assert.False(t, csvSpec.Resources["posts"].Endpoints["list"].LacksJSONSyncEnumeration())
+
+	xmlSpec := validHTMLSpec()
+	ep = xmlSpec.Resources["posts"].Endpoints["list"]
+	ep.ResponseFormat = ResponseFormatXML
+	ep.HTMLExtract = nil
+	xmlSpec.Resources["posts"].Endpoints["list"] = ep
+	require.NoError(t, xmlSpec.Validate())
+	assert.True(t, xmlSpec.Resources["posts"].Endpoints["list"].UsesXMLResponse())
+	assert.True(t, xmlSpec.HasXMLResponse())
+	assert.False(t, xmlSpec.Resources["posts"].Endpoints["list"].LacksJSONSyncEnumeration())
+
+	mixedSpec := validHTMLSpec()
+	ep = mixedSpec.Resources["posts"].Endpoints["list"]
+	ep.ResponseFormat = ResponseFormatXML
+	ep.HTMLExtract = nil
+	mixedSpec.Resources["posts"].Endpoints["list"] = ep
+	mixedSpec.Resources["posts"].Endpoints["get"] = Endpoint{Method: "GET", Path: "/posts/{id}", Description: "Get a post (JSON)"}
+	assert.True(t, mixedSpec.HasXMLResponse())
 
 	badFormat := validHTMLSpec()
 	ep = badFormat.Resources["posts"].Endpoints["list"]
-	ep.ResponseFormat = "xml"
+	ep.ResponseFormat = "yaml"
 	badFormat.Resources["posts"].Endpoints["list"] = ep
 	require.ErrorContains(t, badFormat.Validate(), "response_format must be one of")
 
+	postSpec := validHTMLSpec()
+	ep = postSpec.Resources["posts"].Endpoints["list"]
+	ep.Method = "POST"
+	postSpec.Resources["posts"].Endpoints["list"] = ep
+	require.NoError(t, postSpec.Validate())
+
+	tableSpec := validHTMLSpec()
+	ep = tableSpec.Resources["posts"].Endpoints["list"]
+	ep.Method = "POST"
+	ep.HTMLExtract.Mode = HTMLExtractModeTable
+	ep.Response = ResponseDef{Type: "array", Item: "html_table_row"}
+	tableSpec.Resources["posts"].Endpoints["list"] = ep
+	require.NoError(t, tableSpec.Validate())
+
 	badMethod := validHTMLSpec()
 	ep = badMethod.Resources["posts"].Endpoints["list"]
-	ep.Method = "POST"
+	ep.Method = "PUT"
 	badMethod.Resources["posts"].Endpoints["list"] = ep
 	require.ErrorContains(t, badMethod.Validate(), "html response_format is only supported")
 }
@@ -3914,6 +4921,17 @@ func TestValidateDataSourceStrategy(t *testing.T) {
 	items.Endpoints["list"] = endpoint
 	bad.Resources["items"] = items
 	require.ErrorContains(t, bad.Validate(), "data_source_strategy")
+}
+
+func TestLacksJSONSyncEnumeration(t *testing.T) {
+	t.Parallel()
+	assert.True(t, LacksJSONSyncEnumeration(ResponseFormatHTML))
+	assert.True(t, LacksJSONSyncEnumeration(ResponseFormatBinary))
+	assert.True(t, LacksJSONSyncEnumeration(ResponseFormatText))
+	assert.False(t, LacksJSONSyncEnumeration(""))
+	assert.False(t, LacksJSONSyncEnumeration(ResponseFormatJSON))
+	assert.False(t, LacksJSONSyncEnumeration(ResponseFormatCSV))
+	assert.False(t, LacksJSONSyncEnumeration(ResponseFormatXML))
 }
 
 func TestHTMLExtract_EmbeddedJSONMode(t *testing.T) {
@@ -4362,6 +5380,34 @@ resources:
 		assert.Empty(t, s.GlobalPathTemplateVars)
 		assert.Contains(t, paramNames(s.Resources["accounts"].Endpoints["list"].Params), "profile")
 	})
+
+	t.Run("keeps insecure root flag collision positional", func(t *testing.T) {
+		t.Parallel()
+		input := `name: testapi
+base_url: https://api.example.com
+endpoint_template_vars: [insecure]
+endpoint_template_env_overrides:
+  insecure: TESTAPI_INSECURE
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  accounts:
+    description: Accounts
+    endpoints:
+      list:
+        method: GET
+        path: /modes/{insecure}/accounts
+      get:
+        method: GET
+        path: /modes/{insecure}/accounts/{account_id}
+`
+		s, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+
+		assert.Empty(t, s.GlobalPathTemplateVars)
+		assert.Contains(t, paramNames(s.Resources["accounts"].Endpoints["list"].Params), "insecure")
+	})
 }
 
 func TestReservedRootFlagsMatchRootTemplate(t *testing.T) {
@@ -4684,6 +5730,28 @@ resources:
 		assert.Contains(t, err.Error(), "shadow framework cobra command", "error must explain the failure mode")
 	})
 
+	t.Run("CamelCase resource is normalized before framework collision check", func(t *testing.T) {
+		t.Parallel()
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  AgentContext:
+    description: API agent context
+    endpoints:
+      list:
+        method: GET
+        path: /agent-context
+        description: List API agent context
+`
+		_, err := ParseBytes([]byte(input))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"AgentContext"`)
+		assert.Contains(t, err.Error(), `framework cobra command "agent-context"`)
+	})
+
 	t.Run("rename suggestion uses api slug when spec name is set", func(t *testing.T) {
 		t.Parallel()
 		input := `name: pokeapi
@@ -4784,6 +5852,45 @@ resources:
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `"live"`)
 		assert.Contains(t, err.Error(), "shadow framework cobra command")
+	})
+
+	t.Run("whoami resource passes for a credential-free CLI", func(t *testing.T) {
+		t.Parallel()
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: none
+resources:
+  whoami:
+    description: Public identity metadata
+    endpoints:
+      get:
+        method: GET
+        path: /whoami
+        description: Get public identity metadata
+`
+		_, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+	})
+
+	t.Run("whoami resource passes for an authenticated CLI without a known platform adapter", func(t *testing.T) {
+		t.Parallel()
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  whoami:
+    description: API identity metadata
+    endpoints:
+      get:
+        method: GET
+        path: /whoami
+        description: Get API identity metadata
+`
+		_, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
 	})
 
 	t.Run("login resource is rejected for oauth2 auth-code CLIs", func(t *testing.T) {
@@ -5149,6 +6256,35 @@ func TestValidateRejectsBasePathWithProxyEnvelope(t *testing.T) {
 	assert.Contains(t, err.Error(), "base_path")
 }
 
+func TestValidateRejectsRawRequestWithProxyEnvelope(t *testing.T) {
+	t.Parallel()
+
+	s := &APISpec{
+		Name:          "proxyraw",
+		Version:       "0.1.0",
+		BaseURL:       "https://proxy.example.com",
+		ClientPattern: "proxy-envelope",
+		Resources: map[string]Resource{
+			"uploads": {
+				Endpoints: map[string]Endpoint{
+					"create": {
+						Method:             "POST",
+						Path:               "/uploads",
+						Description:        "Upload raw bytes",
+						RequestContentType: "application/octet-stream",
+						BodyRequired:       true,
+					},
+				},
+			},
+		},
+	}
+
+	err := s.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "proxy-envelope")
+	assert.Contains(t, err.Error(), "raw request bodies")
+}
+
 // TestValidateAcceptsResourceBaseURLWithoutProxyEnvelope — the same
 // resource override is accepted when client_pattern is not the proxy
 // flavor. Negative cases (no resource override, proxy-envelope alone)
@@ -5251,6 +6387,100 @@ resources:
 	assert.Equal(t, "paid", s.Resources["results"].Endpoints["premium"].Tier)
 	assert.Equal(t, "free", s.EffectiveTier(s.Resources["results"], s.Resources["results"].Endpoints["list"]))
 	assert.Equal(t, "paid", s.EffectiveTier(s.Resources["results"], s.Resources["results"].Endpoints["premium"]))
+}
+
+func TestNormalizeCookieDomain(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		authType   string
+		baseURL    string
+		preset     string
+		wantDomain string
+	}{
+		{
+			name:       "cookie auth derives leading-dot domain from base_url",
+			authType:   "cookie",
+			baseURL:    "https://www.factor75.com",
+			wantDomain: ".factor75.com",
+		},
+		{
+			name:       "composed auth derives domain too",
+			authType:   "composed",
+			baseURL:    "https://app.example.com",
+			wantDomain: ".app.example.com",
+		},
+		{
+			name:       "session handshake derives domain too",
+			authType:   "session_handshake",
+			baseURL:    "https://query1.finance.example",
+			wantDomain: ".query1.finance.example",
+		},
+		{
+			name:       "explicit cookie_domain is preserved",
+			authType:   "cookie",
+			baseURL:    "https://www.factor75.com",
+			preset:     ".custom.example.com",
+			wantDomain: ".custom.example.com",
+		},
+		{
+			name:       "non-cookie auth is untouched",
+			authType:   "bearer_token",
+			baseURL:    "https://www.example.com",
+			wantDomain: "",
+		},
+		{
+			name:       "no host yields no domain",
+			authType:   "cookie",
+			baseURL:    "",
+			wantDomain: "",
+		},
+		{
+			name:       "scheme-less base_url still derives a domain",
+			authType:   "cookie",
+			baseURL:    "api.example.com",
+			wantDomain: ".api.example.com",
+		},
+		{
+			name:       "degenerate www-only host yields no domain",
+			authType:   "cookie",
+			baseURL:    "https://www.",
+			wantDomain: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &APISpec{BaseURL: tc.baseURL}
+			s.Auth.Type = tc.authType
+			s.Auth.CookieDomain = tc.preset
+			s.NormalizeCookieDomain()
+			assert.Equal(t, tc.wantDomain, s.Auth.CookieDomain)
+		})
+	}
+}
+
+func TestResolveEndpointTemplateEnvNameRejectsAuthCollision(t *testing.T) {
+	t.Parallel()
+
+	s := &APISpec{
+		Name:                 "shopify",
+		EndpointTemplateVars: []string{"shop", "access_token"},
+		EndpointTemplateEnvOverrides: map[string]string{
+			"shop": "SHOPIFY_ACCESS_TOKEN",
+		},
+		Auth: AuthConfig{EnvVars: []string{"SHOPIFY_ACCESS_TOKEN"}},
+	}
+
+	assert.Equal(t, "SHOPIFY_SHOP", s.EndpointTemplateEnvName("shop"))
+	assert.Equal(t, "SHOPIFY_ACCESS_TOKEN", s.EndpointTemplateEnvName("access_token"))
+
+	s.DropCollidingEndpointTemplateEnvOverrides()
+	_, kept := s.EndpointTemplateEnvOverrides["shop"]
+	assert.False(t, kept)
+	assert.Equal(t, "SHOPIFY_SHOP", s.EndpointTemplateEnvName("shop"))
 }
 
 func TestInferEndpointTemplateVarsFromBaseURLs(t *testing.T) {
@@ -6090,6 +7320,8 @@ func TestAuthHasCookies(t *testing.T) {
 		{name: "cookie-typed with cookie list", auth: AuthConfig{Type: "cookie", Cookies: []string{"session_id"}}, want: true},
 		{name: "composed-typed with cookie list", auth: AuthConfig{Type: "composed", Cookies: []string{"session_id", "csrf"}}, want: true},
 		{name: "composed-typed without cookie list", auth: AuthConfig{Type: "composed"}, want: false},
+		{name: "cookie-typed with blank-only list", auth: AuthConfig{Type: "cookie", Cookies: []string{" "}}, want: false},
+		{name: "cookie-typed with one real name", auth: AuthConfig{Type: "cookie", Cookies: []string{" ", "session_id"}}, want: true},
 		{name: "bearer with no cookies", auth: AuthConfig{Type: "bearer_token"}, want: false},
 		{name: "empty", auth: AuthConfig{}, want: false},
 	}
@@ -6109,6 +7341,7 @@ func TestAuthHasNonCookieAuth(t *testing.T) {
 		{name: "env var specs", auth: AuthConfig{EnvVarSpecs: []AuthEnvVar{{Name: "API_TOKEN"}}}, want: true},
 		{name: "legacy env vars", auth: AuthConfig{EnvVars: []string{"API_TOKEN"}}, want: true},
 		{name: "cookie-only", auth: AuthConfig{Type: "cookie", Cookies: []string{"session_id"}}, want: false},
+		{name: "none with leftover env vars", auth: AuthConfig{Type: "none", EnvVars: []string{"EXAMPLE_API_KEY"}}, want: false},
 		{name: "empty", auth: AuthConfig{}, want: false},
 	}
 	for _, tt := range tests {
@@ -6205,6 +7438,42 @@ resources:
 		assert.Equal(t, "org_id", ep.Params[0].Name)
 		require.Len(t, ep.Body, 1)
 		assert.Equal(t, "name", ep.Body[0].Name)
+	})
+
+	t.Run("POST endpoint keeps explicit query and header params", func(t *testing.T) {
+		t.Parallel()
+		input := header + `  messages:
+    description: Message endpoints
+    endpoints:
+      create:
+        method: POST
+        path: /messages
+        description: Create message
+        params:
+          - name: mode
+            in: query
+            type: string
+          - name: X-Request-ID
+            in: header
+            type: string
+          - name: text
+            type: string
+`
+		s, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+		ep := s.Resources["messages"].Endpoints["create"]
+		require.Len(t, ep.Params, 2)
+		assert.ElementsMatch(t, []string{"mode", "X-Request-ID"}, []string{ep.Params[0].Name, ep.Params[1].Name})
+		require.Len(t, ep.Body, 1)
+		assert.Equal(t, "text", ep.Body[0].Name)
+		for _, param := range ep.Params {
+			if param.Name == "mode" {
+				assert.Equal(t, "query", param.In)
+			}
+			if param.Name == "X-Request-ID" {
+				assert.Equal(t, "header", param.In)
+			}
+		}
 	})
 
 	t.Run("GET endpoint params are not promoted", func(t *testing.T) {

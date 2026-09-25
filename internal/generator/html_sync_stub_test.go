@@ -2,7 +2,6 @@ package generator
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
@@ -11,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenerateHTMLMajoritySyncUsesStub(t *testing.T) {
+func TestGenerateHTMLMajoritySyncOmittedWhenOnlyPageModeCandidates(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := minimalSpec("html-majority")
@@ -46,7 +45,7 @@ func TestGenerateHTMLMajoritySyncUsesStub(t *testing.T) {
 				},
 			},
 		},
-		"api": {
+		"typed_api": {
 			Description: "Typed API data",
 			Endpoints: map[string]spec.Endpoint{
 				"status": {
@@ -64,17 +63,14 @@ func TestGenerateHTMLMajoritySyncUsesStub(t *testing.T) {
 	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true, MCP: true}
 	require.NoError(t, gen.Generate())
 
-	syncSrc := readGeneratedFile(t, outputDir, "internal", "cli", "sync.go")
+	rootSrc := readGeneratedFile(t, outputDir, "internal", "cli", "root.go")
 	helpersSrc := readGeneratedFile(t, outputDir, "internal", "cli", "helpers.go")
 	workflowSrc := readGeneratedFile(t, outputDir, "internal", "cli", "channel_workflow.go")
 	readmeSrc := readGeneratedFile(t, outputDir, "README.md")
 	skillSrc := readGeneratedFile(t, outputDir, "SKILL.md")
 
-	assert.LessOrEqual(t, len(strings.Split(strings.TrimSpace(syncSrc), "\n")), 50)
-	assert.Contains(t, syncSrc, "func newSyncCmd(flags *rootFlags) *cobra.Command")
-	assert.Contains(t, syncSrc, `"mcp:hidden": "true"`)
-	assert.Contains(t, syncSrc, "generic spec-driven sync template does not fit predominantly HTML page-mode endpoints")
-	assert.NotContains(t, syncSrc, "syncOneResource")
+	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "sync.go"))
+	assert.NotContains(t, rootSrc, "newSyncCmd(flags)")
 	assert.NotContains(t, helpersSrc, "func syncErrorJSON(")
 	assert.NotContains(t, helpersSrc, "func parseSyncUserParams(")
 	assert.NotContains(t, helpersSrc, "func parseSyncKVFlags(")
@@ -168,7 +164,7 @@ func TestHTMLSyncStubFallbackUsesInclusiveThreshold(t *testing.T) {
 				"seven": htmlPageEndpoint("/pages/{id}/seven", "Page seven", "object"),
 			},
 		},
-		"api": {
+		"typed_api": {
 			Description: "JSON API",
 			Endpoints: map[string]spec.Endpoint{
 				"one":   {Method: "GET", Path: "/api/one", Description: "API one", Response: spec.ResponseDef{Type: "object"}},
@@ -182,7 +178,7 @@ func TestHTMLSyncStubFallbackUsesInclusiveThreshold(t *testing.T) {
 	assert.True(t, gen.shouldEmitHTMLSyncStub())
 }
 
-func TestGenerateEmbeddedJSONHTMLMajorityKeepsGenericSync(t *testing.T) {
+func TestGenerateEmbeddedJSONHTMLMajorityOmitsGenericSync(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := minimalSpec("embedded-json-majority")
@@ -195,7 +191,7 @@ func TestGenerateEmbeddedJSONHTMLMajorityKeepsGenericSync(t *testing.T) {
 				"archive": embeddedJSONHTMLEndpoint("/archive", "List archived pages", "array"),
 			},
 		},
-		"api": {
+		"typed_api": {
 			Description: "Typed API data",
 			Endpoints: map[string]spec.Endpoint{
 				"status": {
@@ -213,11 +209,7 @@ func TestGenerateEmbeddedJSONHTMLMajorityKeepsGenericSync(t *testing.T) {
 	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true, MCP: true}
 	require.NoError(t, gen.Generate())
 
-	syncSrc := readGeneratedFile(t, outputDir, "internal", "cli", "sync.go")
-	helpersSrc := readGeneratedFile(t, outputDir, "internal", "cli", "helpers.go")
-
-	assert.Contains(t, syncSrc, "func syncResource(")
-	assert.Contains(t, helpersSrc, "func syncErrorJSON(")
+	assert.NoFileExists(t, filepath.Join(outputDir, "internal", "cli", "sync.go"))
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "build", "./...")
 }

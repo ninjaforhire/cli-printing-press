@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/v4/internal/generator"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,7 +153,12 @@ func RootCmd() *cobra.Command {
 	rootCmd.AddCommand(newItemsCmd())
 	rootCmd.AddCommand(newEndpointCmd())
 	rootCmd.AddCommand(newAuthCmd())
+	rootCmd.AddCommand(newProfileGroupCmd())
 	rootCmd.AddCommand(newHiddenCmd())
+	rootCmd.AddCommand(newCobraHiddenGroupCmd())
+	rootCmd.AddCommand(newMCPHiddenGroupCmd())
+	rootCmd.AddCommand(newCobraHiddenFrameworkCmd())
+	rootCmd.AddCommand(newAPIResourceGroupCmd())
 	return rootCmd
 }
 
@@ -205,6 +212,25 @@ func newAuthCmd() *cobra.Command {
 	}
 }
 
+func newProfileGroupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:         "profile",
+		Short:       "Named sets of flags saved for reuse",
+		Annotations: map[string]string{"pp:parent-group": "true"},
+	}
+	cmd.AddCommand(newProfileSaveCmd())
+	return cmd
+}
+
+func newProfileSaveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "save",
+		Short: "Save the current invocation's non-default flags as a named profile",
+		Long:  "Operator profile help that the runtime walker never catalogs.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+
 func newHiddenCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:         "debug-hidden",
@@ -213,10 +239,72 @@ func newHiddenCmd() *cobra.Command {
 		RunE:        func(cmd *cobra.Command, args []string) error { return nil },
 	}
 }
+
+func newCobraHiddenGroupCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "orders", Hidden: true}
+	cmd.AddCommand(newCobraHiddenChildCmd())
+	return cmd
+}
+
+func newCobraHiddenChildCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "triage",
+		Short: "Triage orders.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+
+func newMCPHiddenGroupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:         "secrets",
+		Annotations: map[string]string{"mcp:hidden": "true"},
+	}
+	cmd.AddCommand(newMCPHiddenChildCmd())
+	return cmd
+}
+
+func newMCPHiddenChildCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect",
+		Short: "Inspect secrets.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+
+func newCobraHiddenFrameworkCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "auth", Hidden: true}
+	cmd.AddCommand(newCobraHiddenFrameworkChildCmd())
+	return cmd
+}
+
+func newCobraHiddenFrameworkChildCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show auth status.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+
+func newAPIResourceGroupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:         "catalog",
+		Annotations: map[string]string{"pp:api-resource": "true"},
+	}
+	cmd.AddCommand(newAPIResourceChildCmd())
+	return cmd
+}
+
+func newAPIResourceChildCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "summary",
+		Short: "Summarize the catalog.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
 `)
 
 	est := estimateMCPTokens(dir)
-	require.Equal(t, 4, est.ToolCount, "typed tool plus top-level and nested cobratree runtime tools should all count")
+	require.Equal(t, 6, est.ToolCount, "typed tool plus reachable cobratree runtime tools should all count")
 	names := make([]string, 0, len(est.PerTool))
 	for _, tool := range est.PerTool {
 		names = append(names, tool.Name)
@@ -225,7 +313,71 @@ func newHiddenCmd() *cobra.Command {
 	assert.Contains(t, names, "cobratree:digest")
 	assert.Contains(t, names, "cobratree:trends")
 	assert.Contains(t, names, "cobratree:items_search")
+	assert.Contains(t, names, "cobratree:orders_triage")
+	assert.Contains(t, names, "cobratree:catalog_summary")
 	assert.NotContains(t, names, "cobratree:auth")
+	assert.NotContains(t, names, "cobratree:profile")
+	assert.NotContains(t, names, "cobratree:profile_save")
+	assert.NotContains(t, names, "cobratree:orders")
+	assert.NotContains(t, names, "cobratree:secrets_inspect")
+	assert.NotContains(t, names, "cobratree:auth_status")
+	assert.NotContains(t, names, "cobratree:catalog")
+}
+
+func TestEstimateMCPTokens_SkipsParentGroupCommands(t *testing.T) {
+	dir := writeMCPTools(t, `
+	s.AddTool(mcplib.NewTool("typed_get", mcplib.WithDescription("Typed endpoint.")), nil)
+	cobratree.RegisterAll(s, cli.RootCmd(), cobratree.SiblingCLIPath)
+`)
+	writeMCPCLISource(t, dir, "root.go", `package cli
+
+import "github.com/spf13/cobra"
+
+func RootCmd() *cobra.Command {
+	rootCmd := &cobra.Command{Use: "demo-pp-cli"}
+	rootCmd.AddCommand(newCompaniesCmd())
+	return rootCmd
+}
+
+func newCompaniesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:         "companies",
+		Annotations: map[string]string{"pp:api-resource": "true", "pp:parent-group": "true"},
+		RunE:        func(cmd *cobra.Command, args []string) error { return nil },
+	}
+	cmd.AddCommand(newCompaniesSitesCmd())
+	return cmd
+}
+
+func newCompaniesSitesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:         "sites",
+		Annotations: map[string]string{"pp:parent-group": "true"},
+		RunE:        func(cmd *cobra.Command, args []string) error { return nil },
+	}
+	cmd.AddCommand(newCompaniesSitesListCmd())
+	return cmd
+}
+
+func newCompaniesSitesListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List company sites.",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+`)
+
+	est := estimateMCPTokens(dir)
+	require.Equal(t, 2, est.ToolCount, "typed tool plus the novel leaf under a parent-group should count")
+	names := make([]string, 0, len(est.PerTool))
+	for _, tool := range est.PerTool {
+		names = append(names, tool.Name)
+	}
+	assert.Contains(t, names, "typed_get")
+	assert.Contains(t, names, "cobratree:companies_sites_list")
+	assert.NotContains(t, names, "cobratree:companies")
+	assert.NotContains(t, names, "cobratree:companies_sites")
 }
 
 func TestEstimateMCPTokens_CountsSharedConstructorsAtDistinctPaths(t *testing.T) {
@@ -304,6 +456,127 @@ func newBetaCmd() *cobra.Command {
 	require.Equal(t, 0, est.ToolCount)
 }
 
+func TestCobratreeToolDescription_PrefersShortOverLong(t *testing.T) {
+	short := "Record a query -> resource mapping for future recall."
+	long := strings.Repeat("Operator-only help that would blow the MCP budget. ", 80)
+	assert.Equal(t, short, cobratreeToolDescription(short, long, "teach"))
+	assert.Equal(t, "Sync API data to local SQLite.", cobratreeToolDescription("", "Sync API data to local SQLite.\n\nExit codes stay in --help.", "sync"))
+	assert.Equal(t, "Run `digest` through the companion CLI binary.", cobratreeToolDescription("", "", "digest"))
+}
+
+func TestEstimateMCPTokens_CobratreeUsesShortNotLong(t *testing.T) {
+	dir := writeMCPTools(t, `
+	cobratree.RegisterAll(s, cli.RootCmd(), cobratree.SiblingCLIPath)
+`)
+	writeMCPCLISource(t, dir, "root.go", `package cli
+
+import "github.com/spf13/cobra"
+
+func RootCmd() *cobra.Command {
+	rootCmd := &cobra.Command{Use: "demo-pp-cli"}
+	rootCmd.AddCommand(newTeachCmd())
+	return rootCmd
+}
+
+func newTeachCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "teach",
+		Short: "Record a query -> resource mapping for future recall.",
+		Long:  "`+strings.Repeat("x", 2900)+`",
+		RunE:  func(cmd *cobra.Command, args []string) error { return nil },
+	}
+}
+`)
+
+	est := estimateMCPTokens(dir)
+	require.Equal(t, 1, est.ToolCount)
+	require.Equal(t, "cobratree:teach", est.PerTool[0].Name)
+	assert.Less(t, est.PerTool[0].Chars, 200, "Short catalog text must be scored, not the 2.9k Long help")
+	assert.Less(t, est.PerTool[0].Tokens, 80)
+}
+
+func TestEstimateMCPTokens_IgnoresHandlerLiterals(t *testing.T) {
+	dir := t.TempDir()
+	mcpDir := filepath.Join(dir, "internal", "mcp")
+	require.NoError(t, os.MkdirAll(mcpDir, 0o755))
+	content := `package mcp
+
+import mcplib "github.com/mark3labs/mcp-go/mcp"
+
+func RegisterTools(s *server.MCPServer) {
+	s.AddTool(mcplib.NewTool("get", mcplib.WithDescription("get item")), nil)
+}
+
+func handleContext() string { return "` + strings.Repeat("x", 4000) + `" }
+`
+	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "tools.go"), []byte(content), 0o644))
+
+	est := estimateMCPTokens(dir)
+	require.Equal(t, 1, est.ToolCount)
+	assert.Less(t, est.TotalChars, 80, "handler string literals must not count as catalog text")
+	score, scored := scoreMCPTokenEfficiency(dir)
+	require.True(t, scored)
+	assert.Equal(t, 10, score)
+}
+
+func TestScoreMCPTokenEfficiency_FreshPrintFrameworkHelpFits(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:      "tokeneff",
+		Version:   "0.1.0",
+		BaseURL:   "https://api.example.com",
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"TOKENEFF_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/tokeneff-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+					"get":  {Method: "GET", Path: "/items/{id}", Description: "Get an item"},
+				},
+			},
+		},
+	}
+	outputDir := filepath.Join(t.TempDir(), "tokeneff-pp-cli")
+	gen := generator.New(apiSpec, outputDir)
+	gen.VisionSet = generator.VisionTemplateSet{
+		Store:     true,
+		Sync:      true,
+		Search:    true,
+		Export:    true,
+		Import:    true,
+		Analytics: true,
+		MCP:       true,
+	}
+	require.NoError(t, gen.Generate())
+
+	est := estimateMCPTokens(outputDir)
+	require.Greater(t, est.ToolCount, 0)
+	var frameworkHeavy []string
+	for _, tool := range est.PerTool {
+		if !strings.HasPrefix(tool.Name, "cobratree:") {
+			continue
+		}
+		if tool.Tokens > 80 {
+			frameworkHeavy = append(frameworkHeavy, tool.Name)
+		}
+	}
+	assert.Empty(t, frameworkHeavy, "framework/novel cobratree tools must stay in the full-marks per-tool band")
+
+	score, scored := scoreMCPTokenEfficiency(outputDir)
+	require.True(t, scored, "a fresh MCP print must score token-efficiency")
+	assert.Equal(t, 10, score, "a fresh MCP print must score full marks with zero hand edits to framework help")
+}
+
 func TestScoreMCPTokenEfficiency_FullMarksForLeanSurface(t *testing.T) {
 	dir := writeMCPTools(t, `
 	s.AddTool(mcplib.NewTool("get", mcplib.WithDescription("get item")), nil)
@@ -346,7 +619,7 @@ func TestScoreMCPTokenEfficiency_UnscoredForLargeCodeOrchCatalog(t *testing.T) {
 	dir := writeCodeOrchSurface(t, 200)
 
 	score, scored := scoreMCPTokenEfficiency(dir)
-	assert.False(t, scored, "large code-orchestrated catalogs should be unscored instead of zero-scored")
+	assert.False(t, scored, "code-orchestrated catalogs should always be unscored instead of zero-scored")
 	assert.Equal(t, 0, score)
 
 	sc := &Scorecard{}
@@ -354,12 +627,12 @@ func TestScoreMCPTokenEfficiency_UnscoredForLargeCodeOrchCatalog(t *testing.T) {
 	assert.Contains(t, sc.UnscoredDimensions, DimMCPTokenEfficiency)
 }
 
-func TestScoreMCPTokenEfficiency_ScoresSmallCodeOrchCatalog(t *testing.T) {
+func TestScoreMCPTokenEfficiency_UnscoredForSmallCodeOrchCatalog(t *testing.T) {
 	dir := writeCodeOrchSurface(t, 20)
 
 	score, scored := scoreMCPTokenEfficiency(dir)
-	assert.True(t, scored, "small code-orchestrated catalogs should still use the scoring bands")
-	assert.Greater(t, score, 0)
+	assert.False(t, scored, "code-orchestrated catalogs should be unscored regardless of endpoint count")
+	assert.Equal(t, 0, score)
 }
 
 func TestScoreMCPTokenEfficiency_EndpointMirrorBehaviorUnchanged(t *testing.T) {

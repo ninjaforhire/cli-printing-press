@@ -17,6 +17,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// funcBody returns the source of the function whose declaration starts with
+// decl (including the opening brace), spanning to its matching closing brace.
+// Used to scope NotContains assertions to a single emitted function rather than
+// the whole generated file.
+func funcBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	start := strings.Index(src, decl)
+	require.NotEqual(t, -1, start, "function declaration %q not found", decl)
+	depth := 0
+	for i := start + len(decl) - 1; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces after %q", decl)
+	return ""
+}
+
 func TestGoTemplatesEscapeSpecTextInStringLiterals(t *testing.T) {
 	t.Parallel()
 
@@ -140,7 +164,8 @@ func TestIsInsideGoDoubleQuotedStringSkipsTemplateActionSyntax(t *testing.T) {
 
 func goTemplateActionEscapesSpecText(action string) bool {
 	return strings.Contains(action, "oneline ") ||
-		strings.Contains(action, "printf \"%q\"")
+		strings.Contains(action, "printf \"%q\"") ||
+		strings.Contains(action, "goString ")
 }
 
 func TestGoTemplateActionEscapesSpecTextRejectsRawStringHelper(t *testing.T) {
@@ -148,7 +173,56 @@ func TestGoTemplateActionEscapesSpecTextRejectsRawStringHelper(t *testing.T) {
 
 	assert.True(t, goTemplateActionEscapesSpecText(`{{oneline .Description}}`))
 	assert.True(t, goTemplateActionEscapesSpecText(`{{printf "%q" .Description}}`))
+	assert.True(t, goTemplateActionEscapesSpecText(`{{goString (syncHintInvocation)}}`))
 	assert.False(t, goTemplateActionEscapesSpecText(`{{goRawSafe .Description}}`))
+	assert.False(t, goTemplateActionEscapesSpecText(`{{syncHintInvocation}}`))
+}
+
+func TestGoTemplatesEscapeSyncHintInvocationInStringLiterals(t *testing.T) {
+	t.Parallel()
+
+	var violations []string
+	err := fs.WalkDir(templateFS, "templates", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go.tmpl") {
+			return nil
+		}
+
+		data, err := templateFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for lineNo, line := range strings.Split(string(data), "\n") {
+			for start := strings.Index(line, "{{"); start >= 0; {
+				end := strings.Index(line[start+2:], "}}")
+				if end < 0 {
+					break
+				}
+				end += start + 2
+				action := line[start : end+2]
+				if isInsideGoDoubleQuotedString(line[:start]) &&
+					strings.Contains(action, "syncHintInvocation") &&
+					!strings.Contains(action, "if ") &&
+					!goTemplateActionEscapesSpecText(action) {
+					violations = append(violations, path+":"+strconv.Itoa(lineNo+1)+": "+strings.TrimSpace(line))
+				}
+				next := end + 2
+				if next >= len(line) {
+					break
+				}
+				if rel := strings.Index(line[next:], "{{"); rel >= 0 {
+					start = next + rel
+				} else {
+					break
+				}
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Empty(t, violations, "syncHintInvocation inside Go string literals must use goString/printf %%q; unsafe template sites:\n%s", strings.Join(violations, "\n"))
 }
 
 func TestDoctorTemplateRendersKindAwareAuthEnvPresence(t *testing.T) {
@@ -216,7 +290,8 @@ func TestAuthStatusHintsOnlyRequestCredentialEnvVars(t *testing.T) {
 	require.NotContains(t, hintBlock, `STATUS_AUTH_CLIENT_ID`)
 	require.NotContains(t, hintBlock, `STATUS_AUTH_CLIENT_SECRET`)
 	require.NotContains(t, hintBlock, `STATUS_AUTH_SESSION_COOKIE`)
-	require.Contains(t, hintBlock, `auth set-token <token>`)
+	require.Contains(t, hintBlock, `echo \"$TOKEN\" | auth-status-rich-auth-pp-cli auth set-token`)
+	require.NotContains(t, hintBlock, `auth set-token <token>`)
 }
 
 func TestAuthStatusHintsUseDescriptionAndNameShapePlaceholders(t *testing.T) {
@@ -511,13 +586,16 @@ func TestAuthHeaderComposedAndCookieApplySchemePrefix(t *testing.T) {
 			require.NoError(t, err)
 			content := string(configSrc)
 
-			// The raw-return literal must appear nowhere in the emitted config — every
-			// composed/cookie return path now flows through ensureAuthScheme. Whole-file
-			// NotContains avoids depending on a fragile slice boundary.
-			require.NotContains(t, content, "return c."+tt.envField+"\n",
-				"%s auth must not return raw env-var token without scheme prefix:\n%s", tt.authType, content)
-			require.NotContains(t, content, "return c.AccessToken\n",
-				"%s auth must not return raw AccessToken without scheme prefix:\n%s", tt.authType, content)
+			// The raw-return literal must appear nowhere in AuthHeader() — every
+			// composed/cookie return path there now flows through ensureAuthScheme.
+			// Scope to the AuthHeader() body: CookieCredential() intentionally
+			// returns the raw cookie-jar string (no scheme) for jar seeding, so a
+			// whole-file NotContains would false-positive on it.
+			authHeaderBody := funcBody(t, content, "func (c *Config) AuthHeader() string {")
+			require.NotContains(t, authHeaderBody, "return c."+tt.envField+"\n",
+				"%s AuthHeader must not return raw env-var token without scheme prefix:\n%s", tt.authType, authHeaderBody)
+			require.NotContains(t, authHeaderBody, "return c.AccessToken\n",
+				"%s AuthHeader must not return raw AccessToken without scheme prefix:\n%s", tt.authType, authHeaderBody)
 
 			// The replacement ensureAuthScheme call must be the wrapper for both paths.
 			require.Contains(t, content,
