@@ -66,8 +66,8 @@ func TestGeneratedBLEDeviceEscapesDisplayNameInRootCommand(t *testing.T) {
 }
 
 // TestGeneratedBLEDeviceEmitsPublishArtifacts verifies the device generator
-// emits the four standard publish artifacts the public library's
-// completeness verifier expects (AGENTS.md, LICENSE, NOTICE, .goreleaser.yaml).
+// emits the standard publish artifacts the public library's completeness
+// verifier expects (AGENTS.md, LICENSE, NOTICE, .goreleaser.yaml, .gitignore).
 // A device generate previously dropped all four — the "fork-and-drop" gap the
 // shared version.go template fixed for the version command.
 func TestGeneratedBLEDeviceEmitsPublishArtifacts(t *testing.T) {
@@ -79,15 +79,19 @@ func TestGeneratedBLEDeviceEmitsPublishArtifacts(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "ble-temperature-sensor")
 	require.NoError(t, NewDevice(ds, outputDir).Generate())
 
-	for _, name := range []string{"AGENTS.md", "LICENSE", "NOTICE", ".goreleaser.yaml"} {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", ".goreleaser.yaml", ".gitignore"} {
 		assert.FileExists(t, filepath.Join(outputDir, name))
 	}
+
+	// Claude Code auto-loads CLAUDE.md, not AGENTS.md; the device variant emits a
+	// CLAUDE.md that imports the contract.
+	assert.Equal(t, "@AGENTS.md", strings.TrimSpace(readFileString(t, filepath.Join(outputDir, "CLAUDE.md"))))
 
 	// None of the four may contain an unrendered Go-template directive. The
 	// goreleaser file legitimately carries goreleaser's own `{{ .Version }}`
 	// (note the leading space), so assert specifically on the Go-template form
 	// `{{.` / `{{range`-style openers that would mean a field went unrendered.
-	for _, name := range []string{"AGENTS.md", "LICENSE", "NOTICE", ".goreleaser.yaml"} {
+	for _, name := range []string{"AGENTS.md", "LICENSE", "NOTICE", ".goreleaser.yaml", ".gitignore"} {
 		body := readFileString(t, filepath.Join(outputDir, name))
 		assert.NotContains(t, body, "{{.", "%s contains an unrendered Go template directive", name)
 		assert.NotEmpty(t, strings.TrimSpace(body), "%s is empty", name)
@@ -114,7 +118,15 @@ func TestGeneratedBLEDeviceEmitsPublishArtifacts(t *testing.T) {
 	assert.Contains(t, goreleaser, "main: ./cmd/"+naming.MCP(ds.Name))
 	assert.Contains(t, goreleaser, naming.CLI(ds.Name)+"/internal/cli.version=")
 	assert.Contains(t, goreleaser, "-X main.version={{ .Version }}")
+	assert.Contains(t, goreleaser, "-trimpath")
+	assert.GreaterOrEqual(t, strings.Count(goreleaser, "-trimpath"), 2)
 	assert.Contains(t, goreleaser, `description: "`)
+
+	gitignore := readFileString(t, filepath.Join(outputDir, ".gitignore"))
+	assert.Contains(t, gitignore, "/"+naming.CLI(ds.Name)+"\n")
+	assert.Contains(t, gitignore, "/"+naming.MCP(ds.Name)+"\n")
+	assert.NotContains(t, gitignore, "\n"+naming.CLI(ds.Name)+"\n")
+	assert.NotContains(t, gitignore, "\n"+naming.MCP(ds.Name)+"\n")
 
 	// AGENTS.md is the device-aware variant: it uses BLE/replay concepts and the
 	// codec/novelCommands customization model, never HTTP auth/sync/SQL.
@@ -139,7 +151,7 @@ func TestGeneratedBLESkillEmitsCanonicalInstallSection(t *testing.T) {
 	skillSrc, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
 	require.NoError(t, err)
 
-	// Device CLIs carry no catalog category, so the canonical install block uses
+	// Device CLIs carry no public-library category, so the canonical install block uses
 	// the category-agnostic installer path. verify-skill's canonical-sections
 	// check requires this exact block once the printed CLI has a manifest, so the
 	// device SKILL template must emit it just like the HTTP skill.md.tmpl does.
@@ -186,6 +198,7 @@ func TestGeneratedBLEDeviceEmitsMCPSurface(t *testing.T) {
 	goMod, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
 	require.NoError(t, err)
 	assert.Contains(t, string(goMod), "github.com/mark3labs/mcp-go")
+	assert.Contains(t, string(goMod), "\ngo "+currentGoDirectiveVersion()+"\n")
 
 	requireGeneratedCompiles(t, outputDir) // builds ./... including the MCP binary
 }
@@ -202,31 +215,55 @@ func TestGeneratedBLEEmitsNovelCommandHook(t *testing.T) {
 	rootSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "root.go"))
 	require.NoError(t, err)
 	root := string(rootSrc)
-	// A nil-guarded function-variable hook: hand-authored commands attach via an
-	// operator-owned file that sets novelCommands, with no edit to generated
-	// files. The default build is a no-op (nil hook).
-	assert.Contains(t, root, "var novelCommands func(root *cobra.Command, flags *rootFlags)")
-	assert.Contains(t, root, "if novelCommands != nil {")
-	assert.Contains(t, root, "novelCommands(rootCmd, flags)")
+	// An additive hook registry lets independently preserved command files
+	// coexist without overwriting each other's registration.
+	assert.Contains(t, root, "var novelCommandHooks []func(root *cobra.Command, flags *rootFlags)")
+	assert.Contains(t, root, "func registerNovelCommand(hook func(root *cobra.Command, flags *rootFlags))")
+	assert.Contains(t, root, "novelCommandHooks = append(novelCommandHooks, hook)")
+	assert.Contains(t, root, "for _, hook := range novelCommandHooks {")
 
 	// The generated CLI compiles with the hook unset (no operator file present).
 	requireGeneratedCompiles(t, outputDir)
 
-	// An operator file that wires the hook builds and adds a command. This mirrors
-	// how regenmerge preserves snapshot-only (NOVEL) files verbatim across regen.
-	operatorFile := filepath.Join(outputDir, "internal", "cli", "novel_ops.go")
+	// Two independent operator files both register commands. This mirrors how
+	// regenmerge preserves snapshot-only (NOVEL) files verbatim across regen.
+	operatorFile := filepath.Join(outputDir, "internal", "cli", "novel_ping.go")
 	require.NoError(t, os.WriteFile(operatorFile, []byte(`package cli
 
 import "github.com/spf13/cobra"
 
 func init() {
-	novelCommands = func(root *cobra.Command, flags *rootFlags) {
+	registerNovelCommand(func(root *cobra.Command, flags *rootFlags) {
 		_ = flags
 		root.AddCommand(&cobra.Command{Use: "ping", RunE: func(c *cobra.Command, a []string) error { return nil }})
+	})
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "novel_echo.go"), []byte(`package cli
+
+import "github.com/spf13/cobra"
+
+func init() {
+	registerNovelCommand(func(root *cobra.Command, flags *rootFlags) {
+		_ = flags
+		root.AddCommand(&cobra.Command{Use: "echo", RunE: func(c *cobra.Command, a []string) error { return nil }})
+	})
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "novel_hooks_test.go"), []byte(`package cli
+
+import "testing"
+
+func TestNovelHooksCompose(t *testing.T) {
+	root := RootCmd()
+	for _, name := range []string{"ping", "echo"} {
+		if cmd, _, err := root.Find([]string{name}); err != nil || cmd == root {
+			t.Fatalf("registered command %q unavailable: %v", name, err)
+		}
 	}
 }
 `), 0o644))
-	requireGeneratedCompiles(t, outputDir)
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "TestNovelHooksCompose")
 }
 
 func TestGeneratedBLEDeviceEmitsLiveBackendSeam(t *testing.T) {
@@ -756,8 +793,6 @@ func runGeneratedJSONCommand(t *testing.T, outputDir, homeDir string, args ...st
 	cmdArgs := append([]string{"run", "-mod=mod", "./cmd/ble-session-appliance-pp-cli", "--json"}, args...)
 	cmd := exec.Command("go", cmdArgs...)
 	cmd.Dir = outputDir
-	cacheDir, err := goBuildCacheDir(outputDir)
-	require.NoError(t, err)
 	modCacheDir := os.Getenv("GOMODCACHE")
 	if modCacheDir == "" {
 		output, err := exec.Command("go", "env", "GOMODCACHE").Output()
@@ -765,14 +800,19 @@ func runGeneratedJSONCommand(t *testing.T, outputDir, homeDir string, args ...st
 		modCacheDir = strings.TrimSpace(string(output))
 	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(),
-		"GOCACHE="+cacheDir,
-		"GOMODCACHE="+modCacheDir,
-		"HOME="+homeDir,
-		"XDG_CACHE_HOME="+filepath.Join(homeDir, ".cache"),
-	)
-	output, err := cmd.Output()
+	var output []byte
+	err := withGoBuildCache(outputDir, func(cacheDir string) error {
+		cmd.Stderr = &stderr
+		cmd.Env = append(os.Environ(),
+			"GOCACHE="+cacheDir,
+			"GOMODCACHE="+modCacheDir,
+			"HOME="+homeDir,
+			"XDG_CACHE_HOME="+filepath.Join(homeDir, ".cache"),
+		)
+		var runErr error
+		output, runErr = cmd.Output()
+		return runErr
+	})
 	require.NoError(t, err, stderr.String())
 	var result any
 	require.NoError(t, json.Unmarshal(output, &result))

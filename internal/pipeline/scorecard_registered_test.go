@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+const rawSQLiteInventoryCommandFixture = `package cli
+import "database/sql"
+func newInventoryCmd(flags any) {}
+func open() (*sql.DB, error) { return sql.Open("sqlite", "inventory.db") }
+`
+
 // TestRegisteredCommandFiles_OrphanIgnored verifies that scoreWorkflows and
 // scoreInsight no longer count files whose constructor is never registered in
 // root.go. This prevents dead-code removal from dropping the score and ensures
@@ -102,6 +108,56 @@ func newAvailabilitySweepCmd(flags any) *cobra.Command {
 	}
 	if !registered["availability_sweep.go"] {
 		t.Errorf("expected child command registered through parent AddCommand to be registered, got %v", registered)
+	}
+}
+
+func TestRegisteredCommandFiles_FollowsNovelHelperCalls(t *testing.T) {
+	dir := t.TempDir()
+	cliDir := filepath.Join(dir, "internal", "cli")
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(cliDir, "root.go"), `package cli
+func newRootCmd() {
+	addNovelCommandIfAbsent(rootCmd, newAvailabilityCmd(nil))
+}`)
+
+	writeFile(t, filepath.Join(cliDir, "availability.go"), `package cli
+import "github.com/spf13/cobra"
+func newAvailabilityCmd(flags any) *cobra.Command {
+	cmd := &cobra.Command{Use: "availability"}
+	addNovelCommandIfAbsent(newParentDeadCmd(), newAvailabilitySweepCmd(flags))
+	return cmd
+}`)
+
+	writeFile(t, filepath.Join(cliDir, "availability_sweep.go"), `package cli
+import "github.com/spf13/cobra"
+func newAvailabilitySweepCmd(flags any) *cobra.Command {
+	return &cobra.Command{Use: "sweep"}
+}`)
+
+	writeFile(t, filepath.Join(cliDir, "dead.go"), `package cli
+import "github.com/spf13/cobra"
+func newDeadCmd(flags any) *cobra.Command {
+	return &cobra.Command{Use: "dead"}
+}`)
+
+	writeFile(t, filepath.Join(cliDir, "parent_dead.go"), `package cli
+import "github.com/spf13/cobra"
+func newParentDeadCmd() *cobra.Command {
+	return &cobra.Command{Use: "parent-dead"}
+}`)
+
+	registered := registeredCommandFiles(cliDir)
+	if !registered["availability.go"] || !registered["availability_sweep.go"] {
+		t.Errorf("expected novel helper registrations to be reachable, got %v", registered)
+	}
+	if registered["dead.go"] {
+		t.Errorf("expected unregistered constructor to stay orphaned, got %v", registered)
+	}
+	if registered["parent_dead.go"] {
+		t.Errorf("expected helper parent constructor to stay orphaned, got %v", registered)
 	}
 }
 
@@ -875,13 +931,9 @@ func TestScoreWorkflows_RecognizesRawSQLiteDataLayer(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(cliDir, "root.go"), `package cli
-func newRootCmd() { rootCmd.AddCommand(newCatalogCmd(nil)) }
-`)
-	writeFile(t, filepath.Join(cliDir, "catalog.go"), `package cli
-import "database/sql"
-func newCatalogCmd(flags any) {}
-func open() (*sql.DB, error) { return sql.Open("sqlite", "catalog.db") }
-`)
+func newRootCmd() { rootCmd.AddCommand(newInventoryCmd(nil)) }
+	`)
+	writeFile(t, filepath.Join(cliDir, "inventory.go"), rawSQLiteInventoryCommandFixture)
 
 	if score := scoreWorkflows(dir); score != 2 {
 		t.Fatalf("expected raw SQLite-backed command to count as workflow, got %d", score)
@@ -897,8 +949,8 @@ func TestScoreInsight_UsesEveryCobraUseLiteralAndRawSQLiteDataLayer(t *testing.T
 	writeFile(t, filepath.Join(dir, CLIManifestFilename), `{"novel_features":[{"name":"Check watchlist","command":"watch check","description":"Check watchlist drift"}]}`)
 
 	writeFile(t, filepath.Join(cliDir, "root.go"), `package cli
-func newRootCmd() { rootCmd.AddCommand(newWatchCmd(nil), newCatalogCmd(nil)) }
-`)
+func newRootCmd() { rootCmd.AddCommand(newWatchCmd(nil), newInventoryCmd(nil)) }
+	`)
 	writeFile(t, filepath.Join(cliDir, "watch.go"), `package cli
 import "github.com/spf13/cobra"
 func newWatchCmd(flags any) *cobra.Command {
@@ -907,11 +959,7 @@ func newWatchCmd(flags any) *cobra.Command {
 	return cmd
 }
 `)
-	writeFile(t, filepath.Join(cliDir, "catalog.go"), `package cli
-import "database/sql"
-func newCatalogCmd(flags any) {}
-func open() (*sql.DB, error) { return sql.Open("sqlite", "catalog.db") }
-const q = "SELECT COUNT(*) FROM discs GROUP BY format"
+	writeFile(t, filepath.Join(cliDir, "inventory.go"), rawSQLiteInventoryCommandFixture+`const q = "SELECT COUNT(*) FROM discs GROUP BY format"
 `)
 
 	if score := scoreInsight(dir); score != 4 {

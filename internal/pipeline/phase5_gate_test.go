@@ -40,6 +40,28 @@ func TestValidatePhase5Gate_PassMarker(t *testing.T) {
 	assert.Equal(t, filepath.Join(proofsDir, Phase5AcceptanceFilename), result.MarkerPath)
 }
 
+func TestValidatePhase5Gate_FullPassRejectsHollowCoverage(t *testing.T) {
+	proofsDir := t.TempDir()
+	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "none"}
+	writePhase5GateMarker(t, proofsDir, Phase5AcceptanceFilename, Phase5GateMarker{
+		SchemaVersion:  1,
+		APIName:        "test",
+		RunID:          "run-1",
+		Status:         "pass",
+		Level:          "full",
+		MatrixSize:     1,
+		TestsPassed:    1,
+		CoverageHollow: true,
+		HollowFeatures: []string{"widgets list"},
+		AuthContext:    Phase5AuthContext{Type: "none"},
+	})
+
+	result := ValidatePhase5Gate(proofsDir, manifest)
+	require.False(t, result.Passed)
+	assert.Contains(t, result.Detail, "hollow coverage")
+	assert.Contains(t, result.Detail, "widgets list")
+}
+
 func TestValidatePhase5Gate_QuickPassRejectsFailures(t *testing.T) {
 	proofsDir := t.TempDir()
 	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "none"}
@@ -305,6 +327,29 @@ func TestValidatePhase5Gate_ManualLevelDocumentsAcceptedValues(t *testing.T) {
 	assert.Contains(t, result.Detail, "dogfood --live --write-acceptance")
 }
 
+func TestValidatePhase5Gate_ReportsMultipleAcceptanceMarkerIssues(t *testing.T) {
+	proofsDir := t.TempDir()
+	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "none"}
+	writePhase5GateMarker(t, proofsDir, Phase5AcceptanceFilename, Phase5GateMarker{
+		SchemaVersion: 2,
+		Status:        "maybe",
+		Level:         "smoke",
+		AuthContext:   Phase5AuthContext{Type: "none"},
+	})
+
+	result := ValidatePhase5Gate(proofsDir, manifest)
+	require.False(t, result.Passed)
+	assert.Contains(t, result.Detail, "unsupported phase5 marker schema_version 2")
+	assert.Contains(t, result.Detail, "phase5 marker missing api_name")
+	assert.Contains(t, result.Detail, "phase5 marker missing run_id")
+	assert.Contains(t, result.Detail, `unknown phase5 gate status "maybe"`)
+	assert.Contains(t, result.Detail, "accepted: pass, fail")
+	assert.Contains(t, result.Detail, `unknown phase5 acceptance level "smoke"`)
+	assert.Contains(t, result.Detail, "accepted: quick, full")
+	assert.Contains(t, result.Detail, "missing matrix_size")
+	assert.Contains(t, result.Detail, "missing tests_passed")
+}
+
 func TestValidatePhase5Gate_UnknownLevelDocumentsAcceptedValues(t *testing.T) {
 	proofsDir := t.TempDir()
 	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "none"}
@@ -527,6 +572,46 @@ func TestValidatePhase5Gate_CookieAuthNotSkippedByMissingAPIKey(t *testing.T) {
 	assert.Contains(t, result.Detail, "browser-session")
 }
 
+func TestValidatePhase5Gate_CookieAuthNoHarnessSessionSkipAllowed(t *testing.T) {
+	for _, authType := range []string{"cookie", "composed", "session_handshake"} {
+		t.Run(authType, func(t *testing.T) {
+			proofsDir := t.TempDir()
+			manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: authType}
+			writePhase5GateMarker(t, proofsDir, Phase5SkipFilename, Phase5GateMarker{
+				SchemaVersion: 1,
+				APIName:       "test",
+				RunID:         "run-1",
+				Status:        "skip",
+				Level:         "none",
+				SkipReason:    phase5SkipReasonCookieAuthNoHarnessSession,
+				AuthContext:   Phase5AuthContext{Type: authType, BrowserSessionAvailable: false},
+			})
+
+			result := ValidatePhase5Gate(proofsDir, manifest)
+			require.True(t, result.Passed, result.Detail)
+			assert.Equal(t, "skip", result.Status)
+		})
+	}
+}
+
+func TestValidatePhase5Gate_CookieAuthRejectsWrongSkipReason(t *testing.T) {
+	proofsDir := t.TempDir()
+	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "cookie"}
+	writePhase5GateMarker(t, proofsDir, Phase5SkipFilename, Phase5GateMarker{
+		SchemaVersion: 1,
+		APIName:       "test",
+		RunID:         "run-1",
+		Status:        "skip",
+		Level:         "none",
+		SkipReason:    "operator deferred",
+		AuthContext:   Phase5AuthContext{Type: "cookie"},
+	})
+
+	result := ValidatePhase5Gate(proofsDir, manifest)
+	require.False(t, result.Passed)
+	assert.Contains(t, result.Detail, "cookie-auth-no-harness-session")
+}
+
 func TestValidatePhase5Gate_SkipCannotOverrideManifestAuthType(t *testing.T) {
 	proofsDir := t.TempDir()
 	manifest := CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "cookie"}
@@ -631,4 +716,51 @@ func TestValidatePhase5Gate_MissingMarkerFails(t *testing.T) {
 	result := ValidatePhase5Gate(t.TempDir(), CLIManifest{APIName: "test", CLIName: "test-pp-cli", RunID: "run-1", AuthType: "api_key"})
 	require.False(t, result.Passed)
 	assert.Contains(t, result.Detail, "missing")
+}
+
+func TestPhase5ProofsDirCandidatesPrefersCLIManuscripts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", home)
+	cliDir := filepath.Join(home, "library", "test")
+	runID := "run-prefer"
+	cliProofs := filepath.Join(cliDir, ".manuscripts", runID, "proofs")
+	runstateProofs := filepath.Join(home, ".runstate", "scope", "runs", runID, "proofs")
+	require.NoError(t, os.MkdirAll(cliProofs, 0o755))
+	require.NoError(t, os.MkdirAll(runstateProofs, 0o755))
+
+	candidates := Phase5ProofsDirCandidates(cliDir, CLIManifest{
+		APIName: "test",
+		CLIName: "test-pp-cli",
+		RunID:   runID,
+	}, runstateProofs)
+	require.NotEmpty(t, candidates)
+	assert.Equal(t, cliProofs, candidates[0])
+	assert.Equal(t, cliProofs, FirstExistingPhase5ProofsDir(candidates))
+}
+
+func TestMirrorLiveDogfoodAcceptanceToRunstate(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	workDir := filepath.Join(tmp, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(workDir, 0o755))
+	state := NewStateWithRun("test", workDir, "run-mirror", "test-scope")
+	require.NoError(t, state.Save())
+
+	srcDir := filepath.Join(workDir, ".manuscripts", state.RunID, "proofs")
+	marker := Phase5GateMarker{
+		SchemaVersion: 1,
+		APIName:       "test",
+		RunID:         state.RunID,
+		Status:        "pass",
+		Level:         "full",
+		MatrixSize:    1,
+		TestsPassed:   1,
+	}
+	src := filepath.Join(srcDir, Phase5AcceptanceFilename)
+	require.NoError(t, writeLiveDogfoodMarkerFile(src, marker))
+	require.NoError(t, mirrorLiveDogfoodAcceptanceToRunstate(LiveDogfoodOptions{CLIDir: workDir}, src, marker))
+	assert.FileExists(t, filepath.Join(state.ProofsDir(), Phase5AcceptanceFilename))
 }

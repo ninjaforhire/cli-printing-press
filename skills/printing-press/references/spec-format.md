@@ -36,6 +36,19 @@ config:                           # object (ConfigSpec)
   format: toml                    # string config format: toml | yaml (other values fall back to json tags)
   path: "~/.config/my-api/config.toml" # string config file path
 
+learn:                            # object (LearnConfig) per-CLI vocabulary for the default-on learn loop
+  disabled: false                 # bool generation-time opt-out; the authoritative off switch (enabled: false is a no-op once the loop is default-on; disabled: true with an explicit enabled: true is rejected at parse time)
+	ticker_patterns:                # []string Go regexes recognizing ID-shaped tokens in free-text queries; each must compile; must not match ordinary query-family words in seeded playbook examples (greedy ^[a-z0-9]{2,12}$ is rejected); anchor with ^...$
+    - "^ew-[a-z0-9]+$"
+  stopwords:                      # []string domain filler words merged with the built-in English set; whitespace-only entries dropped at parse time
+    - widget
+  synonyms:                       # map[string]string same-referent variant -> canonical phrasing folds; lowercase, single-hop (chains rejected)
+    "most recent": "latest"
+  entity_lookup_seeds:            # map[string][]LookupSeed keyed by entity kind; canonical must match upstream API responses exactly
+    widget_series:
+      - canonical: Example Widget Series Alpha # string (required, non-empty)
+        aliases: [alpha, series a]  # []string alternate strings agents type for the same entity
+
 resources:                        # map[string]Resource (REQUIRED: at least one key)
   users:                          # resource key becomes top-level command: <name>-cli users
     description: "Manage users"  # string resource help text
@@ -44,8 +57,11 @@ resources:                        # map[string]Resource (REQUIRED: at least one 
       list:                       # endpoint key becomes subcommand: users list
         method: GET               # string (REQUIRED) must be one of GET | POST | PUT | DELETE
         path: "/users"           # string (REQUIRED) API path; supports {param} placeholders
+        mutation: true             # bool optional; true marks a GET action as state-changing; false marks a POST/search/list endpoint as a read so the command prints the response body
         base_url: "https://search.example.com/v1" # string optional override for this endpoint only
         description: "List users" # string endpoint help text
+        example: "  my-api-pp-cli users list --limit 25" # string optional Cobra Example override; include Cobra help indentation
+        happy_args: "--limit=25"  # string optional live-dogfood fixture args
         params:                   # []Param query/path parameters
           - name: limit           # string upstream wire key; request serialization always uses this value
             flag_name: page-size  # string optional public CLI/MCP/docs name; agent-authored from evidence
@@ -111,6 +127,15 @@ types:                            # map[string]TypeDef named response/body model
         type: string              # string field type (typically string/int/bool/float)
 ```
 
+**`learn:` is the sanctioned home for per-CLI domain vocabulary.** The learn
+loop is emitted by default for every print; the generated `internal/learn`
+package stays domain-neutral, so seeds, ticker patterns, synonyms, and
+stopwords enter only through this block (or its `x-learn` OpenAPI
+equivalent). Empty seeds parse fine but cap recall at exact-match. For
+field-by-field sourcing guidance, a worked example, and the local validation
+workflow, see
+[`docs/SPEC-LEARN-AUTHORING.md`](../../../docs/SPEC-LEARN-AUTHORING.md).
+
 For OAuth2 refresh-token rotation without an interactive browser flow, use
 `auth.type: oauth2_refresh` with `auth.token_url`. When `env_vars` is omitted,
 the generator defaults to `<API>_CLIENT_ID`, `<API>_CLIENT_SECRET`, and
@@ -124,6 +149,28 @@ Next.js `__NEXT_DATA__` or schema.org JSON-LD; prefer `html_extract` modes
 `page`, `links`, or `embedded-json` before writing custom extraction code. Use
 `csv` for CSV responses that novel commands may parse through
 `cliutil.ParseCSV`, and `binary` for opaque byte payloads.
+
+**`example` and `happy_args` are endpoint-command fixtures.** Set `example`
+when the synthesized Cobra example would omit domain-specific context. Use the
+exact command string that should appear in `--help`; lead with two spaces for
+Cobra help indentation and include the generated binary name and command path.
+When an endpoint is also promoted as a top-level command, the same `example`
+value is used verbatim for both forms, so write it as the promoted invocation
+if that is the command users should run. The generator synthesizes runnable
+`Example:` strings and `pp:happy-args` from parameter `example`, `enum`,
+`default`, and `format` when every required input is derivable, and omits
+placeholder `example-value` Example lines rather than shipping copy-paste 400s.
+Set `happy_args` only when live dogfood needs realistic arguments that cannot
+be inferred from those schema hints (opaque IDs, coordinates with no example,
+and similar). The value is copied into the generated `pp:happy-args`
+annotation and follows the runtime grammar. Tokens are separated by unescaped
+semicolons, so a literal semicolon uses `\;` (or `\\;` inside a YAML
+double-quoted string). Positional tokens may use `<label>=value` or
+`label=value`. Positional and flag tokens replace matching synthesized
+or Example-derived values, and bare `--flag` tokens become boolean
+`--flag=true`. Negative numeric flag values use the safe
+`--flag=-12.3` form. Examples include `"--zip=60614"` and
+`"id=example-id;--query=example"`.
 
 **`html_extract.link_prefixes` are path-segment anchored.** In `mode: links`, a
 prefix such as `/items` keeps links whose path is exactly `/items` or starts
@@ -367,6 +414,14 @@ Top-level scalars become typed flags. Object properties with their own
 `properties` become nested, parent-prefixed flags. Object and array properties
 without expandable scalar children remain JSON-string flags so the command can
 pass nested payloads without hand-written Go.
+
+When the request-body schema is a **single object property whose value is an
+object** (the resource root, e.g. `{"issue":{"notes":"..."}}`), generated
+create/update/patch/post commands wrap the constructed field map under that
+schema key. Keep the wrapper in the schema when the API requires it. A flat
+schema (`{"user_id": 1}` or `{id, name, ...}`) stays a flat body — do not
+invent a wrap key or flatten a named resource root away. `--stdin` still sends
+the caller's JSON as-is.
 
 ## 4. Validation Rules
 

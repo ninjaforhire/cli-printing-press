@@ -29,6 +29,10 @@ var readCommandResources = map[string][]string{
 	"printing-press-golden-pp-cli projects list":     {"projects"},
 	"printing-press-golden-pp-cli projects get":      {"projects"},
 	"printing-press-golden-pp-cli projects search":   {"projects"},
+	"printing-press-golden-pp-cli tickets":           {"tickets"},
+	"printing-press-golden-pp-cli tickets list":      {"tickets"},
+	"printing-press-golden-pp-cli tickets get":       {"tickets"},
+	"printing-press-golden-pp-cli tickets search":    {"tickets"},
 }
 
 // cachePolicy returns the cache freshness policy assembled from spec
@@ -80,6 +84,10 @@ func autoRefreshIfStale(ctx context.Context, flags *rootFlags, resources []strin
 		meta.Reason = "no_resources"
 		return meta
 	}
+	if noLearnActive(flags) {
+		meta.Reason = "no_learn"
+		return meta
+	}
 	policy := cachePolicy()
 	if policy.EnvOptOut != "" && os.Getenv(policy.EnvOptOut) == "1" {
 		meta.Decision = "skipped"
@@ -87,6 +95,36 @@ func autoRefreshIfStale(ctx context.Context, flags *rootFlags, resources []strin
 		return meta
 	}
 	dbPath := defaultDBPath("printing-press-golden-pp-cli")
+	_, statErr := os.Stat(dbPath)
+	storeMissing := os.IsNotExist(statErr)
+	if storeMissing {
+		meta.Decision = cliutil.DecisionNoStore.String()
+	}
+	if !storeMissing {
+		probe, err := store.OpenReadOnlyContext(ctx, dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-refresh skipped (open: %v)\n", err)
+			meta.Decision = "error"
+			meta.Reason = "open_store"
+			meta.Error = err.Error()
+			return meta
+		}
+		decision, err := cliutil.EnsureFresh(ctx, probe.DB(), resources, policy)
+		_ = probe.Close()
+		meta.Decision = decision.String()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-refresh decision failed: %v\n", err)
+			meta.Decision = "error"
+			meta.Reason = "decision_failed"
+			meta.Error = err.Error()
+			return meta
+		}
+		if decision == cliutil.DecisionFresh {
+			meta.Reason = decision.String()
+			return meta
+		}
+	}
+
 	db, err := store.OpenWithContext(ctx, dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-refresh skipped (open: %v)\n", err)
@@ -96,20 +134,6 @@ func autoRefreshIfStale(ctx context.Context, flags *rootFlags, resources []strin
 		return meta
 	}
 	defer db.Close()
-
-	decision, err := cliutil.EnsureFresh(ctx, db.DB(), resources, policy)
-	meta.Decision = decision.String()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: auto-refresh decision failed: %v\n", err)
-		meta.Decision = "error"
-		meta.Reason = "decision_failed"
-		meta.Error = err.Error()
-		return meta
-	}
-	if decision == cliutil.DecisionFresh || decision == cliutil.DecisionNoStore {
-		meta.Reason = decision.String()
-		return meta
-	}
 
 	refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout())
 	defer cancel()
@@ -194,7 +218,7 @@ func runAutoRefresh(ctx context.Context, flags *rootFlags, db *store.Store, reso
 			return ctx.Err()
 		default:
 		}
-		result := syncResource(ctx, c, db, resource, "", false, 1, true, nil, os.Stderr)
+		result := syncResource(ctx, c, db, resource, "", false, 1, true, false, nil, os.Stderr)
 		if result.Err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", resource, result.Err))
 		}

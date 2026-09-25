@@ -53,7 +53,7 @@ func TestClientHonorsSpecBasePath(t *testing.T) {
 	assert.Regexp(t, requestBaseURL, client,
 		"RequestBaseURL() should be emitted and return BaseURL+BasePath even without HTML extraction")
 
-	cacheKeyBody := clientCacheKeyBody(t, client)
+	cacheKeyBody := clientCacheKeyForBody(t, client)
 	assert.Contains(t, cacheKeyBody, `"|base_path=" + c.BasePath`,
 		"cache key should include BasePath so a config change invalidates correctly")
 
@@ -66,7 +66,7 @@ func TestClientHonorsSpecBasePath(t *testing.T) {
 		"Config struct should expose BasePath with a serialized tag matching the spec's config format")
 	assert.Contains(t, config, `BasePath: "/~api"`,
 		"Load() should seed cfg.BasePath from the spec default")
-	assert.Contains(t, config, `os.Getenv("BASEPATH_HONORED_BASE_PATH")`,
+	assert.Contains(t, config, `cliutil.EnvOverride("BASEPATH_HONORED_BASE_PATH")`,
 		"Load() should accept an env-var override for BasePath")
 }
 

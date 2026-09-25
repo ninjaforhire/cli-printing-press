@@ -20,8 +20,12 @@ in the same change as any new `Extensions["x-*"]` lookup in that file.
 | `x-roles` | root or `info` | `APISpec.Roles` | No |
 | `x-tier-routing` | root or `info` | `APISpec.TierRouting` | No |
 | `x-rate-class` | root or `info` | `APISpec.RateClass` | No |
+| `x-pp-default-rate-limit` | root or `info` | `APISpec.DefaultRateLimit` | No |
 | `x-mcp` | root or `info` | `APISpec.MCP` | No |
 | `x-cache` | root or `info` | `APISpec.Cache` | No |
+| `x-learn` | root or `info` | `APISpec.Learn` | No |
+| `x-pp-query` | root | `APISpec.QuerySync` | No |
+| `x-pp-response-envelope` | root or `info` | `APISpec.ResponseEnvelopeKey` | No |
 | `x-auth-type` | `components.securitySchemes.<name>` | `APISpec.Auth.Type` | No |
 | `x-auth-format` | `components.securitySchemes.<name>` | `APISpec.Auth.Format` | No |
 | `x-prefix` | `components.securitySchemes.<name>` | `APISpec.Auth.Format` | No |
@@ -43,12 +47,20 @@ in the same change as any new `Extensions["x-*"]` lookup in that file.
 | `x-critical` | path item | `Endpoint.Critical` | No |
 | `x-tier` | path item or operation | `Endpoint.Tier` | No |
 | `x-data-source-strategy` | path item or operation | `Endpoint.DataSourceStrategy` | No |
+| `x-live-dogfood-requires-tier` | path item or operation | `Endpoint.LiveDogfoodRequiresTier` | No |
 | `x-requires-role` | operation | `Endpoint.RequiresRole` | No |
 | `x-happy-args` | operation | `Endpoint.HappyArgs` | No |
+| `x-happy-stdin` | operation | `Endpoint.HappyStdin` | No |
+| `x-pp-example` | operation | `Endpoint.Example` (verbatim Cobra example override) | No |
 | `x-pp-resource` | operation | resource name override | No |
+| `x-pp-pagination` | operation | `Endpoint.Pagination` | No |
+| `x-pp-mutation` | operation | `Endpoint.Mutation` | No |
 | `x-pp-safe-probe` | operation | *skill guidance only; not parsed in parser.go* | No |
 | `x-pp-sync-walker` | operation | `Endpoint.Walker` | No |
+| `x-sync-params` | operation | `Endpoint.SyncParams` | No |
 | `x-pp-dispatch-param` | parameter | `Param.DispatchParam` | No |
+| `x-pp-tenant-scope-column` | path item | `Endpoint.TenantScopeColumn` | No |
+| `x-pp-membership-field` | path item | `Endpoint.MembershipField` | No |
 
 ## `info` Extensions
 
@@ -88,7 +100,7 @@ Rules:
 - Must be a string.
 - Leading and trailing whitespace is trimmed.
 - Empty or non-string values leave `DisplayName` empty, so downstream code falls
-  back to catalog metadata or slug-derived naming.
+  back to spec metadata or slug-derived naming.
 - The parser does not enforce a length cap for `x-display-name`. The separate
   `registry.json` display-name fallback used by `mcp-sync` rejects registry
   values longer than 40 characters, but that limit does not apply here.
@@ -249,6 +261,37 @@ info:
   x-rate-class: monthly
 ```
 
+### `x-pp-default-rate-limit`
+
+Sets the built-in default for the generated CLI's `--rate-limit` flag from an
+OpenAPI spec, mirroring the internal YAML `default_rate_limit` field.
+
+Parsed field: `APISpec.DefaultRateLimit`
+
+Rules:
+- Optional.
+- May be declared at the OpenAPI root or under `info`. Root takes precedence
+  when both are present.
+- The value is either the string `"auto"` (case-insensitive) or a non-negative
+  number (a JSON number or a numeric string). Any other shape is rejected with
+  a validation error.
+- `"auto"` selects the header-driven adaptive limiter so the CLI paces itself
+  to the server's `X-Ratelimit-*` headers with no hardcoded ceiling. A numeric
+  value (e.g. `2`) pins a fixed requests-per-second ceiling.
+- When absent, the generated `--rate-limit` default is `client.RateLimitAuto`
+  (the same as `"auto"`), for both sniffed and documented specs. This only
+  sets the default; the generated `--rate-limit` flag still overrides it at
+  runtime.
+
+Example:
+
+```yaml
+info:
+  title: Throttled API
+  version: "1.0"
+  x-pp-default-rate-limit: auto
+```
+
 ### `x-mcp`
 
 Declares MCP server shape for the generated CLI. Mirrors the internal YAML
@@ -326,6 +369,164 @@ x-cache:
       resources: [quotes]
 ```
 
+### `x-learn`
+
+Declares the self-learning loop configuration for generated CLIs. Mirrors the
+internal YAML spec's top-level `learn:` block so OpenAPI-sourced prints can
+author ticker patterns, stopwords, synonym folds, and entity-lookup seeds the
+same way internal specs do.
+
+Parsed field: `APISpec.Learn` (`spec.LearnConfig`)
+
+Rules:
+- Optional. Specs without `x-learn` express no learn preference and take the
+  generator's learn-loop default. `enabled: false` is likewise treated as
+  unset under that default (a plain bool cannot express "explicitly off");
+  the authoritative opt-out is `disabled: true`.
+- May be declared at the OpenAPI root or under `info`. Root takes precedence
+  when both are present.
+- Shape mirrors the internal YAML `learn:` block field-for-field: `enabled`,
+  `disabled`, `ticker_patterns`, `stopwords`, `synonyms`,
+  `entity_lookup_seeds`.
+- `disabled: true` is the generation-time opt-out. Combining it with an
+  explicit `enabled: true` is rejected at parse time as contradictory.
+- Validated by the same learn validation as internal YAML specs: ticker
+  patterns must compile as Go regexps and must not classify every remaining
+  content token in seeded playbook `query_family_examples` as a ticker
+  (that empties QueryFamily and makes recall unreachable), seed kinds must
+  be lowercase identifiers, canonicals must be non-empty and unique within
+  a kind, and synonym pairs must be non-empty lowercase single-hop folds
+  (no chains, no self-references).
+
+Example:
+
+```yaml
+x-learn:
+  enabled: true
+  ticker_patterns:
+    - "[A-Z]{2,6}-[0-9]+"
+  stopwords: [the, of]
+  synonyms:
+    last night: yesterday
+  entity_lookup_seeds:
+    country:
+      - canonical: USA
+        aliases: [united states, america]
+```
+
+### `x-pp-example`
+
+Overrides the generated command's `--help` Example with a verbatim, authored
+invocation. The synthesized example includes required parameters. An operation
+with no parameter examples is synthesized from the request body instead: the
+media-type `example` (or the first `examples` entry), otherwise the required
+body properties' own `example` values. An endpoint whose params are all
+optional — the common "pass one of `channelId` / `handle` / `url`" shape —
+otherwise advertises a bare command the API rejects with a 4xx. That broken
+example also fails the live-dogfood happy-path and json-fidelity probes, which
+run the Example verbatim. `pp:happy-args` is a separate surface and is not
+filled from the request-body example.
+
+Parsed field: `Endpoint.Example` (the same field the internal YAML spec sets via
+`example:`).
+
+Rules:
+- Optional. Endpoints without `x-pp-example` keep a synthesized Example.
+  Operations that already have parameter examples keep that synthesis.
+  Body-only operations use the request-body example described above.
+- Operation-level only. The value is the full invocation including the binary
+  name (`<api-slug>-pp-cli <command> <args>`); the parser normalizes it to the
+  canonical two-space indent on each line, so authors may omit the leading
+  spaces.
+- Use it instead of marking a param `required` to force it into the example —
+  marking it required would also make the generated CLI flag mandatory, which a
+  one-of endpoint must not be.
+- Whitespace-only values are ignored (treated as absent); non-string values warn
+  and are ignored.
+
+Example:
+
+```yaml
+paths:
+  /v1/youtube/channel:
+    get:
+      operationId: getYoutubeChannel
+      x-pp-example: "scrape-creators-pp-cli youtube list-channel --handle mkbhd"
+      parameters:
+        - { name: channelId, in: query, required: false, schema: { type: string } }
+        - { name: handle, in: query, required: false, schema: { type: string } }
+        - { name: url, in: query, required: false, schema: { type: string } }
+```
+
+### `x-pp-response-envelope`
+
+Declares the exact top-level key used by an API's single-key JSON response
+wrapper, such as `result` in `{"result": {"items": [...]}}`. The generated
+client removes that wrapper before the response reaches commands, pagination,
+or sync. This is opt-in because a top-level key can also be part of a
+legitimate payload.
+
+Parsed field: `APISpec.ResponseEnvelopeKey`
+
+Rules:
+- Optional. Specs without this extension keep the response body unchanged.
+- Declared at the OpenAPI root or under `info`.
+- Must be a string; surrounding whitespace is trimmed.
+- Unwrapping applies only to successful JSON responses whose body is an object
+  with exactly one property matching the configured key. Other bodies pass
+  through unchanged.
+
+Example:
+
+```yaml
+x-pp-response-envelope: result
+```
+
+### `x-pp-query`
+
+Declares the SQL-query-endpoint sync shape (QuickBooks Online, Salesforce SOQL):
+an API where every list resource is read through one shared endpoint with an
+injected `SELECT`-style query, results wrapped in an entity-named envelope, and
+paging carried inside the query text. Mirrors the internal YAML spec's top-level
+`query_sync:` block. When present, the sync generator emits the query injection,
+the response-envelope unwrap, and the in-query offset-paging loop **by
+construction** — gated so a normal REST list API's generated output is
+byte-identical to today.
+
+Parsed field: `APISpec.QuerySync` (`spec.QuerySyncConfig`)
+
+Rules:
+- Optional. Specs without `x-pp-query` keep today's REST sync behavior exactly.
+- Declared at the OpenAPI root (the internal YAML form lives in the top-level
+  `query_sync:` block). All query dialect text lives in the hint, never the
+  generator — the template substitutes the `{entity}`, `{start}`, and `{limit}`
+  placeholders at runtime.
+- A resource participates only when its list endpoint's path equals `path` AND
+  it declares a `response_path` (e.g. `QueryResponse.<Entity>`); the per-resource
+  entity name is taken from that endpoint's response item (e.g. `Invoice`). Raw
+  passthrough resources on the same path with no `response_path` are skipped.
+- Fields: `path` (required, the shared query endpoint, e.g. `/query`);
+  `query_param` (the param carrying the SELECT, default `query`);
+  `query_template` (required, the SELECT + paging clause with
+  `{entity}`/`{start}`/`{limit}` placeholders); `version_param` + `version_value`
+  (an optional extra param sent on every query call); `envelope_key` (the
+  result-envelope object key joined to the runtime extractor list, e.g.
+  `QueryResponse`); `page_size` (in-query page size and offset stride, default
+  `1000`).
+
+Example:
+
+```yaml
+x-pp-query:
+  path: /query
+  query_param: query
+  query_template: "select * from {entity} startposition {start} maxresults {limit}"
+  version_param: minorversion
+  version_value: "75"
+  envelope_key: QueryResponse
+  page_size: 1000
+```
+
 ### `x-tenant-env-var`
 
 Declares the env-var name that resolves the implicit `{tenant}` path
@@ -343,9 +544,19 @@ Parsed fields: `APISpec.EndpointTemplateVars` (`tenant` added),
 Rules:
 - Optional. Specs without `x-tenant-env-var` keep single-tenant behavior;
   no `{tenant}`-aware emission, no spurious env reads.
-- Declared under `info` only (path-positional templates are spec-wide).
+- Accepted at the document root or under `info` (path-positional templates
+  are spec-wide either way); the root value wins when both are set. Press
+  operators commonly place this at the document root, so the parser must
+  accept it there — an info-only reader silently drops the extension, and
+  the affected print loses tenant-aware `sync`, `config.go`, and `url.go`
+  emission with no error, only a `sync` warning at runtime that reads like
+  a resource-specific problem.
 - Value must be a non-empty string after `TrimSpace`. Whitespace-only
   values are treated as absent.
+- In a multi-spec print the binding merges across every contributing spec,
+  so the `{tenant}` wiring survives the merge; when two specs bind
+  `{tenant}` to different env-var names the merge warns on stderr naming
+  both specs and keeps the first spec's name.
 - The placeholder name is `tenant`. Specs that use a different
   placeholder (`{workspace}`, `{org}`) should set
   `EndpointTemplateVars` + `EndpointTemplateEnvOverrides` directly in
@@ -381,6 +592,84 @@ info:
   x-tenant-env-var: ST_TENANT_ID
 ```
 
+### `x-pp-tenant-scope-column`
+
+Declares, on a collection's list path-item, the column or field name that
+identifies the tenant (e.g. workspace) scope for each row returned by that
+collection. It is self-declaring: the annotated collection's own rows carry
+this column. Use it on list path-items whose synced rows are partitioned by a
+workspace or organization identifier.
+
+Parsed field: `Endpoint.TenantScopeColumn`
+
+The value flows into the resource profile and is consumed in two places:
+- **Tenant-scoped dependent fan-out** (parent tables): a parent collection
+  carrying a tenant column is surfaced via `APIProfile.TenantScopedParents()`
+  into the generated `parentTenantScopeColumns` map, so dependent fan-out
+  targets only rows belonging to the active tenant.
+- **Flat tenant-scoped reconcile**: a flat resource becomes reconcilable
+  (`ReconcileMode = "flat"`) when it carries a tenant column, has a
+  stable primary key, and is not routed through a discriminator dispatcher.
+- **Single-tenant whole-table reconcile**: when a print has zero
+  `TenantScopeColumn` annotations, eligible flat resources (stable PK, no
+  discriminator) are classified `ReconcileMode = "flat_global"` and the
+  table is the partition. Unscoped resources in a mixed print stay `"none"`.
+
+Rules:
+- Optional. Absence means no tenant scoping is recorded for the collection.
+- Placed on the list path-item object (same level as `get:`, `post:`, etc.),
+  not on an individual operation.
+- Must be a string naming the response field that holds the tenant scope
+  (e.g. `workspace`, `workspace_slug`, `org_id`); non-string values are
+  ignored with a warning.
+- The field names the foreign-key column whose values identify tenant
+  boundaries in the synced rows.
+
+Example:
+
+```yaml
+paths:
+  /projects/:
+    x-pp-tenant-scope-column: workspace
+    get:
+      operationId: list_projects
+      summary: List or retrieve projects
+```
+
+### `x-pp-membership-field`
+
+Declares, on a parent collection's list path-item, the boolean field in that
+collection's own row payload that indicates whether the authenticated user is a
+member of the resource (e.g. `is_member`). Dependent fan-out over the parent
+table skips rows whose field is false — their sub-resources would 403 — so a
+sync reports one clear "not a member" summary instead of a 403 per
+(sub-resource, parent).
+
+Parsed field: `Endpoint.MembershipField`
+
+Rules:
+- Optional. Absence means no membership filtering is recorded.
+- Placed on the list path-item object (same level as `get:`, `post:`, etc.),
+  not on an individual operation.
+- Must be a string naming a boolean field in the row payload; non-string
+  values are ignored with a warning.
+- The field name must be a simple identifier (`^[a-zA-Z_][a-zA-Z0-9_]*$`). It
+  is interpolated into the generated store's non-member query, so dotted or
+  nested-path field names are rejected at runtime and the membership skip
+  becomes a no-op rather than filtering rows.
+- Consumed by the profiler when building dependent-sync resource metadata.
+
+Example:
+
+```yaml
+paths:
+  /workspaces/:
+    x-pp-membership-field: is_member
+    get:
+      operationId: list_workspaces
+      summary: List workspaces
+```
+
 ### `x-path-template-env-vars`
 
 Generic, map-shaped successor to `x-tenant-env-var`. Each entry binds a
@@ -404,7 +693,9 @@ the same 80% common-path promotion rule.
 Rules:
 - Optional. Specs without this extension keep prior behavior; the new
   field stays empty and no generated output changes.
-- Declared under `info` only (path-positional templates are spec-wide).
+- Accepted at the document root or under `info` (path-positional templates
+  are spec-wide either way); the root value wins when both are set. Same
+  root-or-info lookup as `x-tenant-env-var`.
 - Coexists with `x-tenant-env-var`; both feed the same template-vars
   bucket. The `tenant` placeholder may be set by either extension.
 - `env` and `default` values must be non-empty after `TrimSpace`.
@@ -523,6 +814,36 @@ components:
       x-prefix: Klaviyo-API-Key
 ```
 
+### `x-auth-basic-username` / `x-auth-basic-password`
+
+Declares the literal username or password half for HTTP Basic auth schemes
+where only the other half should be supplied by the user.
+
+Parsed field: `APISpec.Auth.Format`
+
+Rules:
+- Optional.
+- Only read for OpenAPI `http` security schemes with `scheme: basic`.
+- Must be a string.
+- Leading and trailing whitespace is trimmed.
+- When only `x-auth-basic-username` is present, the parser stores
+  `"Basic <username>:{token}"` in `Auth.Format`.
+- When only `x-auth-basic-password` is present, the parser stores
+  `"Basic {token}:<password>"` in `Auth.Format`.
+- If both are present or both are absent, the normal Basic auth format remains
+  `"Basic {username}:{password}"`.
+
+Example:
+
+```yaml
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      x-auth-basic-username: API_KEY
+```
+
 ### `x-auth-env-vars`
 
 Overrides the generated credential environment variable names.
@@ -544,15 +865,6 @@ Rules:
 - If a sibling apiKey/header scheme omits `x-auth-env-vars` and `x-auth-vars`,
   the parser derives a required per-call env var from the API slug and header
   name, for example `DISPATCH_ST_APP_KEY` for `ST-App-Key`.
-
-Catalog-driven equivalent: when a catalog entry declares `auth_env_vars`, the
-generator layers the canonical names on top of the parser-derived default at
-runtime without editing the upstream spec. The catalog list takes precedence,
-the parser default trails as a backwards-compat fallback, and the rebuilt env
-var list is emitted as an OR-case (any one satisfies auth). The catalog field
-is ignored for HTTP Basic auth (credential-pair shape); declare basic-auth
-env var pairs via `x-auth-env-vars` on the security scheme instead. See
-[`docs/CATALOG.md`](CATALOG.md#auth_env_vars).
 
 ### `x-auth-vars`
 
@@ -632,12 +944,18 @@ Rules:
 - The parser does not validate the URL shape.
 
 When the extension is absent and the spec has any auth, the parser falls back
-through the following sources in order and uses the first plausible HTTPS URL:
+through the following sources in order:
 
 1. The selected security scheme's `description` (extracted via regex).
 2. `info.description`, but only when the surrounding text mentions
    credential-related cues (`token`, `api key`, `credential`, `register`,
    `sign up`, etc.) so an unrelated URL doesn't get picked.
+
+Within either description, generic protocol references such as MDN, RFC/IETF,
+HTTPWG, and Wikipedia links are ignored. A clear credential-management surface
+(`console`, `dashboard`, `api-keys`/`apikeys`, or `settings/integrations`) wins
+over an earlier neutral URL; otherwise the first accepted non-generic URL is
+kept as the fallback.
 
 `externalDocs.url` and `info.contact.url` are intentionally **not** fallbacks
 for `KeyURL`. Those almost always point at the API's docs landing page or the
@@ -646,9 +964,8 @@ When `KeyURL` ends up empty, the printed CLI uses `WebsiteURL` (already
 populated from `externalDocs.url`, `info.contact.url`, and `x-website`) under
 a separate `See API docs: <URL>` line — honest framing for those URLs.
 
-Catalog YAML's `auth_key_url:` (see [`CATALOG.md`](CATALOG.md)) overrides the
-inference. The result drives the printed CLI's `Get a key at: <URL>` output in
-auth prompts and `doctor`.
+The result drives the printed CLI's `Get a key at: <URL>` output in auth
+prompts and `doctor`.
 
 ### `x-auth-instructions`
 
@@ -664,8 +981,6 @@ Rules:
 - Leading and trailing whitespace is trimmed.
 - Use this when `x-auth-key-url` lands on a docs page rather than the keys UI;
   the URL says where to start, the instruction says what to do once there.
-
-Catalog YAML's `auth_instructions:` overrides any spec-supplied value.
 
 ### `x-auth-title`
 
@@ -715,12 +1030,13 @@ components:
 ### `x-auth-subtype`
 
 Refines `Auth.Type` for runtime flows that need a different credential-capture
-path than the base type implies. Today the only recognized value is
-`auth0_spa_in_memory`: a bearer-token spec whose access token is held by the
-Auth0 SPA SDK with `cacheLocation: memory`. Cookie/localStorage extractors have
-no path to such a token (it lives in JS heap only), so the generator emits a
-`--auth0-spa` flag on `auth login --chrome` that drives a Chrome DevTools
-Protocol outbound-Authorization interceptor instead.
+path than the base type implies. Recognized values include
+`google_service_account`, which selects the generated Google service-account
+JWT bearer exchange scaffold, and `auth0_spa_in_memory`, a bearer-token spec
+whose access token is held by the Auth0 SPA SDK with `cacheLocation: memory`.
+Cookie/localStorage extractors have no path to the latter token (it lives in JS
+heap only), so the generator emits a `--auth0-spa` flag on `auth login --chrome`
+that drives a Chrome DevTools Protocol outbound-Authorization interceptor.
 
 Parsed field: `APISpec.Auth.Subtype`
 
@@ -728,9 +1044,13 @@ Rules:
 
 - Optional.
 - Must be a string.
-- Recognized values: `auth0_spa_in_memory`. Other values are silently dropped
+- Recognized values: `google_service_account`, `auth0_spa_in_memory`. Other values are silently dropped
   by the parser; the in-spec value never round-trips unless it matches a known
   subtype.
+- `google_service_account` is valid only with a bearer-token auth type. It
+  emits `auth service-account`, accepts a service-account JSON key through
+  `GOOGLE_APPLICATION_CREDENTIALS`, and supports a pre-minted bearer override
+  through `GOOGLE_OAUTH_ACCESS_TOKEN`.
 - Spec-level validation rejects `auth.subtype: auth0_spa_in_memory` paired with
   any non-empty `auth.type` other than `bearer_token`. Auth0 SPA tokens are
   always Authorization-bearer values; combining the subtype with `api_key` or
@@ -1096,11 +1416,48 @@ Parsed field: `Endpoint.IDField`
 
 Rules:
 - Optional.
-- Must be a string.
+- Must be a string. A dotted path (`entityInfo.entityId`) is stored verbatim
+  and walked at runtime by `LookupFieldValue`; it is not limited to a
+  single top-level key. A `+`-separated list (`date+model_permaslug`) is a
+  composite identity: generated `ExtractResourceID` joins the part values
+  with `+` at storage time. Date-shaped parts are allowed inside a
+  composite; a solo date field is not, because `CanonicalResourceID`
+  rejects ISO-date values.
 - Leading and trailing whitespace is trimmed.
 - Non-string values emit a warning and are ignored.
-- An empty or missing value falls through to the parser's response-schema
-  fallback chain: `id`, then `name`, then the first required scalar field.
+- A non-empty `x-resource-id` wins over every automatic response-schema
+  fallback.
+- An empty or missing value falls through to the parser's automatic
+  `resolveIDFieldFromResponseSchema` chain: bare `id`; then a resource-derived
+  singular key ending in `_id`, `_uuid`, `_guid`, or `_uid` (matched through
+  snake-case normalization, so camelCase and PascalCase spellings such as
+  `widgetId` are preserved when emitted); then vendor identifier keys `gid`,
+  `sid`, `uid`, `uuid`, and `guid`; then a sole remaining `<stem>_uid` /
+  camelCase `stemUid` field whose stem is the resource's own collection noun
+  (so `alertUid` matches `account-alerts-open`, while a foreign `accountUid`
+  on `/sites` falls through; two own-stem spellings stay ambiguous); then
+  URL-shaped
+  identifier keys `uri`, `self`, `selfLink`, `href`, and `url`; then `name`;
+  then the first solo-usable required scalar. A date-shaped required field
+  (OpenAPI `format: date` / `date-time`, a date-like name such as `date` /
+  `created_at`, or an ISO-date example) is never selected as a solo IDField:
+  if later required identity fields exist (string or numeric, excluding
+  mutable/metric names such as `status` or `total_tokens`), they are joined
+  with `+` as a composite identity; otherwise IDField stays empty so runtime
+  fallbacks apply. Generated `ExtractResourceID` joins part *values* with `+`
+  after escaping `\` and `+` inside each part so distinct tuples cannot
+  collide. Date-shaped parts are allowed inside a
+  composite; a solo date field is not, because `CanonicalResourceID`
+  rejects ISO-date values. URL-shaped keys qualify only
+  when the field schema is a plausible ID and either the field is required or
+  its name, title, description, or format carries an identifier hint; an
+  optional generic `url` therefore falls through to `name`.
+- URL-shaped keys intentionally trail id-shaped keys, so APIs that expose both
+  `id` and `self` keep the compact primary key.
+- Qualified URL-shaped keys intentionally win over display `name` when no
+  id-shaped key is available. A resource URL or URI is usually record-unique,
+  while display names can collide; keying on `name` would collapse two records
+  with the same display label into one local row.
 - Applies to every operation on the path item.
 
 Example:
@@ -1115,6 +1472,52 @@ paths:
         "200":
           description: OK
 ```
+
+Nested identifiers use the same extension with a dotted path. Generated
+`LookupFieldValue` walks each segment with snake/camel/Pascal spellings and
+a trailing-underscore variant, so `entityInfo.entityId` reaches a payload
+shaped like `{"entityInfo":{"entityId":"..."}}` without a hand-written
+override:
+
+```yaml
+paths:
+  /entities:
+    x-resource-id: entityInfo.entityId
+    get:
+      operationId: listEntities
+      responses:
+        "200":
+          description: OK
+```
+
+Composite identities use the same extension with `+`-separated field names.
+Generated extraction joins the part values with `+` so a date-shaped column
+can participate in the row key without becoming a solo ID:
+
+```yaml
+paths:
+  /datasets/rankings-daily:
+    x-resource-id: date+model_permaslug
+    get:
+      operationId: listRankingsDaily
+      responses:
+        "200":
+          description: OK
+```
+
+Generated dependent sync uses the resolved resource ID field when substituting
+parent IDs into child path parameters. When the resolved ID field is URL-shaped
+(`uri`, `self`, `selfLink`, `href`, or `url`), generated
+`replaceURLIDPathParam` reduces a full URL value to its trailing path segment
+before normal path escaping. This is intentional: dependent fetches whose
+upstream path expects `{id}` must not send a full URL as that path segment. Do
+not restore scheme, host, query, or earlier path components in generated path
+params.
+
+`store.BareResourceID` is a separate storage-key helper for stripping the
+NUL-delimited parent suffix from composite dependent-resource storage IDs. It is
+not part of response-schema identity selection and should not be changed to
+alter URL-shaped record identity behavior.
 
 ### `x-critical`
 
@@ -1146,6 +1549,82 @@ paths:
       responses:
         "200":
           description: OK
+```
+
+### `x-pp-syncable`
+
+Opts a list endpoint into generated default sync even when the profiler would
+normally exclude it because required path or query parameters are not
+automatically satisfiable.
+
+Parsed field: `Endpoint.Syncable`
+
+Rules:
+- Optional.
+- Defaults to `false`.
+- Accepts native booleans.
+- May be set on a path item or a single operation.
+- Use only when required inputs are supplied by defaults, endpoint template
+  variables, or another generated runtime mechanism.
+
+Example:
+
+```yaml
+paths:
+  /tenant/{tenant_id}/items:
+    get:
+      operationId: listTenantItems
+      x-pp-syncable: true
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+```
+
+### `x-pp-mutation`
+
+Overrides the generator's read/write classification when the HTTP method is
+not enough. `true` marks a GET action as state-changing (start, stop, restart,
+deploy). `false` marks a POST (or other non-GET) endpoint as a read so the
+generated command prints the response body instead of the mutation
+acknowledgment envelope. Unset RPC-over-GET operations without a read token
+fail closed (not `mcp:read-only`).
+
+Parsed field: `Endpoint.Mutation`
+
+Rules:
+- Optional.
+- Unset means classify from the HTTP verb, operation name, path shape, and body shape. RPC-over-GET without a read signal is a write.
+- Must be a native boolean.
+- Applies only at the operation level.
+- When set, the generator uses this value before HTTP-verb and operation-name
+  fallbacks. Do not infer reads from filter-shaped parameter names alone;
+  use this flag or a read-shaped operation name (`search`, `list`, `query`).
+- Internal YAML uses the same boolean as `mutation:`.
+
+Example:
+
+```yaml
+paths:
+  /applications/{id}/restart:
+    get:
+      operationId: restartApplication
+      x-pp-mutation: true
+      responses:
+        "204":
+          description: Restarted
+  /sets/items:
+    post:
+      operationId: projectItems
+      x-pp-mutation: false
+      responses:
+        "200":
+          description: Matched rows
 ```
 
 ### `x-tier`
@@ -1208,6 +1687,44 @@ paths:
         "200": {description: ok}
 ```
 
+### `x-live-dogfood-requires-tier`
+
+Declares the runner credential tier required before `cli-printing-press dogfood
+--live` should probe an endpoint.
+
+Parsed field: `Endpoint.LiveDogfoodRequiresTier`
+
+Rules:
+- Optional.
+- May be declared on a path item or operation.
+- Operation-level values override path-item-level values.
+- Must be a string; non-string values are ignored with a warning.
+- This is dogfood-only. It does not select an upstream auth route and should
+  not be confused with `x-tier`.
+- When absent, the parser may infer `streaming` for obvious `GET` streaming
+  endpoints such as paths ending in `/stream` or responses with
+  `text/event-stream`.
+
+The generator emits the value as the Cobra annotation `pp:requires-tier`.
+Live dogfood skips annotated commands unless `--auth-tier` or `PP_AUTH_TIER`
+matches the value.
+
+Example:
+
+```yaml
+paths:
+  /2/tweets/firehose/stream:
+    get:
+      x-live-dogfood-requires-tier: enterprise
+      responses:
+        "200":
+          description: Streaming response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+```
+
 ### `x-requires-role`
 
 Requires the authenticated account to have one of the declared `x-roles` before
@@ -1263,6 +1780,41 @@ paths:
         "200": {description: ok}
 ```
 
+### `x-pp-pagination`
+
+Overrides pagination detection for one GET operation.
+
+Parsed field: `Endpoint.Pagination`
+
+Rules:
+- Optional.
+- Must be on an operation, not the root, `info`, or path item.
+- Must be a string.
+- Accepted value: `none`.
+- `none` tells generated sync not to send inferred cursor, page, offset, or
+  page-size query parameters for this endpoint, even when the operation exposes
+  page-looking filters such as `page`, `page_size`, or `limit`.
+- Use for list endpoints that return the whole collection in one response and
+  reject pagination keys as invalid filters.
+- Unsupported values emit a warning and fall back to normal pagination
+  detection.
+
+Example:
+
+```yaml
+paths:
+  /ip_addresses:
+    get:
+      operationId: listIPAddresses
+      x-pp-pagination: none
+      parameters:
+        - name: page_size
+          in: query
+          schema: {type: integer}
+      responses:
+        "200": {description: ok}
+```
+
 ### `x-pp-safe-probe`
 
 Marks a mutation endpoint as explicitly safe for the Phase 1.9 reachability gate
@@ -1295,9 +1847,11 @@ paths:
 ### `x-happy-args`
 
 Declares live-dogfood happy-path fixture arguments for one operation. Use it
-when generic synthesized inputs cannot satisfy the endpoint contract, such as a
-search endpoint that requires `q` or a lookup endpoint that requires one of
-several conditional query flags.
+when generate-time synthesis cannot satisfy the endpoint contract: the generator
+already emits `pp:happy-args` from parameter `example`, `enum`, `default`, and
+`format` when every required input is derivable. Keep the extension for opaque
+IDs, coordinates with no schema hint, or conditional query flags that generic
+values cannot satisfy.
 
 Parsed field: `Endpoint.HappyArgs`
 
@@ -1306,8 +1860,13 @@ Rules:
 - Must be on an operation, not the root, `info`, or path item.
 - Must be a string in the runtime annotation format consumed by
   `pp:happy-args`.
-- Tokens are semicolon-separated. `<label>=value` overlays synthesized
-  positional args, and `--flag=value` overlays or adds flag/value pairs.
+- Tokens are separated by unescaped semicolons. Escape a literal semicolon as
+  `\;` (write `\\;` inside a YAML double-quoted string). `<label>=value`
+  or `label=value` overlays synthesized positional args, `--flag=value` replaces the
+  matching example flag or adds a new flag/value pair, and bare `--flag`
+  tokens are treated as boolean `--flag=true`.
+- Negative numeric flag values are emitted in `--flag=-12.3` form so Cobra
+  does not parse the value as a shorthand flag cluster.
 - Empty or whitespace-only values behave the same as absence.
 
 Example:
@@ -1318,6 +1877,33 @@ paths:
     get:
       operationId: listReferents
       x-happy-args: "--song-id=378195"
+      responses:
+        "200": {description: ok}
+```
+
+### `x-happy-stdin`
+
+Declares a JSON request-body fixture for a live-dogfood command that reads its
+input from stdin. The generator emits the fixture as the `pp:happy-stdin`
+annotation, and the matrix pipes it to both the happy-path and JSON-fidelity
+probes.
+
+Parsed field: `Endpoint.HappyStdin`
+
+Rules:
+- Optional.
+- Must be on an operation, not the root, `info`, or path item.
+- Must be a string containing valid JSON.
+- Commands that require stdin but do not declare this fixture are skipped with
+  reason `no-stdin-fixture`; the runner never synthesizes a request body.
+
+Example:
+
+```yaml
+paths:
+  /widgets/inspect:
+    post:
+      x-happy-stdin: '{"name":"synthetic"}'
       responses:
         "200": {description: ok}
 ```
@@ -1353,11 +1939,14 @@ Rules:
 - `key_field` (string, optional): the field to extract from each parent
   record for substitution into the child path. Defaults to the parent's
   primary key. Set this when the child path needs a non-PK field.
-- `key_param` (string, optional): the placeholder name in the child path
-  that receives the extracted value. Defaults to the first (and only)
-  `{placeholder}` in the child path when there is exactly one. **Required
-  explicitly when the child path has 0 or 2+ placeholders** — the
-  single-placeholder default would otherwise pick the wrong slot (or no
+- `key_param` (string, optional): the child request slot that receives the
+  extracted value. When that name is a `{placeholder}` in the child path,
+  generated sync substitutes it into the URL. When it is not — a query
+  parameter such as `GET /messages?roomId=` — generated sync writes the
+  parent-row value into the request `params` map. Defaults to the first
+  (and only) `{placeholder}` in the child path when there is exactly one.
+  **Required explicitly when the child path has 0 or 2+ placeholders** —
+  the single-placeholder default would otherwise pick the wrong slot (or no
   slot at all). The generator warns and drops the walker when it's ambiguous
   and `key_param` is missing.
 - Walker-emitted dependents flow through the same `syncDependentResource`
@@ -1389,6 +1978,73 @@ paths:
           in: path
           required: true
           schema: {type: string}
+      responses:
+        "200": {description: ok}
+  /standings:
+    get:
+      summary: List standings for a game (query-param parent key)
+      x-pp-sync-walker:
+        parent: games
+        key_field: game_key
+        key_param: gameId
+      parameters:
+        - name: gameId
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: ok}
+```
+
+### `x-sync-params`
+
+Query parameters applied **only** during generated sync. List/get endpoint
+commands keep the API's documented defaults; sync uses these values so a
+naive sync does not treat a default-filtered slice (`status=open`,
+`state=open`) as the complete resource.
+
+Parsed field: `Endpoint.SyncParams`
+
+Rules:
+- Optional. Absent the field, generated sync still auto-widens a
+  `status`/`state` query param whose spec `default:` is `open` when the
+  param's enum includes `all` (preferred) or `any`. That is the GitHub
+  issues / Alpaca orders / Shopify orders idiom. Other defaults (tenant
+  scope, sort, `include_*`) are not widened.
+- Operation-level only.
+- Must be an object mapping parameter names to string values. Non-string
+  values are stringified. Empty names or values are skipped. Malformed
+  values warn and are ignored rather than failing the parse.
+- Overlay order: spec `default:` (with history-hiding widen) first, then
+  `x-sync-params`, then user `--param` / `--resource-param` at runtime.
+  Sync-owned paging/since/sort keys are skipped, same as spec defaults.
+- An explicit `x-sync-params` entry for a key suppresses auto-widen for
+  that key, including `status: open` when the intended sync scope really
+  is the open slice.
+- When a resource still has an unwidened `status`/`state=open` default
+  (no `all`/`any` in the enum and no overlay) and sync stores 0 rows,
+  generated sync emits `sync_warning` with reason
+  `default_filter_hides_history` instead of silent success-with-zero.
+
+Internal YAML emits this as `sync_params:` on the endpoint with the same
+map shape.
+
+Example:
+
+```yaml
+paths:
+  /v2/orders:
+    get:
+      summary: List orders
+      x-sync-params:
+        status: all
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            default: open
+            enum: [open, closed, all]
       responses:
         "200": {description: ok}
 ```

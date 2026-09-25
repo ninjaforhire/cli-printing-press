@@ -54,7 +54,7 @@ func TestBinaryResponseHeaderBypassesJSONCache(t *testing.T) {
 	if seen != 3 {
 		t.Fatalf("server saw %d requests, want 3 because binary responses bypass cache reads and writes", seen)
 	}
-	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "*.json")); err != nil {
+	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "resources", "*", "*.json")); err != nil {
 		t.Fatalf("glob cache files: %v", err)
 	} else if len(matches) != 0 {
 		t.Fatalf("binary response wrote JSON cache files: %v", matches)
@@ -90,7 +90,7 @@ func TestConfigBinaryResponseHeaderBypassesJSONCache(t *testing.T) {
 	if seen != 3 {
 		t.Fatalf("server saw %d requests, want 3 because config binary responses bypass cache", seen)
 	}
-	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "*.json")); err != nil {
+	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "resources", "*", "*.json")); err != nil {
 		t.Fatalf("glob cache files: %v", err)
 	} else if len(matches) != 0 {
 		t.Fatalf("config binary response wrote JSON cache files: %v", matches)
@@ -127,10 +127,34 @@ func TestCaseVariantBinaryResponseHeadersAreDeterministic(t *testing.T) {
 	if seen != 2 {
 		t.Fatalf("server saw %d requests, want 2 because case-variant binary headers bypass cache", seen)
 	}
-	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "*.json")); err != nil {
+	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "resources", "*", "*.json")); err != nil {
 		t.Fatalf("glob cache files: %v", err)
 	} else if len(matches) != 0 {
 		t.Fatalf("case-variant binary response wrote JSON cache files: %v", matches)
+	}
+}
+
+func TestUnwrapBinaryResponse(t *testing.T) {
+	raw := []byte{0x1f, 0x8b, 0x08, 0x00}
+	env, err := wrapBinaryResponse("application/octet-stream", raw)
+	if err != nil {
+		t.Fatalf("wrapBinaryResponse: %v", err)
+	}
+	got, ct, ok := UnwrapBinaryResponse(env)
+	if !ok {
+		t.Fatal("UnwrapBinaryResponse returned ok=false for a wrapped envelope")
+	}
+	if ct != "application/octet-stream" {
+		t.Fatalf("content type = %q, want application/octet-stream", ct)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("unwrapped bytes = %q, want %q", got, raw)
+	}
+	if _, _, ok := UnwrapBinaryResponse([]byte(` + "`" + `{"ok":true}` + "`" + `)); ok {
+		t.Fatal("UnwrapBinaryResponse returned ok=true for ordinary JSON")
+	}
+	if _, _, ok := UnwrapBinaryResponse(raw); ok {
+		t.Fatal("UnwrapBinaryResponse returned ok=true for raw bytes")
 	}
 }
 
@@ -155,7 +179,7 @@ func TestJSONResponseStillUsesJSONCache(t *testing.T) {
 	if seen != 1 {
 		t.Fatalf("server saw %d requests, want 1 because JSON response should be cached", seen)
 	}
-	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "*.json")); err != nil {
+	if matches, err := filepath.Glob(filepath.Join(c.cacheDir, "resources", "*", "*.json")); err != nil {
 		t.Fatalf("glob cache files: %v", err)
 	} else if len(matches) != 1 {
 		t.Fatalf("JSON response wrote %d cache files, want 1: %v", len(matches), matches)

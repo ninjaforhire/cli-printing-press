@@ -134,4 +134,45 @@ func TestArgsAfterBinary(t *testing.T) {
 	if _, err := ArgsAfterBinary("cli"); err == nil {
 		t.Fatal("expected missing subcommand error")
 	}
+
+	got, err = ArgsAfterBinary(`QUERY="$(cat /path/to/question.txt)" cli teach --query "$QUERY"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"teach", "--query", "$QUERY"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ArgsAfterBinary(env prefix) = %#v, want %#v", got, want)
+	}
+
+	got, err = ArgsAfterBinary(`QUERY="$(cat /path/to/question.txt)" NOTE="$(cat /path/to/note.txt)" cli playbook amend --query "$QUERY" --add-note "$NOTE"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"playbook", "amend", "--query", "$QUERY", "--add-note", "$NOTE"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ArgsAfterBinary(two env prefixes) = %#v, want %#v", got, want)
+	}
+}
+
+func TestJoinRoundTripsTokens(t *testing.T) {
+	tokens := []string{
+		"cli",
+		"inspect",
+		"--query",
+		"weekly digest",
+		"--literal",
+		"it's ready",
+		"",
+		"#tag",
+		"<id>",
+	}
+
+	joined := Join(tokens)
+	got, err := Split(joined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, tokens) {
+		t.Fatalf("Split(Join()) = %#v, want %#v; joined = %q", got, tokens, joined)
+	}
 }

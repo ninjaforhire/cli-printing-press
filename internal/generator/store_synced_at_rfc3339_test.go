@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestSyncedAtIsSQLiteStrftimeParseable(t *testing.T) {
@@ -86,6 +87,59 @@ func TestSyncedAtIsSQLiteStrftimeParseable(t *testing.T) {
 	}
 	if count != 5 {
 		t.Fatalf("GetSyncState count = %d, want 5", count)
+	}
+
+	watermark := time.Date(2026, 5, 17, 2, 24, 0, 0, time.UTC)
+	if err := s.SaveSyncStateAt("items", "cursor-watermark", 6, watermark); err != nil {
+		t.Fatalf("SaveSyncStateAt error: %v", err)
+	}
+	if err := s.SaveSyncProgress("items", "cursor-progress", 7); err != nil {
+		t.Fatalf("SaveSyncProgress error: %v", err)
+	}
+	cursor, progressSyncedAt, progressCount, err := s.GetSyncState("items")
+	if err != nil {
+		t.Fatalf("GetSyncState after SaveSyncProgress error: %v", err)
+	}
+	if cursor != "cursor-progress" || progressCount != 7 {
+		t.Fatalf("progress state = cursor %q, count %d; want cursor-progress, 7", cursor, progressCount)
+	}
+	if !progressSyncedAt.Equal(watermark) {
+		t.Fatalf("SaveSyncProgress rewrote watermark to %v, want %v", progressSyncedAt, watermark)
+	}
+
+	if err := s.SaveSyncProgress("new-items", "cursor-new", 1); err != nil {
+		t.Fatalf("SaveSyncProgress new resource error: %v", err)
+	}
+	_, newSyncedAt, _, err := s.GetSyncState("new-items")
+	if err != nil {
+		t.Fatalf("GetSyncState new resource error: %v", err)
+	}
+	if !newSyncedAt.IsZero() {
+		t.Fatalf("new resource progress watermark = %v, want zero time", newSyncedAt)
+	}
+
+	if err := s.SaveSyncCursor("items", "cursor-next"); err != nil {
+		t.Fatalf("SaveSyncCursor error: %v", err)
+	}
+	var rawLastSynced string
+	if err := s.DB().QueryRow(
+		"SELECT last_synced_at FROM sync_state WHERE resource_type = ?",
+		"items",
+	).Scan(&rawLastSynced); err != nil {
+		t.Fatalf("raw last_synced_at scan error: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, rawLastSynced); err != nil {
+		t.Fatalf("SaveSyncCursor wrote non-RFC3339 last_synced_at %q: %v", rawLastSynced, err)
+	}
+	cursor, cursorSyncedAt, _, err := s.GetSyncState("items")
+	if err != nil {
+		t.Fatalf("GetSyncState after SaveSyncCursor error: %v", err)
+	}
+	if cursor != "cursor-next" {
+		t.Fatalf("GetSyncState cursor = %q, want cursor-next", cursor)
+	}
+	if cursorSyncedAt.IsZero() {
+		t.Fatalf("GetSyncState after SaveSyncCursor returned zero time")
 	}
 }
 `), 0o644))

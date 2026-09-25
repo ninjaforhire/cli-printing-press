@@ -12,6 +12,7 @@ import (
 )
 
 func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
+	var flagXApiVersion string
 	var flagPriority string
 	var flagLimit int
 	var flagCursor string
@@ -21,11 +22,22 @@ func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
 		Use:         "list-project <projectId>",
 		Aliases:     []string{"get"},
 		Short:       "List project tasks",
-		Example:     "  printing-press-golden-pp-cli projects tasks list-project 550e8400-e29b-41d4-a716-446655440000",
 		Annotations: map[string]string{"pp:endpoint": "tasks.list-project", "pp:method": "GET", "pp:path": "/projects/{projectId}/tasks", "mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return cmd.Help()
+				// A missing required positional is a usage error in every output
+				// mode (matches command_promoted.go.tmpl). Machine callers
+				// (--json/--agent) also get a JSON error envelope on stdout;
+				// usageErr sets exit 2.
+				if flags.asJSON {
+					if printErr := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+						"error": "missing required argument",
+						"usage": fmt.Sprintf("%s%s", cmd.CommandPath(), " <projectId>"),
+					}, flags); printErr != nil {
+						return printErr
+					}
+				}
+				return usageErr(fmt.Errorf("missing required argument\nUsage: %s%s", cmd.CommandPath(), " <projectId>"))
 			}
 			if cmd.Flags().Changed("priority") {
 				allowedPriority := []string{"low", "normal", "high"}
@@ -40,21 +52,30 @@ func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
 					return fmt.Errorf("invalid value %q for --%s: must be one of %v", flagPriority, "priority", allowedPriority)
 				}
 			}
+			path := "/projects/{projectId}/tasks"
+			if len(args) < 1 || args[0] == "" {
+				return usageErr(fmt.Errorf("projectId is required\nUsage: %s <%s>", cmd.CommandPath(), "projectId"))
+			}
+			path = replacePathParam(path, "projectId", args[0])
 			c, err := flags.newClient()
 			if err != nil {
 				return err
 			}
+			headerOverrides := map[string]string{}
 
-			path := "/projects/{projectId}/tasks"
-			path = replacePathParam(path, "projectId", args[0])
-			data, prov, err := resolvePaginatedReadWithStrategy(cmd.Context(), c, flags, "auto", "tasks", path, map[string]string{
+			if cmd.Flags().Changed("x-api-version") || flagXApiVersion != "" {
+				headerOverrides["X-Api-Version"] = formatCLIParamValue(flagXApiVersion)
+			}
+
+			data, prov, err := resolvePaginatedReadWithStrategy(cmd.Context(), c, flags, "live", "tasks", path, retainCLIQueryParams(cmd, map[string]string{
 				"priority": formatCLIParamValue(flagPriority),
 				"limit":    formatCLIParamValue(flagLimit),
 				"cursor":   formatCLIParamValue(flagCursor),
-			}, nil, flagAll, "cursor", "cursor", "limit", "", "", cmd.ErrOrStderr())
+			}, map[string][]string{"priority": {"priority"}, "limit": {"limit"}, "cursor": {"cursor"}}, "cursor", "cursor"), headerOverrides, flagAll, "cursor", "cursor", "limit", 50, "", "", "", cmd.ErrOrStderr())
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
+			outputData := collectionItemsForOutput(data, path)
 			// Print provenance to stderr for human-facing output only.
 			// Machine-format flags (--json, --csv, --compact, --quiet, --plain,
 			// --select) and piped stdout suppress this line; the JSON envelope
@@ -62,7 +83,7 @@ func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
 			// SYNC: keep this gate aligned with command_promoted.go.tmpl.
 			if wantsHumanTable(cmd.OutOrStdout(), flags) {
 				var countItems []json.RawMessage
-				_ = json.Unmarshal(data, &countItems)
+				_ = json.Unmarshal(outputData, &countItems)
 				printProvenance(cmd, len(countItems), prov)
 			}
 			// For JSON output, wrap with provenance envelope before passing through flags.
@@ -71,22 +92,31 @@ func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
 			// --plain) opt out of the auto-JSON path so piped consumers that asked for
 			// a non-JSON format reach the standard pipeline below.
 			if flags.asJSON || (!isTerminal(cmd.OutOrStdout()) && !flags.csv && !flags.quiet && !flags.plain) {
+				var selectErr error
 				filtered := data
 				if flags.selectFields != "" {
-					filtered = filterFields(filtered, flags.selectFields)
+					filtered, selectErr = filterFieldsChecked(filtered, flags.selectFields)
+					selectErr = selectErrorForDryRun(selectErr, flags, data)
 				} else if flags.compact {
-					filtered = compactFields(filtered)
+					filtered = compactFields(filtered, map[string]bool{"due_at": true, "id": true, "priority": true, "project_id": true, "title": true})
 				}
 				wrapped, wrapErr := wrapWithProvenance(filtered, prov)
 				if wrapErr != nil {
 					return wrapErr
 				}
-				return printOutput(cmd.OutOrStdout(), wrapped, true)
+				wrapped, wrapErr = wrapPlatformStructuredOutput(wrapped, flags, "results", true)
+				if wrapErr != nil {
+					return wrapErr
+				}
+				if err := printOutput(cmd.OutOrStdout(), wrapped, true); err != nil {
+					return err
+				}
+				return selectErr
 			}
 			// For all other output modes (table, csv, plain, quiet), use the standard pipeline
 			if wantsHumanTable(cmd.OutOrStdout(), flags) {
 				var items []map[string]any
-				if json.Unmarshal(data, &items) == nil && len(items) > 0 {
+				if json.Unmarshal(outputData, &items) == nil && len(items) > 0 {
 					if err := printAutoTable(cmd.OutOrStdout(), items); err != nil {
 						return err
 					}
@@ -96,9 +126,14 @@ func newProjectsTasksListProjectCmd(flags *rootFlags) *cobra.Command {
 					return nil
 				}
 			}
-			return printOutputWithFlags(cmd.OutOrStdout(), data, flags)
+			formatData := data
+			if flags.csv || flags.plain {
+				formatData = outputData
+			}
+			return printOutputWithFlagsMeta(cmd.OutOrStdout(), formatData, flags, map[string]any{"source": "live"}, map[string]bool{"due_at": true, "id": true, "priority": true, "project_id": true, "title": true})
 		},
 	}
+	cmd.Flags().StringVar(&flagXApiVersion, "x-api-version", "2026-04-01", "Required API version header.")
 	cmd.Flags().StringVar(&flagPriority, "priority", "", "Priority (one of: low, normal, high)")
 	cmd.Flags().IntVar(&flagLimit, "limit", 50, "Limit")
 	cmd.Flags().StringVar(&flagCursor, "cursor", "", "Cursor")

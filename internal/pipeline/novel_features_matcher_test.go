@@ -177,6 +177,13 @@ func TestNovelFeatureDepthMismatch(t *testing.T) {
 			paths:   map[string]bool{},
 			want:    nil,
 		},
+		{
+			name:    "unrelated hyphenated leaf is not a depth mismatch",
+			command: "dns",
+			example: `godaddy-pp-cli dns`,
+			paths:   map[string]bool{"zones dns-records": true},
+			want:    nil,
+		},
 	}
 
 	for _, tc := range cases {
@@ -191,6 +198,7 @@ func TestNovelFeatureDepthMismatch(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("novelFeatureDepthMismatch() = nil, want mismatch")
+				return
 			}
 			if *got != *tc.want {
 				t.Fatalf("novelFeatureDepthMismatch() = %#v, want %#v", *got, *tc.want)

@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,15 +19,20 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 	"public-param-golden-pp-cli/internal/cli"
 	"public-param-golden-pp-cli/internal/client"
+	"public-param-golden-pp-cli/internal/cliutil"
 	"public-param-golden-pp-cli/internal/config"
+	"public-param-golden-pp-cli/internal/learn"
+	"public-param-golden-pp-cli/internal/mcp/bound"
 	"public-param-golden-pp-cli/internal/mcp/cobratree"
+	"public-param-golden-pp-cli/internal/platform"
+	"public-param-golden-pp-cli/internal/store"
 )
 
 const (
-	mcpToolResultMaxBytes = 60000
-	mcpToolResultMaxItems = 50
 	// MCP hosts can fan out tool calls faster than a human CLI session.
 	// Keep them on the same polite-client limiter path instead of disabling
 	// pacing with rate=0; users can still tune human CLI calls with --rate-limit.
@@ -34,6 +41,7 @@ const (
 
 // RegisterTools registers all API operations as MCP tools.
 func RegisterTools(s *server.MCPServer) {
+	installFreshTenantGate(s)
 	s.AddTool(
 		mcplib.NewTool("stores_create",
 			mcplib.WithDescription("Create a store record. Required: store-code. Optional: dry_run. Returns the new Store."),
@@ -42,19 +50,42 @@ func RegisterTools(s *server.MCPServer) {
 			mcplib.WithDestructiveHintAnnotation(false),
 			mcplib.WithOpenWorldHintAnnotation(true),
 		),
-		makeAPIHandler("POST", "/stores", false, false, nil, []mcpParamBinding{{PublicName: "dry_run", WireName: "$dry_run", Location: "query"}, {PublicName: "store-code", WireName: "store_code", Location: "body"}}, []string{}),
+		makeAPIHandler("POST", "/stores", false, false, nil, mcpPageConfig{}, []mcpParamBinding{{PublicName: "dry_run", WireName: "$dry_run", Location: "query"}, {PublicName: "store-code", WireName: "store_code", Location: "body"}}, []string{}),
 	)
 	s.AddTool(
 		mcplib.NewTool("stores_find",
-			mcplib.WithDescription("Find nearby stores by address. Required: address, city, locationId. Returns array of Store."),
+			mcplib.WithDescription("Find nearby stores by address. Required: address, city, locationId. Optional: recorded_by, sort (array of objects, e.g. [{'field':'...','direction':'...'}]). Returns array of Store."),
 			mcplib.WithString("address", mcplib.Required(), mcplib.Description("Street address")),
 			mcplib.WithString("city", mcplib.Required(), mcplib.Description("City, state, zip")),
 			mcplib.WithString("locationId", mcplib.Required(), mcplib.Description("Location identifier sent with this endpoint's snake-case query key")),
+			mcplib.WithArray("recorded_by", mcplib.Description("Filter by recorder emails, sent as repeated bracket query keys")),
+			mcplib.WithArray("sort", mcplib.Description("Sort specification sent as indexed deepObject query keys")),
 			mcplib.WithReadOnlyHintAnnotation(true),
 			mcplib.WithDestructiveHintAnnotation(false),
 			mcplib.WithOpenWorldHintAnnotation(true),
 		),
-		makeAPIHandler("GET", "/power/store-locator", true, false, nil, []mcpParamBinding{{PublicName: "address", WireName: "s", Location: "query"}, {PublicName: "city", WireName: "c", Location: "query"}, {PublicName: "locationId", WireName: "location_id", Location: "query"}}, []string{}),
+		makeAPIHandler("GET", "/power/store-locator", true, false, nil, mcpPageConfig{}, []mcpParamBinding{{PublicName: "address", WireName: "s", Location: "query"}, {PublicName: "city", WireName: "c", Location: "query"}, {PublicName: "locationId", WireName: "location_id", Location: "query"}, {PublicName: "recorded_by", WireName: "recorded_by[]", Location: "query", QueryArray: true, QueryStyle: "form", QueryExplode: true}, {PublicName: "sort", WireName: "sort", Location: "query", DeepObjectQuery: true}}, []string{}),
+	)
+	// Search tool — faster than iterating list endpoints for finding specific items
+	s.AddTool(
+		mcplib.NewTool("search",
+			mcplib.WithDescription("Full-text search across all synced data. Faster than paginating list endpoints. Requires sync first."),
+			mcplib.WithString("query", mcplib.Required(), mcplib.Description("Search query (supports FTS5 syntax: AND, OR, NOT, quotes for phrases)")),
+			mcplib.WithNumber("limit", mcplib.Description("Max results (default 25)")),
+			mcplib.WithReadOnlyHintAnnotation(true),
+			mcplib.WithDestructiveHintAnnotation(false),
+		),
+		handleSearch,
+	)
+	// SQL tool — ad-hoc analysis on synced data without API calls
+	s.AddTool(
+		mcplib.NewTool("sql",
+			mcplib.WithDescription("Run read-only SQL against local database. Use for ad-hoc analysis, aggregations, and joins across synced resources. Requires sync first."),
+			mcplib.WithString("query", mcplib.Required(), mcplib.Description("SQL query (SELECT or WITH...SELECT). Synced records live in resources(resource_type, id, data); filter by resource_type and use json_extract on data, e.g. SELECT json_extract(data,'$.name') FROM resources WHERE resource_type='stores'.")),
+			mcplib.WithReadOnlyHintAnnotation(true),
+			mcplib.WithDestructiveHintAnnotation(false),
+		),
+		handleSQL,
 	)
 
 	// Context tool — front-loaded domain knowledge for agents.
@@ -65,7 +96,7 @@ func RegisterTools(s *server.MCPServer) {
 			mcplib.WithReadOnlyHintAnnotation(true),
 			mcplib.WithDestructiveHintAnnotation(false),
 		),
-		handleContext,
+		handleContext(s),
 	)
 
 	// Runtime Cobra-tree mirror — exposes every user-facing command that is
@@ -74,9 +105,19 @@ func RegisterTools(s *server.MCPServer) {
 }
 
 type mcpParamBinding struct {
-	PublicName string
-	WireName   string
-	Location   string
+	PublicName      string
+	WireName        string
+	Location        string
+	Format          string
+	QueryArray      bool
+	QueryStyle      string
+	QueryExplode    bool
+	DeepObjectQuery bool
+}
+
+type mcpPageConfig struct {
+	CursorParam    string
+	NextCursorPath string
 }
 
 func formatMCPParamValue(v any) string {
@@ -103,22 +144,148 @@ func formatMCPParamValue(v any) string {
 		}
 		return strconv.FormatFloat(f, 'f', -1, 32)
 	default:
+		// Composite values (a native []any / map[string]any from an array or
+		// object param) reach this path when bound to a query or path slot;
+		// JSON-encode them so the wire value is valid JSON rather than Go's
+		// "[a b c]" / "map[...]" rendering. Body params never come through
+		// here — they are stored natively in bodyArgs and marshalled there.
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
 		return fmt.Sprintf("%v", v)
 	}
 }
 
+func mcpPathValue(v any) string {
+	return cliutil.EscapePathParam(formatMCPParamValue(v))
+}
+func appendMCPArrayQueryParam(path, name string, value any, style string, explode bool) string {
+	var values []string
+	switch typed := value.(type) {
+	case []any:
+		values = make([]string, 0, len(typed))
+		for _, item := range typed {
+			values = append(values, formatMCPParamValue(item))
+		}
+	case []string:
+		values = typed
+	default:
+		raw := formatMCPParamValue(value)
+		var decoded []any
+		if json.Unmarshal([]byte(raw), &decoded) == nil {
+			for _, item := range decoded {
+				values = append(values, formatMCPParamValue(item))
+			}
+		} else {
+			for _, item := range strings.Split(raw, ",") {
+				if item = strings.TrimSpace(item); item != "" {
+					values = append(values, item)
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		return path
+	}
+
+	query := url.Values{}
+	switch style {
+	case "spaceDelimited":
+		query.Set(name, strings.Join(values, " "))
+	case "pipeDelimited":
+		query.Set(name, strings.Join(values, "|"))
+	case "form":
+		if explode {
+			for _, item := range values {
+				query.Add(name, item)
+			}
+		} else {
+			query.Set(name, strings.Join(values, ","))
+		}
+	default:
+		query.Set(name, formatMCPParamValue(value))
+	}
+
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + query.Encode()
+}
+
+// appendMCPDeepObjectQueryParam appends one style=deepObject query param to
+// the request path as indexed bracket keys: objects -> name[field]=v, arrays
+// -> name[i]=v / name[i][field]=v. value is the native MCP argument
+// (map[string]any / []any); a string value is JSON-decoded first so spec
+// defaults and string-typed agent inputs behave like the CLI's --flag JSON.
+// Shared by the per-endpoint handlers and codeOrchSplitQuery.
+func appendMCPDeepObjectQueryParam(path, name string, value any) (string, error) {
+	decoded := value
+	if raw, ok := value.(string); ok {
+		var parsed any
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return path, err
+		}
+		decoded = parsed
+	}
+	values := url.Values{}
+	expandMCPDeepObjectValue(values, name, decoded)
+	if len(values) == 0 {
+		return path, nil
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + values.Encode(), nil
+}
+
+// expandMCPDeepObjectValue expands one deepObject-style query param into
+// indexed keys: objects -> name[field]=v, arrays -> name[i]=v /
+// name[i][field]=v. Scalar leaves use formatMCPParamValue; anything nested
+// deeper JSON-encodes fail-soft rather than inventing deeper bracket grammar.
+// URL size is bounded only by the server (414), matching
+// appendMCPArrayQueryParam's posture. Keep structurally in sync with the CLI
+// twin expandDeepObjectValue in internal/cli.
+func expandMCPDeepObjectValue(values url.Values, name string, decoded any) {
+	switch v := decoded.(type) {
+	case map[string]any:
+		for k, item := range v {
+			values.Set(name+"["+k+"]", formatMCPParamValue(item))
+		}
+	case []any:
+		for i, item := range v {
+			if obj, ok := item.(map[string]any); ok {
+				for k, field := range obj {
+					values.Set(fmt.Sprintf("%s[%d][%s]", name, i, k), formatMCPParamValue(field))
+				}
+			} else {
+				values.Set(fmt.Sprintf("%s[%d]", name, i), formatMCPParamValue(item))
+			}
+		}
+	default:
+		values.Set(name, formatMCPParamValue(decoded))
+	}
+}
+
 // makeAPIHandler creates a generic MCP tool handler for an API endpoint.
-func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse bool, headerOverrides map[string]string, bindings []mcpParamBinding, positionalParams []string) server.ToolHandlerFunc {
+func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse bool, headerOverrides map[string]string, pageConfig mcpPageConfig, bindings []mcpParamBinding, positionalParams []string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		c, err := newMCPClient()
+		c, platformSession, err := newMCPClient(ctx)
 		if err != nil {
-			return mcplib.NewToolResultError(err.Error()), nil
+			return mcpToolError(err.Error()), nil
+		}
+		if platformSession != nil {
+			defer platformSession.ZeroCredentials()
 		}
 
 		// mcp-go v0.47+ made CallToolParams.Arguments an `any` to support
 		// non-map payloads; GetArguments() returns the map[string]any shape
 		// we rely on here (or an empty map when the payload is something else).
 		args := req.GetArguments()
+		if err := cli.AdoptMCPOutputSemantics(platformSession, args); err != nil {
+			return mcpToolError(err.Error()), nil
+		}
 
 		// positionalParams mixes real URL path params with CLI positional
 		// args that map to query params (e.g. `search <query>` -> ?query=);
@@ -128,6 +295,24 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 		pathParams := make(map[string]bool, len(positionalParams))
 		params := make(map[string]string)
 		bodyArgs := make(map[string]any)
+		mcpCursor := ""
+		if pageConfig.CursorParam != "" {
+			knownArgs["cursor"] = true
+			if v, ok := args["cursor"]; ok {
+				s, ok := v.(string)
+				if !ok {
+					return mcpToolError("cursor must be an opaque string returned by a previous MCP response"), nil
+				}
+				mcpCursor = s
+				upstreamCursor, err := bound.UpstreamCursor(s)
+				if err != nil {
+					return mcpToolError(err.Error()), nil
+				}
+				if upstreamCursor != "" {
+					params[pageConfig.CursorParam] = upstreamCursor
+				}
+			}
+		}
 		var headers map[string]string
 		if len(headerOverrides) > 0 {
 			headers = make(map[string]string, len(headerOverrides)+1)
@@ -151,11 +336,26 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 			case "path":
 				placeholder := "{" + binding.WireName + "}"
 				pathParams[binding.PublicName] = true
-				path = strings.Replace(path, placeholder, formatMCPParamValue(v), 1)
+				path = strings.Replace(path, placeholder, mcpPathValue(v), 1)
+			case "header":
+				if headers == nil {
+					headers = map[string]string{}
+				}
+				headers[binding.WireName] = formatMCPParamValue(v)
 			case "body":
 				bodyArgs[binding.WireName] = v
 			default:
-				params[binding.WireName] = formatMCPParamValue(v)
+				if binding.DeepObjectQuery {
+					var derr error
+					path, derr = appendMCPDeepObjectQueryParam(path, binding.WireName, v)
+					if derr != nil {
+						return mcpToolError(fmt.Sprintf("%s: %v; expected JSON like [{\"field\":\"Name\",\"direction\":\"desc\"}] or {\"key\":\"value\"}", binding.PublicName, derr)), nil
+					}
+				} else if binding.QueryArray {
+					path = appendMCPArrayQueryParam(path, binding.WireName, v, binding.QueryStyle, binding.QueryExplode)
+				} else {
+					params[binding.WireName] = formatMCPParamValue(v)
+				}
 			}
 		}
 		for _, p := range positionalParams {
@@ -165,7 +365,7 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 			}
 			pathParams[p] = true
 			if v, ok := args[p]; ok {
-				path = strings.Replace(path, placeholder, formatMCPParamValue(v), 1)
+				path = strings.Replace(path, placeholder, mcpPathValue(v), 1)
 			}
 		}
 
@@ -185,10 +385,18 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 		switch method {
 		case "GET":
 			if len(headers) > 0 {
-				data, err = c.GetWithHeaders(ctx, path, params, headers)
+				if readOnly {
+					data, err = c.GetWithHeaders(ctx, path, params, headers)
+				} else {
+					data, err = c.GetMutatingWithHeaders(ctx, path, params, headers)
+				}
 				break
 			}
-			data, err = c.Get(ctx, path, params)
+			if readOnly {
+				data, err = c.Get(ctx, path, params)
+			} else {
+				data, err = c.GetMutating(ctx, path, params)
+			}
 		case "POST":
 			if len(headers) > 0 {
 				if readOnly {
@@ -205,16 +413,32 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 			}
 		case "PUT":
 			if len(headers) > 0 {
-				data, _, err = c.PutWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				if readOnly {
+					data, _, err = c.PutQueryWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				} else {
+					data, _, err = c.PutWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				}
 				break
 			}
-			data, _, err = c.PutWithParams(ctx, path, params, bodyArgs)
+			if readOnly {
+				data, _, err = c.PutQueryWithParams(ctx, path, params, bodyArgs)
+			} else {
+				data, _, err = c.PutWithParams(ctx, path, params, bodyArgs)
+			}
 		case "PATCH":
 			if len(headers) > 0 {
-				data, _, err = c.PatchWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				if readOnly {
+					data, _, err = c.PatchQueryWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				} else {
+					data, _, err = c.PatchWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				}
 				break
 			}
-			data, _, err = c.PatchWithParams(ctx, path, params, bodyArgs)
+			if readOnly {
+				data, _, err = c.PatchQueryWithParams(ctx, path, params, bodyArgs)
+			} else {
+				data, _, err = c.PatchWithParams(ctx, path, params, bodyArgs)
+			}
 		case "DELETE":
 			if len(headers) > 0 {
 				data, _, err = c.DeleteWithParamsAndHeaders(ctx, path, params, headers)
@@ -222,174 +446,115 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 			}
 			data, _, err = c.DeleteWithParams(ctx, path, params)
 		default:
-			return mcplib.NewToolResultError("unsupported method: " + method), nil
+			return mcpToolError("unsupported method: " + method), nil
 		}
 
 		if err != nil {
 			msg := err.Error()
 			switch {
 			case strings.Contains(msg, "HTTP 409"):
-				return mcplib.NewToolResultText("already exists (no-op)"), nil
+				return mcpToolTextWithPlatform("already exists (no-op)", platformSession), nil
 			case strings.Contains(msg, "HTTP 401"):
-				return mcplib.NewToolResultError("authentication failed: " + msg +
+				return mcpToolError("authentication failed: " + msg +
 					"\nhint: check your API credentials." +
 					"\n      Run 'public-param-golden-pp-cli doctor' to check auth status."), nil
 			case strings.Contains(msg, "HTTP 403"):
-				return mcplib.NewToolResultError("permission denied: " + msg +
+				return mcpToolError("permission denied: " + msg +
 					"\nhint: this API is configured without credentials; the service may be blocking the request by rate limit, geography, bot protection, or endpoint policy." +
 					"\n      Run 'public-param-golden-pp-cli doctor' to check auth status."), nil
 			case strings.Contains(msg, "HTTP 404"):
 				if method == "DELETE" {
-					return mcplib.NewToolResultText("already deleted (no-op)"), nil
+					return mcpToolTextWithPlatform("already deleted (no-op)", platformSession), nil
 				}
-				return mcplib.NewToolResultError("not found: " + msg), nil
+				return mcpToolError("not found: " + msg), nil
 			case strings.Contains(msg, "HTTP 429"):
-				return mcplib.NewToolResultError("rate limited: " + msg), nil
+				return mcpToolError("rate limited: " + msg), nil
 			default:
-				return mcplib.NewToolResultError(msg), nil
+				return mcpToolError(msg), nil
 			}
 		}
 
 		if binaryResponse {
-			out, _ := json.Marshal(map[string]any{
+			encoded := base64.StdEncoding.EncodeToString(data)
+			out, err := json.Marshal(map[string]any{
 				"content_encoding": "base64",
-				"data_base64":      base64.StdEncoding.EncodeToString(data),
+				"data_base64":      encoded,
 				"byte_count":       len(data),
 			})
-			return mcplib.NewToolResultText(string(out)), nil
+			if err != nil {
+				return mcpToolError(fmt.Sprintf("encoding binary result: %v", err)), nil
+			}
+			if len(out) > bound.MaxBytes {
+				return mcpToolError(fmt.Sprintf("binary response is too large for MCP text output: %d response bytes encode to %d base64 bytes and %d MCP result bytes, exceeding the %d byte budget. Use the companion CLI command with --output <file> to save the payload locally.", len(data), len(encoded), len(out), bound.MaxBytes)), nil
+			}
+			result := string(out)
+			if platformSession != nil {
+				result = bound.WithMetadata(result, platformSession.OutputMetadata())
+			}
+			return mcplib.NewToolResultText(result), nil
 		}
-		return mcpToolResultText(method, data), nil
+		if pageConfig.CursorParam != "" {
+			return mcpToolPageResultTextWithPlatform(method, data, pageConfig, mcpCursor, platformSession), nil
+		}
+		return mcpToolResultTextWithPlatform(method, data, platformSession), nil
 	}
 }
 
 func mcpToolResultText(method string, data json.RawMessage) *mcplib.CallToolResult {
-	trimmed := strings.TrimSpace(string(data))
-	if strings.EqualFold(method, "GET") && len(trimmed) > 0 && trimmed[0] == '[' {
-		var items []json.RawMessage
-		if json.Unmarshal(data, &items) == nil {
-			return mcplib.NewToolResultText(string(mcpBoundedListEnvelope("items", items, len(data))))
-		}
-	}
-	if len(data) <= mcpToolResultMaxBytes {
-		return mcplib.NewToolResultText(string(data))
-	}
-	if strings.EqualFold(method, "GET") {
-		if out, ok := mcpBoundedSingleArrayObject(data); ok {
-			return mcplib.NewToolResultText(string(out))
-		}
-	}
-	return mcplib.NewToolResultText(string(mcpOversizedPreviewEnvelope(data)))
+	return mcpToolResultTextWithPlatform(method, data, nil)
 }
 
-func mcpBoundedSingleArrayObject(data json.RawMessage) ([]byte, bool) {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(data, &obj) != nil {
-		return nil, false
+func mcpToolTextWithPlatform(result string, platformSession *platform.Session) *mcplib.CallToolResult {
+	if platformSession != nil {
+		result = bound.WithMetadata(result, platformSession.OutputMetadata())
 	}
-	arrayField := ""
-	var items []json.RawMessage
-	for key, raw := range obj {
-		trimmed := strings.TrimSpace(string(raw))
-		if len(trimmed) == 0 || trimmed[0] != '[' {
-			continue
-		}
-		var candidate []json.RawMessage
-		if json.Unmarshal(raw, &candidate) != nil {
-			continue
-		}
-		if arrayField != "" {
-			return nil, false
-		}
-		arrayField = key
-		items = candidate
-	}
-	if arrayField == "" {
-		return nil, false
-	}
-	build := func(subset []json.RawMessage) any {
-		out := make(map[string]any, len(obj)+6)
-		for key, raw := range obj {
-			if key == arrayField {
-				out[key] = subset
-				continue
-			}
-			out[key] = raw
-		}
-		if len(subset) < len(items) {
-			out["_pp_truncated"] = true
-			out["_pp_total_count"] = len(items)
-			out["_pp_returned_count"] = len(subset)
-			out["_pp_original_bytes"] = len(data)
-			out["_pp_max_bytes"] = mcpToolResultMaxBytes
-			out["_pp_note"] = "Typed MCP endpoint response exceeded the tool result budget. Narrow the request with limit, offset, filters, search/sql, or a command-mirror tool with --agent/--compact/--select."
-		}
-		return out
-	}
-	out := mcpFitJSONItems(items, build)
-	if len(out) > mcpToolResultMaxBytes {
-		return nil, false
-	}
-	return out, true
+	return mcplib.NewToolResultText(result)
 }
 
-func mcpBoundedListEnvelope(field string, items []json.RawMessage, originalBytes int) []byte {
-	build := func(subset []json.RawMessage) any {
-		out := map[string]any{
-			"count": len(items),
-			field:   subset,
-		}
-		if len(subset) < len(items) {
-			out["truncated"] = true
-			out["returned_count"] = len(subset)
-			out["original_bytes"] = originalBytes
-			out["max_bytes"] = mcpToolResultMaxBytes
-			out["note"] = "Typed MCP endpoint response exceeded the tool result budget. Narrow the request with limit, offset, filters, search/sql, or a command-mirror tool with --agent/--compact/--select."
-		}
-		return out
-	}
-	return mcpFitJSONItems(items, build)
+func mcpToolResultTextWithPlatform(method string, data json.RawMessage, platformSession *platform.Session) *mcplib.CallToolResult {
+	result := bound.EndpointResponse(method, data)
+	return mcpToolTextWithPlatform(result, platformSession)
 }
 
-func mcpFitJSONItems(items []json.RawMessage, build func([]json.RawMessage) any) []byte {
-	limit := len(items)
-	if limit > mcpToolResultMaxItems {
-		limit = mcpToolResultMaxItems
-	}
-	for n := limit; n >= 0; n-- {
-		out, err := json.Marshal(build(items[:n]))
-		if err != nil {
-			continue
-		}
-		if len(out) <= mcpToolResultMaxBytes || n == 0 {
-			return out
-		}
-	}
-	out, _ := json.Marshal(build(items[:0]))
-	return out
+// mcpToolError keeps provider-controlled typed endpoint errors within the MCP
+// text-result budget just like successful endpoint results.
+func mcpToolError(message string) *mcplib.CallToolResult {
+	return mcplib.NewToolResultError(bound.Text(message))
 }
 
-func mcpOversizedPreviewEnvelope(data json.RawMessage) []byte {
-	previewBytes := data
-	if len(previewBytes) > 4000 {
-		previewBytes = previewBytes[:4000]
-	}
-	out, _ := json.Marshal(map[string]any{
-		"truncated":      true,
-		"original_bytes": len(data),
-		"max_bytes":      mcpToolResultMaxBytes,
-		"preview":        string(previewBytes),
-		"note":           "Typed MCP endpoint response exceeded the tool result budget and was not a recognized list envelope. Narrow the request with filters, search/sql, or a command-mirror tool with --agent/--compact/--select.",
+func mcpToolPageResultText(method string, data json.RawMessage, pageConfig mcpPageConfig, cursor string) *mcplib.CallToolResult {
+	return mcpToolPageResultTextWithPlatform(method, data, pageConfig, cursor, nil)
+}
+
+func mcpToolPageResultTextWithPlatform(method string, data json.RawMessage, pageConfig mcpPageConfig, cursor string, platformSession *platform.Session) *mcplib.CallToolResult {
+	result := bound.EndpointPageResponse(method, data, bound.PageOptions{
+		Cursor:         cursor,
+		CursorParam:    pageConfig.CursorParam,
+		NextCursorPath: pageConfig.NextCursorPath,
 	})
-	return out
+	if platformSession != nil {
+		result = bound.WithMetadata(result, platformSession.OutputMetadata())
+	}
+	return mcplib.NewToolResultText(result)
 }
 
-func newMCPClient() (*client.Client, error) {
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config", "public-param-golden-pp-cli", "config.toml")
-	cfg, err := config.Load(cfgPath)
+func newMCPClient(ctx context.Context) (*client.Client, *platform.Session, error) {
+	cfg, err := newMCPConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	return newMCPClientFromConfig(ctx, cfg)
+}
+
+func newMCPConfig() (*config.Config, error) {
+	cfg, err := config.Load("")
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
+	return cfg, nil
+}
+
+func newMCPClientFromConfig(ctx context.Context, cfg *config.Config) (*client.Client, *platform.Session, error) {
 	c := client.New(cfg, 60*time.Second, defaultMCPRateLimit)
 	// Agents calling through MCP need fresh data every call. The on-disk
 	// response cache survives across MCP server invocations, so a
@@ -397,46 +562,490 @@ func newMCPClient() (*client.Client, error) {
 	// pre-mutation snapshot for up to the cache TTL. The interactive CLI
 	// constructs its own client and is unaffected.
 	c.NoCache = true
-	return c, nil
+	session, err := cli.BindMCPClient(ctx, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cli.ApplyClientHooks(c); err != nil {
+		if session != nil {
+			session.ZeroCredentials()
+		}
+		return nil, nil, fmt.Errorf("initializing MCP client: %w", err)
+	}
+	return c, session, nil
 }
 
-func dbPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "public-param-golden-pp-cli", "data.db")
+func mcpDBPath() (string, error) {
+	dir, err := cliutil.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "data.db"), nil
 }
 
-// Note: MCP tools use their own dbPath() because they are in a separate package (main, not cli).
-// The CLI's defaultDBPath() in the cli package uses the same canonical path.
+type mcpStoreStatusKind string
+
+const (
+	mcpStoreStatusEmpty   mcpStoreStatusKind = "empty"
+	mcpStoreStatusPartial mcpStoreStatusKind = "partial"
+	mcpStoreStatusReady   mcpStoreStatusKind = "ready"
+)
+
+func openMCPReadOnlyStore(path string) (*store.Store, *mcplib.CallToolResult) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, mcplib.NewToolResultError(mcpMissingStoreMessage(path))
+		}
+		return nil, mcplib.NewToolResultError(fmt.Sprintf("checking local data store %s: %v", path, err))
+	}
+	db, err := store.OpenReadOnly(path)
+	if err != nil {
+		return nil, mcplib.NewToolResultError(fmt.Sprintf("opening local data store %s: %v. Run public-param-golden-pp-cli sync --resources stores to refresh the store, or use live endpoint MCP tools for unsynced data.", path, err))
+	}
+	return db, nil
+}
+
+func mcpMissingStoreMessage(path string) string {
+	return fmt.Sprintf("No local data store found at %s. Run public-param-golden-pp-cli sync --resources stores before using MCP search/sql, or use live endpoint MCP tools for unsynced data.", path)
+}
+
+func mcpStoreStatus(db *store.Store) (mcpStoreStatusKind, error) {
+	status, err := db.Status()
+	if err != nil {
+		return "", err
+	}
+	var checkpoints, completed int
+	err = db.DB().QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN last_attempt_complete = 1 THEN 1 ELSE 0 END), 0) FROM sync_state`).Scan(&checkpoints, &completed)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column: last_attempt_complete") {
+		// Read-only stores have not run the conservative completion migration.
+		// Legacy timestamps were also written by partial walks, so prove nothing.
+		err = db.DB().QueryRow(`SELECT COUNT(*), 0 FROM sync_state`).Scan(&checkpoints, &completed)
+	}
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "no such column") {
+			if len(status) > 0 {
+				return mcpStoreStatusReady, nil
+			}
+			return mcpStoreStatusEmpty, nil
+		}
+		return "", err
+	}
+	if checkpoints > 0 {
+		if completed == checkpoints {
+			return mcpStoreStatusReady, nil
+		}
+		return mcpStoreStatusPartial, nil
+	}
+	if len(status) > 0 {
+		return mcpStoreStatusReady, nil
+	}
+	return mcpStoreStatusEmpty, nil
+}
+
+func mcpEmptyStoreNextStep() string {
+	return "Run public-param-golden-pp-cli sync --resources stores to populate the local SQLite store before using MCP search/sql."
+}
+
+func mcpPartialStoreNextStep() string {
+	return "The latest sync attempt is incomplete. Resume or rerun public-param-golden-pp-cli sync --resources stores before treating local search/sql results as a complete snapshot."
+}
+
+func handleSearch(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	query, ok := args["query"].(string)
+	if !ok || query == "" {
+		return mcplib.NewToolResultError("query is required"), nil
+	}
+
+	limit := 25
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, toolErr := openMCPReadOnlyStore(path)
+	if toolErr != nil {
+		return toolErr, nil
+	}
+	defer db.Close()
+
+	results, err := db.Search(query, limit)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+	}
+	storeStatus, err := mcpStoreStatus(db)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("reading store status: %v", err)), nil
+	}
+
+	return toolResultJSON(mcpSearchEnvelope(results, storeStatus))
+}
+
+func mcpSearchEnvelope(results []json.RawMessage, storeStatus mcpStoreStatusKind) map[string]any {
+	if results == nil {
+		results = []json.RawMessage{}
+	}
+	out := map[string]any{
+		"count":        len(results),
+		"results":      results,
+		"store_status": storeStatus,
+		"resumable":    false,
+	}
+	if storeStatus == mcpStoreStatusPartial {
+		out["warning"] = "Local data may be incomplete because the latest sync attempt did not finish."
+		out["next_step"] = mcpPartialStoreNextStep()
+	} else if len(results) == 0 {
+		if storeStatus == mcpStoreStatusEmpty {
+			out["next_step"] = mcpEmptyStoreNextStep()
+		} else {
+			out["next_step"] = "No local search matches. Try a broader query, a lower-specificity FTS expression, or sync again if data may be stale."
+		}
+	}
+	return out
+}
+
+// validateReadOnlyQuery gates the MCP sql tool. The agent contract advertised
+// to the host is ReadOnlyHintAnnotation(true); a false annotation on a
+// mutating tool lets MCP hosts auto-approve writes and is treated as a real
+// bug per the project's agent-native security model.
+//
+// The gate rejects multi-statement input, then applies an allowlist (SELECT or
+// WITH only) AFTER stripping the leading whitespace, line comments, block
+// comments, and semicolons that SQLite itself ignores before parsing. A naive
+// HasPrefix check on a keyword blocklist is bypassable by prefixing the
+// dangerous statement with "/* x */" or "-- x\n"; a naive leading-keyword
+// allowlist is bypassable by appending "; ATTACH DATABASE ...". Combined with
+// the empirical fact that modernc.org/sqlite's mode=ro does NOT block VACUUM
+// INTO (writes a snapshot to a new file) or ATTACH DATABASE (opens a separate
+// writable handle), either bypass produces silent exfiltration to an
+// attacker-chosen path.
+//
+// SELECT and WITH are the only allowed leading keywords. WITH supports
+// SELECT-form CTEs; CTE-wrapped writes ("WITH x AS (...) INSERT ...") are
+// caught by OpenReadOnly's mode=ro one layer down. PRAGMA, ATTACH, VACUUM,
+// and every other DDL/DML keyword fail at this gate before reaching SQLite.
+func validateReadOnlyQuery(query string) error {
+	stripped := stripLeadingSQLNoise(query)
+	if hasTrailingSQLStatement(stripped) {
+		return fmt.Errorf("only a single SELECT or WITH statement is allowed")
+	}
+	upper := strings.ToUpper(stripped)
+	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+		return fmt.Errorf("only SELECT queries are allowed")
+	}
+	return nil
+}
+
+// stripLeadingSQLNoise removes leading whitespace, SQL line comments
+// (-- to end of line), block comments (/* ... */), and statement
+// separators (;) from query. SQLite skips these before parsing the first
+// keyword, so a security gate that does not strip them mismatches what the
+// driver actually executes.
+func stripLeadingSQLNoise(query string) string {
+	for {
+		query = strings.TrimLeft(query, " \t\r\n;")
+		switch {
+		case strings.HasPrefix(query, "--"):
+			if idx := strings.IndexByte(query, '\n'); idx >= 0 {
+				query = query[idx+1:]
+				continue
+			}
+			return ""
+		case strings.HasPrefix(query, "/*"):
+			if idx := strings.Index(query[2:], "*/"); idx >= 0 {
+				query = query[2+idx+2:]
+				continue
+			}
+			return ""
+		default:
+			return query
+		}
+	}
+}
+
+// hasTrailingSQLStatement reports whether query contains a statement
+// terminator followed by more executable SQL. A trailing semicolon is allowed;
+// a second statement is not. Semicolons inside string literals, quoted
+// identifiers, bracket identifiers, and comments are ignored to match SQLite's
+// parser shape closely enough for this security gate.
+func hasTrailingSQLStatement(query string) bool {
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	inBracket := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		next := byte(0)
+		if i+1 < len(query) {
+			next = query[i+1]
+		}
+
+		switch {
+		case inLineComment:
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		case inBlockComment:
+			if ch == '*' && next == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		case inSingle:
+			if ch == '\'' {
+				if next == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				if next == '"' {
+					i++
+					continue
+				}
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				if next == '`' {
+					i++
+					continue
+				}
+				inBacktick = false
+			}
+			continue
+		case inBracket:
+			if ch == ']' {
+				inBracket = false
+			}
+			continue
+		}
+
+		switch {
+		case ch == '-' && next == '-':
+			inLineComment = true
+			i++
+		case ch == '/' && next == '*':
+			inBlockComment = true
+			i++
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '`':
+			inBacktick = true
+		case ch == '[':
+			inBracket = true
+		case ch == ';':
+			if stripLeadingSQLNoise(query[i+1:]) != "" {
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+const mcpSQLMaxValueBytes = 4 << 20
+
+func handleSQL(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	query, ok := args["query"].(string)
+	if !ok || query == "" {
+		return mcplib.NewToolResultError("query is required"), nil
+	}
+
+	if err := validateReadOnlyQuery(query); err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, toolErr := openMCPReadOnlyStore(path)
+	if toolErr != nil {
+		return toolErr, nil
+	}
+	defer db.Close()
+
+	queryCtx, cancel := bound.WithSQLQueryDeadline(ctx)
+	defer cancel()
+
+	conn, err := db.DB().Conn(queryCtx)
+	if err != nil {
+		return mcplib.NewToolResultError(mcpSQLQueryError(queryCtx, err)), nil
+	}
+	defer conn.Close()
+
+	if _, err := sqlite.Limit(conn, sqlite3.SQLITE_LIMIT_LENGTH, mcpSQLMaxValueBytes); err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("setting SQL value length cap: %v", err)), nil
+	}
+
+	rows, err := conn.QueryContext(queryCtx, query)
+	if err != nil {
+		return mcplib.NewToolResultError(mcpSQLQueryError(queryCtx, err)), nil
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("reading columns: %v", err)), nil
+	}
+	scan := bound.NewSQLScanState(cols)
+	for rows.Next() {
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			if mcpSQLValueTooBig(err) {
+				return mcplib.NewToolResultError(mcpSQLQueryError(queryCtx, err)), nil
+			}
+			return mcplib.NewToolResultError(fmt.Sprintf("scanning row: %v", err)), nil
+		}
+		row := make(map[string]any)
+		for i, col := range cols {
+			row[col] = values[i]
+		}
+		if !scan.Add(row) {
+			break
+		}
+	}
+	// rows.Next() stops on a mid-iteration error without failing the loop, so
+	// skipping rows.Err() would return a truncated result set as success.
+	if err := rows.Err(); err != nil {
+		return mcplib.NewToolResultError(mcpSQLQueryError(queryCtx, err)), nil
+	}
+	storeStatus, err := mcpStoreStatus(db)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("reading store status: %v", err)), nil
+	}
+
+	return toolResultJSON(mcpSQLEnvelope(scan.Rows, cols, storeStatus, scan.Truncated))
+}
+
+func mcpSQLEnvelope(rows []map[string]any, columns []string, storeStatus mcpStoreStatusKind, truncated bool) map[string]any {
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+	out := map[string]any{
+		"count":        len(rows),
+		"columns":      columns,
+		"rows":         rows,
+		"store_status": storeStatus,
+		"resumable":    false,
+		"truncated":    truncated,
+	}
+	if truncated {
+		out["returned_count"] = len(rows)
+		out["max_bytes"] = bound.MaxBytes
+		out["note"] = bound.SQLResultBoundNote
+	}
+	if storeStatus == mcpStoreStatusPartial {
+		out["warning"] = "Local data may be incomplete because the latest sync attempt did not finish."
+		out["next_step"] = mcpPartialStoreNextStep()
+	} else if len(rows) == 0 && !truncated {
+		if storeStatus == mcpStoreStatusEmpty {
+			out["next_step"] = mcpEmptyStoreNextStep()
+		} else {
+			out["next_step"] = "The read-only SQL query returned no rows. Check resource_type filters, json_extract paths, or run public-param-golden-pp-cli sync --resources stores again if data may be stale."
+		}
+	}
+	return out
+}
+
+func mcpSQLQueryError(queryCtx context.Context, err error) string {
+	if queryCtx.Err() != nil {
+		return fmt.Sprintf("query cancelled: %v. MCP SQL queries are bounded to %s; narrow the query with WHERE, GROUP BY, or an aggregate.", err, bound.SQLQueryTimeout)
+	}
+	if mcpSQLValueTooBig(err) {
+		return fmt.Sprintf("query failed: a string or blob exceeds the MCP SQL value cap of %d bytes (4 MiB). Narrow the selected columns or use substr, json_extract, or length instead of returning oversized values.", mcpSQLMaxValueBytes)
+	}
+	msg := err.Error()
+	if strings.Contains(strings.ToLower(msg), "no such table") {
+		return fmt.Sprintf("query failed: %v. Synced records live in resources(resource_type, id, data), not one SQL table per resource. Filter by resource_type, for example resource_type='stores', and read JSON fields with json_extract(data,'$.field').", err)
+	}
+	return fmt.Sprintf("query failed: %v", err)
+}
+
+func mcpSQLValueTooBig(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_TOOBIG
+}
 
 // toolResultJSON renders v as the indented JSON body of an MCP text result,
 // surfacing a marshal failure as a tool error instead of empty content.
 func toolResultJSON(v any) (*mcplib.CallToolResult, error) {
-	data, err := json.MarshalIndent(v, "", "  ")
+	text, err := bound.JSON(v)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("encoding result: %v", err)), nil
 	}
-	return mcplib.NewToolResultText(string(data)), nil
+	return mcplib.NewToolResultText(text), nil
 }
 
-func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+func handleContext(s *server.MCPServer) func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return handleContextResult(s, ctx, req)
+	}
+}
+
+func handleContextResult(s *server.MCPServer, _ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	paths := map[string]string{}
+	if dir, err := cliutil.ConfigDir(); err == nil {
+		paths["config_dir"] = dir
+	}
+	if dir, err := cliutil.DataDir(); err == nil {
+		paths["data_dir"] = dir
+	}
+	if dir, err := cliutil.StateDir(); err == nil {
+		paths["state_dir"] = dir
+	}
+	if dir, err := cliutil.CacheDir(); err == nil {
+		paths["cache_dir"] = dir
+	}
 	ctx := map[string]any{
 		"api":         "public-param-golden",
 		"description": "Public parameter name golden fixture",
 		"archetype":   "generic",
-		"tool_count":  2,
+		"tool_count":  len(s.ListTools()),
+		"paths":       paths,
 		// tool_surface tells agents which surface a capability lives on.
 		"tool_surface": "MCP exposes typed endpoint tools plus a runtime mirror of user-facing CLI commands. Endpoint tools keep typed schemas; command-mirror tools shell out to the companion public-param-golden-pp-cli binary.",
+		// learn_protocol is generated from the single shared source of
+		// truth (the exported constant internal/learn.RecallFirstProtocol)
+		// also consumed by the CLI agent-context command, so the MCP and
+		// CLI agent surfaces cannot drift.
+		"learn_protocol": learn.RecallFirstProtocol,
 		"resources": []map[string]any{
 			{
 				"name":        "stores",
 				"description": "Store lookup operations",
 				"endpoints":   []string{"create", "find"},
+				"syncable":    true,
 				"searchable":  true,
+				"writable":    true,
 			},
 		},
 		"query_tips": []string{
 			"Pagination uses cursor-based paging. Pass after parameter for subsequent pages.",
 			"Control page size with the limit parameter (default 100).",
+			"Use the sql tool for ad-hoc analysis on synced data. Run sync first to populate the local database.",
+			"Use the search tool for full-text search across all synced resources. Faster than iterating list endpoints.",
+			"Prefer sql/search over repeated API calls when the data is already synced.",
 		},
 	}
 	return toolResultJSON(ctx)

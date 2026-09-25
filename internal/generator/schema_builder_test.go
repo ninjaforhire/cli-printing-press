@@ -61,6 +61,72 @@ func TestSafeSQLNameAlwaysQuotes(t *testing.T) {
 	}
 }
 
+func TestBuildSchemaRoutesReservedStoreTablesToGenericOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		resource  string
+		streaming bool
+		learn     bool
+	}{
+		{name: "generic resources table", resource: "resources"},
+		{name: "fts shadow table", resource: "resources_fts_data"},
+		{name: "lazy learn table", resource: "learn_recall_misses", learn: true},
+		{name: "disabled learn table remains reserved", resource: "search_learnings"},
+		{name: "framework index", resource: "idx_resources_type"},
+		{name: "stream frames table", resource: "collision_a_p_i_stream_frames", streaming: true},
+		{name: "disabled stream table remains reserved", resource: "collision_a_p_i_stream_frames"},
+		{name: "stream metadata table", resource: "collision_a_p_i_stream_metadata", streaming: true},
+		{name: "stream rebase table", resource: "collision_a_p_i_rebase_log", streaming: true},
+		{name: "stream metadata index", resource: "collision_a_p_i_stream_metadata_status", streaming: true},
+		{name: "stream rebase index", resource: "collision_a_p_i_rebase_log_created", streaming: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSpec := &spec.APISpec{
+				Name: "CollisionAPI",
+				Resources: map[string]spec.Resource{
+					tt.resource: {
+						Endpoints: map[string]spec.Endpoint{
+							"list": {
+								Method:   "GET",
+								Path:     "/items",
+								Response: spec.ResponseDef{Type: "array", Item: "Resource"},
+							},
+						},
+					},
+				},
+				Types: map[string]spec.TypeDef{
+					"Resource": {
+						Fields: []spec.TypeField{
+							{Name: "id", Type: "string"},
+							{Name: "name", Type: "string"},
+							{Name: "notes", Type: "string"},
+							{Name: "created_at", Type: "string", Format: "date-time"},
+						},
+					},
+				},
+			}
+			if tt.streaming {
+				apiSpec.Streaming = spec.StreamingConfig{Transport: "websocket"}
+			}
+			apiSpec.Learn.Enabled = tt.learn
+
+			table := findTable(BuildSchema(apiSpec), tt.resource)
+			if !assert.NotNil(t, table) {
+				return
+			}
+			assert.Equal(t, baseTableColumns, table.Columns)
+			assert.Empty(t, table.Indexes)
+			assert.False(t, table.FTS5)
+			assert.Empty(t, table.FTS5Fields)
+			assert.False(t, table.FTS5Triggers)
+		})
+	}
+}
+
 func TestCollectTextFieldNames(t *testing.T) {
 	// Fields like tag/label/category/metadata should be picked up for FTS5
 	// alongside the core text fields. Motivated by the ESPN retro where
@@ -580,6 +646,114 @@ func TestBuildSchema_SubResourceUniqueKeepsBareName(t *testing.T) {
 	messages := byName["messages"]
 	require.Greater(t, len(messages.Columns), 1)
 	assert.Equal(t, "channels_id", messages.Columns[1].Name, "FK column matches sole parent")
+	assert.Equal(t, parentFKColumnName("channels"), messages.Columns[1].Name,
+		"single-word parent FK must stay the helper's unchanged form")
+}
+
+func TestParentFKColumnName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		parent string
+		want   string
+	}{
+		{parent: "chats", want: "chats_id"},
+		{parent: "chat-attendees", want: "chat_attendees_id"},
+		{parent: "groups-2", want: "groups_2_id"},
+		{parent: "routing-forms", want: "routing_forms_id"},
+		{parent: "agent-runners", want: "agent_runners_id"},
+		{parent: "chat_attendees", want: "chat_attendees_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.parent, func(t *testing.T) {
+			assert.Equal(t, tt.want, parentFKColumnName(tt.parent))
+		})
+	}
+}
+
+func TestBuildSchema_HyphenatedParentFKColumn(t *testing.T) {
+	t.Parallel()
+
+	s := &spec.APISpec{
+		Resources: map[string]spec.Resource{
+			"chat-attendees": {
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/chat-attendees"},
+				},
+				SubResources: map[string]spec.Resource{
+					"chats": {
+						Endpoints: map[string]spec.Endpoint{
+							"list": {Method: "GET", Path: "/chat-attendees/{id}/chats"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tables := BuildSchema(s)
+	chats := findTable(tables, "chats")
+	require.NotNil(t, chats, "unique chats sub-resource should keep its bare table")
+	require.Greater(t, len(chats.Columns), 1)
+	assert.Equal(t, "chat_attendees_id", chats.Columns[1].Name)
+	assert.Equal(t, parentFKColumnName("chat-attendees"), chats.Columns[1].Name,
+		"typed-table FK column and helper must agree for hyphenated parents")
+	assert.Equal(t, parentFKColumnName(toSnakeCase("chat-attendees")), chats.Columns[1].Name,
+		"helper must be stable on already-normalized parent table names")
+}
+
+func TestBuildSchemaMarksParameterKeyedResources(t *testing.T) {
+	t.Parallel()
+
+	s := &spec.APISpec{
+		Name: "param-key",
+		Resources: map[string]spec.Resource{
+			"forecast": {
+				Endpoints: map[string]spec.Endpoint{
+					"get": {Method: "GET", Path: "/v1/forecast", Response: spec.ResponseDef{Type: "object", Item: "Forecast"}},
+				},
+			},
+			"widgets": {
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/widgets", Response: spec.ResponseDef{Type: "array", Item: "Widget"}},
+				},
+			},
+			"currencies": {
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/currencies", Response: spec.ResponseDef{Type: "array", Item: "Currency"}},
+				},
+			},
+		},
+		Types: map[string]spec.TypeDef{
+			"Forecast": {Fields: []spec.TypeField{
+				{Name: "latitude", Type: "number"},
+				{Name: "longitude", Type: "number"},
+				{Name: "timezone", Type: "string"},
+				{Name: "hourly", Type: "object"},
+			}},
+			"Widget": {Fields: []spec.TypeField{
+				{Name: "id", Type: "string"},
+				{Name: "name", Type: "string"},
+			}},
+			"Currency": {Fields: []spec.TypeField{
+				{Name: "currency_code", Type: "string"},
+				{Name: "symbol", Type: "string"},
+			}},
+		},
+	}
+
+	tables := BuildSchema(s)
+	forecast := findTable(tables, "forecast")
+	require.NotNil(t, forecast)
+	assert.True(t, forecast.ParameterKeyed, "id-less forecast must be parameter-keyed")
+
+	widgets := findTable(tables, "widgets")
+	require.NotNil(t, widgets)
+	assert.False(t, widgets.ParameterKeyed, "id-bearing widgets must stay entity-keyed")
+
+	currencies := findTable(tables, "currencies")
+	require.NotNil(t, currencies)
+	assert.False(t, currencies.ParameterKeyed, "currency_code is a store identity suffix")
 }
 
 // findTable returns nil when no match exists so callers can render

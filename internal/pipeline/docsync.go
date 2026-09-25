@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/generator"
@@ -97,6 +98,19 @@ func SyncCLINarrativeDocs(dir, apiName string, narrative *ReadmeNarrative) ([]sy
 	}
 
 	changed, err = syncMarkdownFeatureSection(
+		filepath.Join(dir, "README.md"),
+		"## Recipes",
+		renderRecipesSection(narrative.Recipes),
+		[]string{"## Usage"},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		synced = append(synced, syncedArtifact{Path: "README.md", Detail: "Recipes"})
+	}
+
+	changed, err = syncMarkdownFeatureSection(
 		filepath.Join(dir, "SKILL.md"),
 		"## Recipes",
 		renderRecipesSection(narrative.Recipes),
@@ -114,7 +128,13 @@ func SyncCLINarrativeDocs(dir, apiName string, narrative *ReadmeNarrative) ([]sy
 
 // SyncCLITranscendenceDocs rewrites generated README/SKILL transcendence
 // blocks from dogfood-verified features. Empty verified sets remove the blocks.
+// A command_mirror_capabilities block that differs from the rendered
+// research.json shape is left unmodified unless overwrite is requested.
 func SyncCLITranscendenceDocs(dir string, features []NovelFeature) ([]syncedArtifact, error) {
+	return syncCLITranscendenceDocs(dir, features, false)
+}
+
+func syncCLITranscendenceDocs(dir string, features []NovelFeature, overwriteCommandMirror bool) ([]syncedArtifact, error) {
 	var synced []syncedArtifact
 	warnBeforeDroppingDocumentedFeatures(filepath.Join(dir, "README.md"), "README.md", "## Unique Features", features)
 	changed, err := syncMarkdownFeatureSection(
@@ -152,7 +172,7 @@ func SyncCLITranscendenceDocs(dir string, features []NovelFeature) ([]syncedArti
 		synced = append(synced, syncedArtifact{Path: filepath.Join("internal", "cli", "which.go"), Detail: "whichIndex"})
 	}
 
-	changed, err = syncMCPNovelFeatureContext(filepath.Join(dir, "internal", "mcp", "tools.go"), features)
+	changed, err = syncMCPNovelFeatureContext(filepath.Join(dir, "internal", "mcp", "tools.go"), features, overwriteCommandMirror)
 	if err != nil {
 		return nil, err
 	}
@@ -494,33 +514,191 @@ func syncMarkdownFile(path string, rewrite func(string) string) (bool, error) {
 	return true, nil
 }
 
+const whichPromotedMarker = "pp:which-promoted"
+
 func syncWhichIndex(path string, features []NovelFeature) (bool, error) {
-	replacement := renderWhichIndex(features)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	promoted := parsePromotedWhichEntries(string(data))
+	novelCmds := map[string]bool{}
+	for _, feature := range features {
+		if cmd := strings.TrimSpace(feature.Command); cmd != "" {
+			novelCmds[cmd] = true
+		}
+	}
+	kept := promoted[:0]
+	for _, entry := range promoted {
+		if !novelCmds[strings.TrimSpace(entry.Command)] {
+			kept = append(kept, entry)
+		}
+	}
+	replacement := renderWhichIndex(features, kept)
 	return syncGoCompositeLiteral(path, "var whichIndex = []whichEntry{", replacement)
 }
 
-func renderWhichIndex(features []NovelFeature) string {
+func renderWhichIndex(features []NovelFeature, promoted []NovelFeature) string {
 	var b strings.Builder
 	b.WriteString("var whichIndex = []whichEntry{")
 	for _, feature := range features {
-		b.WriteString("\n\t{Command: ")
-		b.WriteString(goStringLiteral(feature.Command))
-		b.WriteString(", Description: ")
-		b.WriteString(goStringLiteral(feature.Description))
-		b.WriteString(", Group: ")
-		b.WriteString(goStringLiteral(feature.Group))
-		b.WriteString(", WhyItMatters: ")
-		b.WriteString(goStringLiteral(feature.WhyItMatters))
-		b.WriteString("},")
+		writeWhichIndexEntry(&b, feature, false)
+	}
+	for _, feature := range promoted {
+		writeWhichIndexEntry(&b, feature, true)
 	}
 	b.WriteString("\n}")
 	return b.String()
 }
 
-func syncMCPNovelFeatureContext(path string, features []NovelFeature) (bool, error) {
-	return syncGoFile(path, func(content string) string {
-		return syncMCPMapList(content, `"command_mirror_capabilities": []map[string]string{`, renderMCPCommandMirrorCapabilities(features))
-	})
+func writeWhichIndexEntry(b *strings.Builder, feature NovelFeature, promoted bool) {
+	b.WriteString("\n\t{Command: ")
+	b.WriteString(goStringLiteral(feature.Command))
+	b.WriteString(", Description: ")
+	b.WriteString(goStringLiteral(feature.Description))
+	b.WriteString(", Group: ")
+	b.WriteString(goStringLiteral(feature.Group))
+	b.WriteString(", WhyItMatters: ")
+	b.WriteString(goStringLiteral(feature.WhyItMatters))
+	b.WriteString("},")
+	if promoted {
+		b.WriteString(" // ")
+		b.WriteString(whichPromotedMarker)
+	}
+}
+
+func parsePromotedWhichEntries(content string) []NovelFeature {
+	var out []NovelFeature
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.Contains(line, whichPromotedMarker) {
+			continue
+		}
+		entry, ok := parseWhichEntryLine(line)
+		if ok {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func parseWhichEntryLine(line string) (NovelFeature, bool) {
+	_, rest, ok := strings.Cut(line, "{")
+	if !ok {
+		return NovelFeature{}, false
+	}
+	fields, ok := parseWhichCompositeFields(rest)
+	if !ok {
+		return NovelFeature{}, false
+	}
+	cmd := strings.TrimSpace(fields["Command"])
+	if cmd == "" {
+		return NovelFeature{}, false
+	}
+	return NovelFeature{
+		Command:      cmd,
+		Description:  fields["Description"],
+		Group:        fields["Group"],
+		WhyItMatters: fields["WhyItMatters"],
+	}, true
+}
+
+func parseWhichCompositeFields(rest string) (map[string]string, bool) {
+	fields := map[string]string{}
+	for {
+		rest = strings.TrimSpace(rest)
+		if rest == "" || strings.HasPrefix(rest, "}") {
+			return fields, true
+		}
+		name, after, ok := strings.Cut(rest, ":")
+		if !ok {
+			return nil, false
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || strings.ContainsAny(name, "\",{}") {
+			return nil, false
+		}
+		after = strings.TrimSpace(after)
+		val, n, ok := parseGoQuotedPrefix(after)
+		if !ok {
+			return nil, false
+		}
+		fields[name] = val
+		rest = strings.TrimPrefix(strings.TrimSpace(after[n:]), ",")
+	}
+}
+
+func parseGoQuotedPrefix(s string) (string, int, bool) {
+	if !strings.HasPrefix(s, `"`) {
+		return "", 0, false
+	}
+	escaped := false
+	for i := 1; i < len(s); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if s[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if s[i] == '"' {
+			val, err := strconv.Unquote(s[:i+1])
+			if err != nil {
+				return "", 0, false
+			}
+			return val, i + 1, true
+		}
+	}
+	return "", 0, false
+}
+
+const mcpCommandMirrorKey = `"command_mirror_capabilities": []map[string]string{`
+
+func syncMCPNovelFeatureContext(path string, features []NovelFeature, overwrite bool) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	content := string(data)
+	existing, found := mcpMapListBlock(content, mcpCommandMirrorKey)
+	if !found {
+		return false, nil
+	}
+	replacement := renderMCPCommandMirrorCapabilities(features)
+	if existing == replacement {
+		return false, nil
+	}
+	if !overwrite {
+		fmt.Fprintf(os.Stderr, "dogfood: left unmodified %s (command_mirror_capabilities); on-disk block differs from research.json\n",
+			filepath.Join("internal", "mcp", "tools.go"))
+		return false, nil
+	}
+	updated := syncMCPMapList(content, mcpCommandMirrorKey, replacement)
+	if updated == content {
+		return false, nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return false, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return true, nil
+}
+
+func mcpMapListBlock(content, key string) (string, bool) {
+	start := strings.Index(content, key)
+	if start < 0 {
+		return "", false
+	}
+	end := findGoCompositeLiteralEnd(content, start+len(key)-1)
+	if end < 0 {
+		return "", false
+	}
+	return content[start:end], true
 }
 
 func renderMCPCommandMirrorCapabilities(features []NovelFeature) string {
@@ -529,10 +707,10 @@ func renderMCPCommandMirrorCapabilities(features []NovelFeature) string {
 		// literal rather than "" so syncMCPMapList does a normal in-place replace
 		// (preserving the surrounding indentation) instead of taking its delete
 		// branch, which would strip the leading tabs off the following map entry.
-		return "\"command_mirror_capabilities\": []map[string]string{\n\t\t},"
+		return mcpCommandMirrorKey + "\n\t\t},"
 	}
 	var b strings.Builder
-	b.WriteString(`"command_mirror_capabilities": []map[string]string{`)
+	b.WriteString(mcpCommandMirrorKey)
 	for _, feature := range features {
 		b.WriteString("\n\t\t\t{\"name\": ")
 		b.WriteString(goStringLiteral(feature.Name))

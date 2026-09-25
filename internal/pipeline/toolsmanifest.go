@@ -26,16 +26,17 @@ const ToolsManifestFilename = "tools-manifest.json"
 // ToolsManifest describes every MCP tool for an API, along with API-level
 // metadata, in a form the diagnostic commands can read directly.
 type ToolsManifest struct {
-	APIName         string           `json:"api_name"`
-	BaseURL         string           `json:"base_url"`
-	Description     string           `json:"description"`
-	MCPReady        string           `json:"mcp_ready"`
-	HTTPTransport   string           `json:"http_transport,omitempty"`
-	MCP             *ManifestMCP     `json:"mcp,omitempty"`
-	Auth            ManifestAuth     `json:"auth"`
-	TierRouting     *ManifestTiers   `json:"tier_routing,omitempty"`
-	RequiredHeaders []ManifestHeader `json:"required_headers"`
-	Tools           []ManifestTool   `json:"tools"`
+	APIName         string                 `json:"api_name"`
+	BaseURL         string                 `json:"base_url"`
+	Description     string                 `json:"description"`
+	MCPReady        string                 `json:"mcp_ready"`
+	HTTPTransport   string                 `json:"http_transport,omitempty"`
+	MCP             *ManifestMCP           `json:"mcp,omitempty"`
+	Auth            ManifestAuth           `json:"auth"`
+	TierRouting     *ManifestTiers         `json:"tier_routing,omitempty"`
+	RequiredHeaders []ManifestHeader       `json:"required_headers"`
+	Tools           []ManifestTool         `json:"tools"`
+	NovelFeatures   []NovelFeatureManifest `json:"novel_features,omitempty"`
 }
 
 // ManifestMCP persists the endpoint visibility fields needed by manifest
@@ -119,14 +120,15 @@ type ManifestTier struct {
 
 // ManifestTool describes a single MCP tool derived from an API endpoint.
 type ManifestTool struct {
-	Name            string           `json:"name"`
-	Description     string           `json:"description"`
-	Method          string           `json:"method"`
-	Path            string           `json:"path"`
-	Tier            string           `json:"tier,omitempty"`
-	NoAuth          bool             `json:"no_auth,omitempty"`
-	Params          []ManifestParam  `json:"params"`
-	HeaderOverrides []ManifestHeader `json:"header_overrides,omitempty"`
+	Name              string           `json:"name"`
+	Description       string           `json:"description"`
+	DescriptionSource string           `json:"description_source,omitempty"`
+	Method            string           `json:"method"`
+	Path              string           `json:"path"`
+	Tier              string           `json:"tier,omitempty"`
+	NoAuth            bool             `json:"no_auth,omitempty"`
+	Params            []ManifestParam  `json:"params"`
+	HeaderOverrides   []ManifestHeader `json:"header_overrides,omitempty"`
 }
 
 // ManifestParam describes a tool parameter with an explicit location
@@ -192,12 +194,17 @@ func WriteToolsManifestWithDescription(dir string, parsed *spec.APISpec, manifes
 	manifest := ToolsManifest{
 		APIName:         parsed.Name,
 		BaseURL:         parsed.BaseURL,
-		Description:     parsed.Description,
+		Description:     manifestDescriptionFallback(parsed),
 		MCPReady:        mcpReady,
 		HTTPTransport:   parsed.EffectiveHTTPTransport(),
 		Auth:            manifestAuth(parsed.Auth),
 		RequiredHeaders: make([]ManifestHeader, 0, len(parsed.RequiredHeaders)),
 		Tools:           make([]ManifestTool, 0),
+	}
+	if novelFeatures, err := novelFeaturesForToolsManifest(dir); err != nil {
+		return err
+	} else {
+		manifest.NovelFeatures = novelFeatures
 	}
 	if parsed.MCP.EndpointTools != "" || parsed.MCP.Orchestration != "" {
 		manifest.MCP = &ManifestMCP{
@@ -220,14 +227,14 @@ func WriteToolsManifestWithDescription(dir string, parsed *spec.APISpec, manifes
 	}
 
 	for _, endpoint := range endpoints {
-		desc := mcpdesc.Compose(mcpdesc.Input{
+		desc := mcpdesc.ComposeWithSource(mcpdesc.Input{
 			Endpoint:    endpoint.Endpoint,
 			NoAuth:      endpoint.NoAuth,
 			AuthType:    endpoint.AuthType,
 			PublicCount: public,
 			TotalCount:  total,
 		})
-		tool := buildManifestTool(endpoint.ToolName, desc, endpoint.Endpoint, paramDescriptions.Description)
+		tool := buildManifestTool(endpoint.ToolName, desc.Description, desc.Source, endpoint.Endpoint, paramDescriptions.Description)
 		tool.Tier = endpoint.Tier
 		tool.NoAuth = endpoint.NoAuth
 		manifest.Tools = append(manifest.Tools, tool)
@@ -243,6 +250,44 @@ func WriteToolsManifestWithDescription(dir string, parsed *spec.APISpec, manifes
 		return fmt.Errorf("writing tools manifest: %w", err)
 	}
 	return nil
+}
+
+func novelFeaturesForToolsManifest(dir string) ([]NovelFeatureManifest, error) {
+	cliManifest, err := ReadCLIManifest(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s for tools manifest: %w", CLIManifestFilename, err)
+	}
+	return append([]NovelFeatureManifest(nil), cliManifest.NovelFeatures...), nil
+}
+
+func syncToolsManifestNovelFeatures(dir string, features []NovelFeatureManifest) error {
+	manifest, err := ReadToolsManifest(dir)
+	if err != nil {
+		return err
+	}
+	manifest.NovelFeatures = append([]NovelFeatureManifest(nil), features...)
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling tools manifest: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(dir, ToolsManifestFilename), data, 0o644); err != nil {
+		return fmt.Errorf("writing tools manifest: %w", err)
+	}
+	return nil
+}
+
+func manifestDescriptionFallback(parsed *spec.APISpec) string {
+	if parsed == nil {
+		return ""
+	}
+	if desc := naming.AuthoredDescription(parsed.CLIDescription); desc != "" {
+		return desc
+	}
+	return parsed.Description
 }
 
 func buildManifestTiers(tierRouting spec.TierRoutingConfig) *ManifestTiers {
@@ -359,7 +404,7 @@ func effectiveManifestEndpointAuth(parsed *spec.APISpec, resource spec.Resource,
 
 // buildManifestTool creates a ManifestTool from an endpoint, classifying
 // each parameter's location.
-func buildManifestTool(name, description string, ep spec.Endpoint, describeParam func(spec.Param) string) ManifestTool {
+func buildManifestTool(name, description, descriptionSource string, ep spec.Endpoint, describeParam func(spec.Param) string) ManifestTool {
 	tool := ManifestTool{
 		Name:        name,
 		Description: description,
@@ -367,6 +412,9 @@ func buildManifestTool(name, description string, ep spec.Endpoint, describeParam
 		Path:        ep.Path,
 		NoAuth:      ep.NoAuth,
 		Params:      make([]ManifestParam, 0, len(ep.Params)+len(ep.Body)),
+	}
+	if descriptionSource == mcpdesc.SourceGenerated {
+		tool.DescriptionSource = descriptionSource
 	}
 	publicNames := reservedManifestParamNames(ep)
 
@@ -448,7 +496,7 @@ func manifestBodyParams(ep spec.Endpoint) []manifestBodyParam {
 		}
 		return params
 	}
-	body := paramnames.FlattenCollidingBodyFields(ep.Body)
+	body := paramnames.FlattenCollidingBodyFieldsAtDepth(ep.Body, manifestMaxBodyFlagDepth)
 	params := make([]manifestBodyParam, 0, len(body))
 	collectManifestBodyParams(&params, body, 0, "", nil)
 	return params
@@ -462,12 +510,11 @@ func manifestBodyUsesFlatEmission(ep spec.Endpoint) bool {
 func collectManifestBodyParams(params *[]manifestBodyParam, body []spec.Param, depth int, flagPrefix string, bodyPath []string) {
 	for _, p := range body {
 		if p.Type == "object" && len(p.Fields) > 0 {
-			if depth+1 >= manifestMaxBodyFlagDepth {
+			if depth+1 < manifestMaxBodyFlagDepth {
+				nextPath := append(append([]string(nil), bodyPath...), p.BodyWireName())
+				collectManifestBodyParams(params, p.Fields, depth+1, naming.JoinFlag(flagPrefix, paramnames.PublicFlagName(p)), nextPath)
 				continue
 			}
-			nextPath := append(append([]string(nil), bodyPath...), p.BodyWireName())
-			collectManifestBodyParams(params, p.Fields, depth+1, naming.JoinFlag(flagPrefix, paramnames.PublicFlagName(p)), nextPath)
-			continue
 		}
 		if flagPrefix != "" {
 			p.FlagName = naming.JoinFlag(flagPrefix, paramnames.PublicFlagName(p))

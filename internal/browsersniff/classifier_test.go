@@ -315,6 +315,18 @@ func TestDeduplicateEndpoints(t *testing.T) {
 			wantGroupSizes:      []int{1, 1},
 		},
 		{
+			// read_progresses matches the prefixed-ID length/prefix shape
+			// (read_ + 8+ alnum) but the tail is an ordinary lowercase
+			// route word, not an opaque application ID.
+			name: "literal snake_case route segment is not a prefixed id",
+			entries: []EnrichedEntry{
+				{Method: "GET", URL: "https://example.com/api/v1/users/35854/read_progresses"},
+			},
+			wantMethods:         []string{"GET"},
+			wantNormalizedPaths: []string{"/api/v1/users/{user_id}/read_progresses"},
+			wantGroupSizes:      []int{1},
+		},
+		{
 			// Short opaque IDs (`abc123`, `xyz456`) fail every per-segment ID
 			// regex in isolation — they're too short for the long-alnum or
 			// hash patterns and have no type prefix. The cross-entry variance
@@ -426,7 +438,10 @@ func TestDeduplicateEndpoints_SingleEntryHeuristics(t *testing.T) {
 		{"prefixed application id under resource", "https://example.com/records/r_0tf32xmAhEgGSh3TDWR", "/records/{record_id}"},
 		{"colon-composite under resource", "https://example.com/forms/creations/create-image:reference:gpt-image-2", "/forms/creations/{creation_id}"},
 		{"long base62 id under resource", "https://example.com/history/Zu2uNCmGDnmNCel8gbFQ", "/history/{history_id}"},
+		{"iso date under route", "https://example.com/predict/2026-08-16", "/predict/{date}"},
+		{"adjacent uppercase compact codes", "https://example.com/predict/FR/STN/DUB/2026-08-16", "/predict/{segment_0}/{segment_1}/{segment_2}/{date}"},
 		{"literal short segments remain literal", "https://example.com/api/health", "/api/health"},
+		{"single uppercase literal remains literal", "https://example.com/api/JSON", "/api/JSON"},
 		{"version segment retains literal v1 framing", "https://example.com/api/v1/users", "/api/v1/users"},
 		{"consecutive ids under same parent disambiguate", "https://example.com/resources/123/456", "/resources/{resource_id}/{resource_id_2}"},
 	}

@@ -129,6 +129,144 @@ func TestAnalyzeCapture_PrefersCanonicalCollectionEnvelope(t *testing.T) {
 	assert.Equal(t, "title", apiSpec.Types["SearchItem"].Fields[1].Name)
 }
 
+func TestAnalyzeCapture_PromotesPostFormHTMLTableFragment(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := AnalyzeCapture(&EnrichedCapture{
+		TargetURL: "https://www.example.com/contracts",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "POST",
+				URL:                 "https://www.example.com/nba/contracts/_/position/g",
+				RequestHeaders:      map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest"},
+				RequestBody:         "ajax=table",
+				ResponseStatus:      200,
+				ResponseContentType: "text/html; charset=utf-8",
+				ResponseBody:        `<table><thead><tr><th>Player</th><th>Salary</th></tr></thead><tbody><tr><td>Ada Lovelace</td><td>$100</td></tr><tr><td>Grace Hopper</td><td>$200</td></tr></tbody></table>`,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	endpoint, found := findEndpointByPath(apiSpec, "/nba/contracts/_/position/g")
+	require.True(t, found, "expected POST HTML table endpoint to be promoted")
+	assert.Equal(t, "POST", endpoint.Method)
+	assert.Equal(t, "application/x-www-form-urlencoded", endpoint.RequestContentType)
+	assert.Equal(t, spec.ResponseFormatHTML, endpoint.ResponseFormat)
+	require.NotNil(t, endpoint.HTMLExtract)
+	assert.Equal(t, spec.HTMLExtractModeTable, endpoint.HTMLExtract.Mode)
+	assert.Equal(t, spec.ResponseDef{Type: "array", Item: "html_table_row"}, endpoint.Response)
+	assert.Equal(t, map[string]string{"mcp:read-only": "true"}, endpoint.Meta)
+	require.Len(t, endpoint.Body, 1)
+	assert.Equal(t, "ajax", endpoint.Body[0].Name)
+	assert.Equal(t, "table", endpoint.Body[0].Default)
+	require.NoError(t, apiSpec.Validate())
+}
+
+func TestAnalyzeCapture_OmitsCapturedResourceIDFormDefaults(t *testing.T) {
+	t.Parallel()
+
+	const cliID = "cli_a1b2c3d4e5f6g7h8i9j0"
+	apiSpec, err := AnalyzeCapture(&EnrichedCapture{
+		TargetURL: "https://www.example.com/contracts",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "POST",
+				URL:                 "https://www.example.com/nba/contracts/_/position/g",
+				RequestHeaders:      map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest"},
+				RequestBody:         "ajax=table&clientId=" + cliID,
+				ResponseStatus:      200,
+				ResponseContentType: "text/html; charset=utf-8",
+				ResponseBody:        `<table><thead><tr><th>Player</th></tr></thead><tbody><tr><td>Ada</td></tr></tbody></table>`,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	endpoint, found := findEndpointByPath(apiSpec, "/nba/contracts/_/position/g")
+	require.True(t, found)
+	byName := map[string]spec.Param{}
+	for _, param := range endpoint.Body {
+		byName[param.Name] = param
+	}
+	require.Contains(t, byName, "ajax")
+	assert.Equal(t, "table", byName["ajax"].Default)
+	require.Contains(t, byName, "clientId")
+	assert.Nil(t, byName["clientId"].Default)
+
+	specPath := filepath.Join(t.TempDir(), "form-spec.yaml")
+	require.NoError(t, WriteSpec(apiSpec, specPath))
+	specYAML, err := os.ReadFile(specPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(specYAML), cliID)
+}
+
+func TestAnalyzeCapture_GetHTMLWithTableStillPrefersLinks(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := AnalyzeCapture(&EnrichedCapture{
+		TargetURL: "https://www.example.com/results",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://www.example.com/products",
+				ResponseStatus:      200,
+				ResponseContentType: "text/html; charset=utf-8",
+				ResponseBody:        `<html><body><a href="/products/1">Item 1</a><table><tr><th>Name</th></tr><tr><td>Widget</td></tr></table></body></html>`,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	endpoint, found := findEndpointByPath(apiSpec, "/products")
+	require.True(t, found, "expected GET HTML endpoint")
+	require.NotNil(t, endpoint.HTMLExtract)
+	assert.Equal(t, spec.HTMLExtractModeLinks, endpoint.HTMLExtract.Mode)
+	assert.Equal(t, spec.ResponseDef{Type: "array", Item: "html"}, endpoint.Response)
+}
+
+func TestAnalyzeCapture_ParameterizesCompactSingleSampleIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := AnalyzeCapture(&EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/predict/FR/STN/DUB/2026-08-16",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"price":123}`,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	endpoint, found := findEndpointByPath(apiSpec, "/predict/{segment_0}/{segment_1}/{segment_2}/{date}")
+	require.True(t, found, "expected compact identifier path in generated spec")
+	assert.Equal(t, "/predict/{segment_0}/{segment_1}/{segment_2}/{date}", endpoint.Path)
+	assert.ElementsMatch(t, []string{"segment_0", "segment_1", "segment_2", "date"}, paramNames(endpoint.Params))
+}
+
+func findEndpointByPath(apiSpec *spec.APISpec, path string) (spec.Endpoint, bool) {
+	for _, resource := range apiSpec.Resources {
+		for _, endpoint := range resource.Endpoints {
+			if endpoint.Path == path {
+				return endpoint, true
+			}
+		}
+	}
+	return spec.Endpoint{}, false
+}
+
+func paramNames(params []spec.Param) []string {
+	names := make([]string, 0, len(params))
+	for _, param := range params {
+		names = append(names, param.Name)
+	}
+	return names
+}
+
 func TestSingularizeSESWords(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +352,7 @@ func TestAnalyzeCapture_UsesCapturedCookieAuth(t *testing.T) {
 	assert.Equal(t, "Cookie", apiSpec.Auth.Header)
 	assert.Equal(t, "cookie", apiSpec.Auth.In)
 	assert.Equal(t, "spotify.com", apiSpec.Auth.CookieDomain)
+	assert.Equal(t, []string{"_session"}, apiSpec.Auth.Cookies)
 	assert.Equal(t, []string{"SPOTIFY_COOKIES"}, apiSpec.Auth.EnvVars)
 }
 
@@ -318,6 +457,67 @@ func TestAnalyzeCapture_ExpandsGraphQLBFFOperations(t *testing.T) {
 	launches := products.Endpoints["launches"]
 	assert.Equal(t, "POST", launches.Method)
 	assert.Equal(t, "/frontend/graphql", launches.Path)
+}
+
+func TestAnalyzeCapture_StripsCapturedResourceIDsFromDefaults(t *testing.T) {
+	t.Parallel()
+
+	const (
+		cliID  = "cli_a1b2c3d4e5f6g7h8i9j0"
+		propID = "prop_k9m2n3p4q5r6s7t8u9v0"
+		hash   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	capture := &EnrichedCapture{
+		TargetURL: "https://www.example.com",
+		Entries: []EnrichedEntry{
+			graphqlBFFEntry("GetClient", `{"id":"`+cliID+`","clientId":"`+cliID+`"}`, hash),
+			graphqlBFFEntry("GetProperty", `{"id":"`+propID+`"}`, hash),
+		},
+	}
+
+	apiSpec, err := AnalyzeCapture(capture)
+	require.NoError(t, err)
+	require.NotNil(t, apiSpec)
+
+	specPath := filepath.Join(t.TempDir(), "example-spec.yaml")
+	require.NoError(t, WriteSpec(apiSpec, specPath))
+	specYAML, err := os.ReadFile(specPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(specYAML), cliID)
+	assert.NotContains(t, string(specYAML), propID)
+
+	var foundClientVars, foundPropertyVars, foundHash bool
+	for _, resource := range apiSpec.Resources {
+		for _, endpoint := range resource.Endpoints {
+			for _, param := range append(append([]spec.Param{}, endpoint.Params...), endpoint.Body...) {
+				switch param.Name {
+				case "variables":
+					vars, ok := param.Default.(map[string]any)
+					require.True(t, ok)
+					switch {
+					case vars["clientId"] != nil:
+						foundClientVars = true
+						assert.Equal(t, "cli_example0000000000000", vars["id"])
+						assert.Equal(t, "cli_example0000000000000", vars["clientId"])
+					case vars["id"] == "prop_example0000000000000":
+						foundPropertyVars = true
+					}
+				case "operationName":
+					assert.Contains(t, []string{"GetClient", "GetProperty"}, param.Default)
+				case "extensions":
+					extensions, ok := param.Default.(map[string]any)
+					require.True(t, ok)
+					persisted, ok := extensions["persistedQuery"].(map[string]any)
+					require.True(t, ok)
+					assert.Equal(t, hash, persisted["sha256Hash"])
+					foundHash = true
+				}
+			}
+		}
+	}
+	assert.True(t, foundClientVars, "expected GetClient variables")
+	assert.True(t, foundPropertyVars, "expected GetProperty variables")
+	assert.True(t, foundHash, "expected persisted query hash to be preserved")
 }
 
 func TestAnalyzeCapture_ExpandsURLOnlyGraphQLBFFOperations(t *testing.T) {
@@ -1135,6 +1335,18 @@ func TestSampleFilename_StripsBraces(t *testing.T) {
 	assert.Contains(t, got, "orders_orderId_items_itemId")
 }
 
+func TestSampleFilename_TruncatesLongPathSlug(t *testing.T) {
+	t.Parallel()
+
+	got := sampleFilename(EndpointGroup{
+		Method:         "GET",
+		NormalizedPath: "/" + strings.Repeat("playlist_segment_", 40) + "playlist.m3u8",
+	})
+
+	assert.LessOrEqual(t, len(got), 120)
+	assert.Regexp(t, `^get__.*__[0-9a-f]{8}\.json$`, got)
+}
+
 func TestSelectSampleEntry_PrefersMostRecentSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -1313,6 +1525,54 @@ func TestWriteSamples_OmitsResponseBodyKnownWhenAbsent(t *testing.T) {
 	assert.Nil(t, sample.ResponseBody)
 }
 
+func TestWriteSamples_RedactsNestedAuthorizationAndKeepsURLPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const basicBlob = "QWxpY2U6c2VjcmV0MTIz"
+	const pathSeg = "YWJjZGVmZ2hpamtsbW5vcA"
+	rawURL := "https://api.example.com/objects/" + pathSeg + "/meta"
+	capture := &EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method: "POST",
+				URL:    rawURL,
+				RequestHeaders: map[string]string{
+					"Content-Type": "application/json",
+				},
+				RequestBody:         `{"name":"headers","formulaMap":{"Authorization":"\"Basic ` + basicBlob + `\""},"url":"` + rawURL + `"}`,
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"ok":true}`,
+			},
+		},
+	}
+
+	written, err := WriteSamples(capture, dir)
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+
+	files, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	data, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), basicBlob)
+	assert.Contains(t, string(data), rawURL)
+
+	var sample SampleFile
+	require.NoError(t, json.Unmarshal(data, &sample))
+	assert.Equal(t, rawURL, sample.RawURL)
+	body, ok := sample.RequestBody.(map[string]any)
+	require.True(t, ok)
+	formula, ok := body["formulaMap"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, RedactedSentinel, formula["Authorization"])
+	assert.Equal(t, rawURL, body["url"])
+}
+
 func TestWriteSamples_TruncatesOversizedBodies(t *testing.T) {
 	t.Parallel()
 
@@ -1393,4 +1653,128 @@ func findBodyParam(params []spec.Param, name string) *spec.Param {
 		}
 	}
 	return nil
+}
+
+func TestAnalyzeCapture_KeepsRequestRouteOriginSemanticsFromMultiHostHAR(t *testing.T) {
+	t.Parallel()
+
+	htmlHome := `<html><head><title>Library</title><meta name="description" content="home"></head>` +
+		`<body><a href="/products/one">One</a><a href="/products/two">Two</a></body></html>`
+	capture := &EnrichedCapture{
+		TargetURL: "https://www.example.com/",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "POST",
+				URL:                 "https://browser-intake-datadoghq.com/api/v2/rum?dd-api-key=wrong-service",
+				RequestHeaders:      map[string]string{"Content-Type": "application/json"},
+				RequestBody:         `[{"type":"view"}]`,
+				ResponseStatus:      202,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"status":"ok"}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://auth.thirdparty.example/oauth/authorize?key=pk_live_should_not_become_auth",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"ok":true}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/api/ms-1/skills",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"skills":[{"id":"sk_1","name":"focus"}]}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/api/v1/xp",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"1":10,"2":20}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/api/v1/users/35854/read_progresses",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"progress":1}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/api/v1/tables/t_0t3vswhpKogASf2XZpW",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"id":"t_0t3vswhpKogASf2XZpW"}`,
+			},
+			{
+				Method:              "POST",
+				URL:                 "https://api.example.com/api/v1/session",
+				RequestHeaders:      map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+				RequestBody:         `{"email":"ada@example.com","remember":true}`,
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"ok":true}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://www.example.com/",
+				ResponseStatus:      200,
+				ResponseContentType: "text/html; charset=utf-8",
+				ResponseBody:        htmlHome,
+			},
+		},
+	}
+
+	apiSpec, err := AnalyzeCapture(capture)
+	require.NoError(t, err)
+	require.NoError(t, apiSpec.Validate())
+
+	assert.Equal(t, "https://api.example.com", apiSpec.BaseURL)
+	assert.Equal(t, spec.TierAuthTypeNone, apiSpec.Auth.Type)
+
+	skills, found := findEndpointByPath(apiSpec, "/api/ms-1/skills")
+	require.True(t, found, "expected GET /api/ms-1/skills")
+	assert.Empty(t, skills.Params, "GET with no observed request params must not inherit response fields")
+	assert.Empty(t, skills.Body)
+	assert.Empty(t, skills.BaseURL)
+
+	xp, found := findEndpointByPath(apiSpec, "/api/v1/xp")
+	require.True(t, found, "expected GET /api/v1/xp")
+	assert.Empty(t, xp.Params, "map-shaped response keys must not become request params")
+
+	progress, found := findEndpointByPath(apiSpec, "/api/v1/users/{user_id}/read_progresses")
+	require.True(t, found, "expected literal read_progresses segment")
+	assert.ElementsMatch(t, []string{"user_id"}, paramNames(progress.Params))
+	_, invented := findEndpointByPath(apiSpec, "/api/v1/users/{user_id}/{user_id_2}")
+	assert.False(t, invented, "snake_case route word must not become a second path param")
+
+	table, found := findEndpointByPath(apiSpec, "/api/v1/tables/{table_id}")
+	require.True(t, found, "opaque prefixed IDs must still parameterize")
+	assert.ElementsMatch(t, []string{"table_id"}, paramNames(table.Params))
+
+	session, found := findEndpointByPath(apiSpec, "/api/v1/session")
+	require.True(t, found, "expected POST /api/v1/session")
+	assert.Equal(t, "application/json", session.RequestContentType)
+	assert.ElementsMatch(t, []string{"email", "remember"}, paramNames(session.Body))
+	assert.NotContains(t, paramNames(session.Body), `{"email":"ada@example.com","remember":true}`)
+
+	home, found := findEndpointByPath(apiSpec, "/")
+	require.True(t, found, "expected first-party HTML home")
+	assert.Equal(t, "https://www.example.com", home.BaseURL)
+	assert.Equal(t, spec.ResponseFormatHTML, home.ResponseFormat)
+
+	for _, resource := range apiSpec.Resources {
+		for _, endpoint := range resource.Endpoints {
+			assert.NotContains(t, endpoint.Path, "oauth")
+			assert.NotEqual(t, "https://auth.thirdparty.example", endpoint.BaseURL)
+		}
+	}
+
+	preserved, err := AnalyzeCaptureWithOptions(capture, AnalyzeOptions{PreserveHosts: true})
+	require.NoError(t, err)
+	homePreserved, found := findEndpointByPath(preserved, "/")
+	require.True(t, found)
+	assert.Equal(t, "https://www.example.com", homePreserved.BaseURL,
+		"--preserve-hosts must not be required to keep a first-party HTML origin")
 }

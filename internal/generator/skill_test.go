@@ -125,6 +125,8 @@ func TestSkillRendersFrontmatterAndCapabilities(t *testing.T) {
 		"Prerequisites must appear before Command Reference so agents read install instructions before deciding to run a command")
 	assert.True(t, strings.Contains(content, "| 10 | Config error"),
 		"Exit codes table should render")
+	assert.False(t, strings.Contains(content, "| 6 | Partial failure"),
+		"read-only specs must not document unused exit code 6")
 }
 
 // TestSkillFallsBackWhenNarrativeAbsent asserts SKILL.md still renders a
@@ -181,7 +183,33 @@ func TestReadOnlyNoAuthSkillSuppressesInapplicableBoilerplate(t *testing.T) {
 	assert.NotContains(t, content, "--wait-timeout")
 	assert.NotContains(t, content, "| 4 | Authentication required |")
 	assert.Contains(t, content, "| 7 | Rate limited")
+	assert.NotContains(t, content, "| 6 | Partial failure")
 	assert.NotContains(t, content, "GET responses cached for 5 minutes")
+}
+
+func TestSkillAndReadmeDocumentPartialFailureExitCode(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("partial-exit")
+	apiSpec.Resources["items"].Endpoints["create"] = spec.Endpoint{
+		Method:      "POST",
+		Path:        "/items",
+		Description: "Create item",
+	}
+	outputDir := filepath.Join(t.TempDir(), "partial-exit-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(skill), "| 6 | Partial failure")
+	assert.Contains(t, string(skill), "| 5 | API error")
+	assert.Contains(t, string(skill), "| 7 | Rate limited")
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(readme), "`6` partial failure")
+	assert.Contains(t, string(readme), "`5` API error")
+	assert.Contains(t, string(readme), "`7` rate limited")
 }
 
 // TestSkillFrontmatterEscapesNarrativeQuotesAndNewlines asserts that
@@ -349,7 +377,7 @@ func TestCompactDescriptionPrefersCLIShapedCopy(t *testing.T) {
 	assert.NotContains(t, string(goreleaser), "# Introduction")
 }
 
-func TestCatalogDescriptionPreservesCompleteLongCopy(t *testing.T) {
+func TestManifestDescriptionPreservesCompleteLongCopy(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := minimalSpec("longcopy")
@@ -357,10 +385,10 @@ func TestCatalogDescriptionPreservesCompleteLongCopy(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "longcopy-pp-cli")
 	gen := New(apiSpec, outputDir)
 
-	assert.Equal(t, apiSpec.CLIDescription, gen.CatalogDescription())
+	assert.Equal(t, apiSpec.CLIDescription, gen.ManifestDescription())
 }
 
-func TestCatalogDescriptionSkipsLiteralEllipsisCandidates(t *testing.T) {
+func TestManifestDescriptionSkipsLiteralEllipsisCandidates(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := minimalSpec("longcopy")
@@ -368,7 +396,7 @@ func TestCatalogDescriptionSkipsLiteralEllipsisCandidates(t *testing.T) {
 	apiSpec.Description = "Complete fallback sentence."
 	gen := New(apiSpec, filepath.Join(t.TempDir(), "longcopy-pp-cli"))
 
-	assert.Equal(t, "Complete fallback sentence.", gen.CatalogDescription())
+	assert.Equal(t, "Complete fallback sentence.", gen.ManifestDescription())
 }
 
 // TestSkillRendersAuthBranchPerType asserts the deterministic Auth Setup
@@ -407,6 +435,122 @@ func TestSkillRendersAuthBranchPerType(t *testing.T) {
 				"auth-type %q should produce %q in SKILL.md Auth Setup", tc.authType, tc.expect)
 		})
 	}
+}
+
+func TestSkillAuthNarrative(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty", func(t *testing.T) {
+		assert.Empty(t, skillAuthNarrative(spec.AuthConfig{Type: "api_key", EnvVars: []string{"FOO_API_KEY"}}, ""))
+	})
+	t.Run("no env tokens", func(t *testing.T) {
+		got := skillAuthNarrative(spec.AuthConfig{Type: "none"}, "Run auth login in a browser.")
+		assert.Equal(t, "Run auth login in a browser.", got)
+	})
+	t.Run("resolved name", func(t *testing.T) {
+		got := skillAuthNarrative(spec.AuthConfig{Type: "api_key", EnvVars: []string{"FOO_API_KEY"}}, "Export FOO_API_KEY.")
+		assert.Equal(t, "Export FOO_API_KEY.", got)
+	})
+	t.Run("foreign name", func(t *testing.T) {
+		got := skillAuthNarrative(spec.AuthConfig{Type: "api_key", EnvVars: []string{"FOO_USERNAME", "FOO_PASSWORD"}}, "Set FOO_API_KEY.")
+		assert.Empty(t, got)
+	})
+}
+
+func TestSkillAuthSetupNamesTheCredentialTheBinaryReads(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("skillcred")
+	apiSpec.Auth = spec.AuthConfig{
+		Type:    "api_key",
+		Header:  "X-API-Key",
+		EnvVars: []string{"SKILLCRED_API_KEY"},
+	}
+	outputDir := filepath.Join(t.TempDir(), "skillcred-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(configSrc), `cliutil.EnvOverride("SKILLCRED_API_KEY")`)
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(skill), "export SKILLCRED_API_KEY=")
+	assert.NotContains(t, string(skill), "PRINTING_PRESS_CLIENT_PROFILE")
+}
+
+func TestSkillAuthSetupDropsNarrativeThatNamesUnreadEnvVar(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("tierfree")
+	apiSpec.Auth = spec.AuthConfig{Type: "none"}
+	outputDir := filepath.Join(t.TempDir(), "tierfree-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		AuthNarrative: "Most commands are public, but premium download routes require `AA_API_KEY`.",
+	}
+	require.NoError(t, gen.Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	content := string(skill)
+
+	assert.NotContains(t, content, "AA_API_KEY")
+	assert.Contains(t, content, "No authentication required.")
+}
+
+func TestSkillAuthSetupKeepsNarrativeThatNamesResolvedEnvVar(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("narratedauth")
+	apiSpec.Auth = spec.AuthConfig{
+		Type:    "api_key",
+		EnvVars: []string{"NARRATEDAUTH_API_KEY"},
+	}
+	outputDir := filepath.Join(t.TempDir(), "narratedauth-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		AuthNarrative: "Export `NARRATEDAUTH_API_KEY` before calling premium routes.",
+	}
+	require.NoError(t, gen.Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	content := string(skill)
+
+	assert.Contains(t, content, "Export `NARRATEDAUTH_API_KEY` before calling premium routes.")
+	assert.NotContains(t, content, "No authentication required.")
+}
+
+func TestSkillAuthSetupUsesResolvedBasicPairOverForeignNarrative(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("maxiopair")
+	apiSpec.Auth = spec.AuthConfig{
+		Type:    "api_key",
+		Format:  "Basic {username}:{password}",
+		EnvVars: []string{"MAXIOPAIR_USERNAME", "MAXIOPAIR_PASSWORD"},
+	}
+	outputDir := filepath.Join(t.TempDir(), "maxiopair-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		AuthNarrative: "Set one secret, MAXIOPAIR_API_KEY. The CLI supplies the constant 'x' password for you.",
+	}
+	require.NoError(t, gen.Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	content := string(skill)
+
+	assert.NotContains(t, content, "MAXIOPAIR_API_KEY")
+	assert.Contains(t, content, "export MAXIOPAIR_USERNAME=")
+	assert.Contains(t, content, "export MAXIOPAIR_PASSWORD=")
+
+	configSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(configSrc), `cliutil.EnvOverride("MAXIOPAIR_USERNAME")`)
+	assert.Contains(t, string(configSrc), `cliutil.EnvOverride("MAXIOPAIR_PASSWORD")`)
+	assert.NotContains(t, string(configSrc), `cliutil.EnvOverride("MAXIOPAIR_API_KEY")`)
 }
 
 // TestSkillRendersExtraCommands asserts that hand-written commands declared
@@ -548,7 +692,7 @@ func TestSkillFrontmatterMetadataIsClawHubCompliantNestedYAML(t *testing.T) {
 		"kind: shell is invalid per ClawHub schema; must never appear")
 	assert.NotContains(t, content, `kind: "shell"`,
 		"kind: shell is invalid per ClawHub schema; must never appear")
-	assert.NotContains(t, content, `"command":`,
+	assert.NotContains(t, body, `"command":`,
 		"command field is not in ClawHub schema; must never appear in metadata")
 	assert.NotContains(t, content, `\"openclaw\":`,
 		"metadata must not be a JSON-string blob anymore")

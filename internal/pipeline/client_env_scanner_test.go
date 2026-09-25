@@ -4,17 +4,22 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/v4/internal/generator"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestScanClientEnvReads(t *testing.T) {
-	t.Run("returns nil when internal/client dir missing", func(t *testing.T) {
+	t.Run("returns empty when client and config dirs missing", func(t *testing.T) {
 		got, err := scanClientEnvReads(t.TempDir())
 		require.NoError(t, err)
-		assert.Nil(t, got)
+		assert.Empty(t, got)
 	})
 
 	t.Run("returns sorted dedup set of os.Getenv args", func(t *testing.T) {
@@ -118,6 +123,83 @@ func read() string { return os.Getenv("PICK_ME") }
 		got, err := scanClientEnvReads(dir)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"PICK_ME"}, got)
+	})
+
+	t.Run("includes os.Getenv reads from internal/config", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	if v := os.Getenv("HUDU_BASE_URL"); v != "" {
+		_ = v
+	}
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_CONFIG")
+	_ = os.Getenv("PRINTING_PRESS_VERIFY")
+}
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"HUDU_API_KEY", "HUDU_BASE_URL"}, got,
+			"config-package BASE_URL must be declared; config-file path and harness flags must not")
+	})
+
+	t.Run("includes cliutil.EnvOverride reads from internal/config", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "github.com/example/cli/internal/cliutil"
+
+func Load() {
+	if v := cliutil.EnvOverride("TENANTAPI_BASE_URL"); v != "" {
+		_ = v
+	}
+	_ = cliutil.EnvOverride("TENANTAPI_API_KEY")
+}
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"TENANTAPI_API_KEY", "TENANTAPI_BASE_URL"}, got)
+	})
+
+	t.Run("skips Getenv calls in _test.go files", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() { _ = os.Getenv("HUDU_API_KEY") }
+`)
+		writeConfigFile(t, dir, "config_perms_test.go", `package config
+
+import "os"
+
+func helper() { _ = os.Getenv("USERNAME") }
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"HUDU_API_KEY"}, got)
+	})
+
+	t.Run("unions client and config env reads", func(t *testing.T) {
+		dir := t.TempDir()
+		writeClientFile(t, dir, "client.go", `package client
+
+import "os"
+
+func refresh() string { return os.Getenv("HUDU_REFRESH_SECRET") }
+`)
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() string { return os.Getenv("HUDU_BASE_URL") }
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"HUDU_BASE_URL", "HUDU_REFRESH_SECRET"}, got)
 	})
 }
 
@@ -284,6 +366,252 @@ func read() string { return os.Getenv("PIZZA_HIDDEN_TOKEN") }
 		assert.False(t, entry.Required, "composed auth keeps user_config optional")
 	})
 
+	t.Run("discovered User-Agent override is optional and non-sensitive regardless of auth", func(t *testing.T) {
+		dir := t.TempDir()
+		cli := CLIManifest{
+			APIName:     "espn",
+			DisplayName: "ESPN",
+			MCPBinary:   "espn-pp-mcp",
+			AuthType:    "bearer_token",
+			AuthEnvVars: []string{"ESPN_TOKEN"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "espn-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{"ESPN_TOKEN": "${user_config.espn_token}"}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"espn_token": {Type: "string", Title: "ESPN_TOKEN", Required: true, Sensitive: true},
+			},
+		})
+		writeClientFile(t, dir, "client.go", `package client
+
+import "os"
+
+func read() string { return os.Getenv("ESPN_USER_AGENT") }
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		_, hasUA := got.Server.MCPConfig.Env["ESPN_USER_AGENT"]
+		assert.False(t, hasUA, "USER_AGENT has a compile-time fallback and must not be declared")
+		_, ok := got.UserConfig["espn_user_agent"]
+		assert.False(t, ok, "USER_AGENT must be omitted from user_config when the binary already defaults it")
+	})
+
+	t.Run("undeclared BASE_URL without compile-time default stays required", func(t *testing.T) {
+		dir := t.TempDir()
+		cli := CLIManifest{
+			APIName:     "hudu",
+			DisplayName: "Hudu",
+			MCPBinary:   "hudu-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"HUDU_API_KEY"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "hudu-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{"HUDU_API_KEY": "${user_config.hudu_api_key}"}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"hudu_api_key": {Type: "string", Title: "HUDU_API_KEY", Required: true, Sensitive: true},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	if v := os.Getenv("HUDU_BASE_URL"); v != "" {
+		_ = v
+	}
+	_ = os.Getenv("HUDU_CONFIG")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.hudu_api_key}", got.Server.MCPConfig.Env["HUDU_API_KEY"])
+		assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+		_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+		assert.False(t, hasConfig, "config-file path must not become MCPB user_config")
+
+		entry, ok := got.UserConfig["hudu_base_url"]
+		require.True(t, ok)
+		assert.Equal(t, "HUDU_BASE_URL", entry.Title)
+		assert.Equal(t, "string", entry.Type)
+		assert.True(t, entry.Required, "BASE_URL without a compile-time default must stay required")
+		assert.False(t, entry.Sensitive)
+		assert.Contains(t, entry.Description, "HUDU_BASE_URL")
+		assert.Contains(t, entry.Description, "not a credential")
+		assert.NotContains(t, entry.Description, "credential refresh")
+		assert.NotContains(t, entry.Description, "Optional.")
+	})
+
+	t.Run("platform profile still promotes credentials the binary reads", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:     "hudu",
+			DisplayName: "Hudu",
+			MCPBinary:   "hudu-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"HUDU_API_KEY"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "hudu-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{}},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_BASE_URL")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.hudu_api_key}", got.Server.MCPConfig.Env["HUDU_API_KEY"])
+		assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+		_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+		assert.False(t, hasProfile)
+		_, ok := got.UserConfig["hudu_base_url"]
+		assert.True(t, ok)
+		assert.True(t, got.UserConfig["hudu_base_url"].Required, "BASE_URL without a compile-time default stays required")
+	})
+
+	t.Run("platform profile still declares required endpoint template vars", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:              "shopify",
+			DisplayName:          "Shopify",
+			MCPBinary:            "shopify-pp-mcp",
+			AuthType:             "api_key",
+			AuthEnvVars:          []string{"SHOPIFY_ACCESS_TOKEN"},
+			EndpointTemplateVars: []string{"shop"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "shopify-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{}},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+	_ = os.Getenv("SHOPIFY_SHOP")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+		assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+		_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+		assert.False(t, hasProfile)
+		shop, ok := got.UserConfig["shopify_shop"]
+		require.True(t, ok, "required {shop} must be promoted when discovered next to the profile selector")
+		assert.Equal(t, "SHOPIFY_SHOP", shop.Title)
+		assert.True(t, shop.Required, "{shop} has no spec-level default")
+		assert.False(t, shop.Sensitive)
+		assert.Contains(t, shop.Description, "{shop}")
+		assert.NotContains(t, shop.Description, "credential refresh")
+	})
+
+	t.Run("platform profile rejects auth-named endpoint override", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:                      "shopify",
+			DisplayName:                  "Shopify",
+			MCPBinary:                    "shopify-pp-mcp",
+			AuthType:                     "api_key",
+			AuthEnvVars:                  []string{"SHOPIFY_ACCESS_TOKEN"},
+			EndpointTemplateVars:         []string{"shop"},
+			EndpointTemplateEnvOverrides: map[string]string{"shop": "SHOPIFY_ACCESS_TOKEN"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "shopify-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{}},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+	_ = os.Getenv("SHOPIFY_SHOP")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+		tokenField, hasTokenField := got.UserConfig["shopify_access_token"]
+		require.True(t, hasTokenField)
+		assert.True(t, tokenField.Sensitive)
+		assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+		shop, ok := got.UserConfig["shopify_shop"]
+		require.True(t, ok)
+		assert.False(t, shop.Sensitive)
+	})
+
+	t.Run("platform profile promotes Getenv names the binary reads", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:     "shopify",
+			DisplayName: "Shopify",
+			MCPBinary:   "shopify-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "shopify-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{}},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+	_ = os.Getenv("SHOPIFY_SHOP")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+		assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+		_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+		assert.False(t, hasProfile)
+	})
+
 	t.Run("manifest with nil env/userconfig maps gets populated", func(t *testing.T) {
 		dir := t.TempDir()
 		cli := CLIManifest{APIName: "x", MCPBinary: "x-pp-mcp", AuthType: "api_key"}
@@ -346,6 +674,45 @@ func refresh() (string, string) {
 		assert.True(t, entry.Required, "%s must be required when base auth requires credential", key)
 		assert.NotContains(t, entry.Description, "Optional.", "%s must not carry Optional prefix on required auth", key)
 	}
+}
+
+func TestWriteMCPBManifestFromStruct_ReconcilesConfigBaseURLWithPlatformProfile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+	writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_BASE_URL")
+	_ = os.Getenv("HUDU_CONFIG")
+}
+`)
+
+	m := CLIManifest{
+		APIName:     "hudu",
+		DisplayName: "Hudu",
+		MCPBinary:   "hudu-pp-mcp",
+		MCPReady:    "full",
+		AuthType:    "api_key",
+		AuthEnvVars: []string{"HUDU_API_KEY"},
+	}
+
+	require.NoError(t, WriteMCPBManifestFromStruct(dir, m))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.hudu_api_key}", got.Server.MCPConfig.Env["HUDU_API_KEY"])
+	assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+	_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+	assert.False(t, hasProfile)
+	_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+	assert.False(t, hasConfig)
+	entry, ok := got.UserConfig["hudu_base_url"]
+	require.True(t, ok)
+	assert.False(t, entry.Sensitive)
+	assert.True(t, entry.Required, "BASE_URL without a compile-time default stays required")
 }
 
 // TestWriteMCPBManifest_DiskReadVariantReconciles guards the
@@ -443,6 +810,34 @@ func u() string { return os.Getenv("X_USERNAME") }
 	assert.Equal(t, string(first), string(second), "reconcile must be idempotent across consecutive writer runs")
 }
 
+// TestScanClientEnvReadsExcludesSystemEnvVarsFromUserConfig guards the
+// platform-convention denylist: XDG_CACHE_HOME, XDG_CONFIG_HOME, etc. are
+// read by the generated client (e.g. cache root selection) but must never
+// be promoted to user_config — they are user-global settings, not
+// per-CLI credentials, and surfacing them as Required+Sensitive would
+// break install prompts on every printed CLI.
+func TestScanClientEnvReadsExcludesSystemEnvVarsFromUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeClientFile(t, dir, "client.go", `package client
+
+import "os"
+
+func cachePath() string {
+	base := os.Getenv("XDG_CACHE_HOME")
+	_ = os.Getenv("XDG_CONFIG_HOME")
+	_ = os.Getenv("XDG_DATA_HOME")
+	_ = os.Getenv("XDG_STATE_HOME")
+	_ = os.Getenv("HOME")
+	_ = os.Getenv("USERPROFILE")
+	return base + os.Getenv("REAL_API_KEY")
+}
+`)
+	got, err := scanClientEnvReads(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"REAL_API_KEY"}, got,
+		"system env vars (XDG_*, HOME, USERPROFILE) must never reach user_config; only the credential REAL_API_KEY should survive")
+}
+
 // TestScanClientEnvReadsBacktickLiteral guards against a regression that
 // would drop backtick-quoted env var names. strconv.Unquote handles both
 // forms, but the integration is worth a fixture in case the parser path
@@ -460,6 +855,487 @@ func writeClientFile(t *testing.T, dir, name, content string) {
 	clientDir := filepath.Join(dir, "internal", "client")
 	require.NoError(t, os.MkdirAll(clientDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(clientDir, name), []byte(content), 0o644))
+}
+
+func writeConfigFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	configDir := filepath.Join(dir, "internal", "config")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, name), []byte(content), 0o644))
+}
+
+// A scanner fixture can miss a split where config.go.tmpl emits
+// *_BASE_URL but the generate-time writer never reads that file. The
+// installer ships the printed manifest.json, so that file is the
+// contract this proof checks.
+func TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:      "hudu",
+		Version:   "0.1.0",
+		BaseURL:   "https://example.huducloud.com/api/v1",
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "x-api-key",
+			In:      "header",
+			EnvVars: []string{"HUDU_API_KEY"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/hudu-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"articles": {
+				Description: "Knowledge base articles",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/articles", Description: "List articles"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "hudu-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(dir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(configSrc), `cliutil.EnvOverride("HUDU_BASE_URL")`,
+		"generated config.go must remain the BASE_URL env source this test is proving")
+	require.Contains(t, string(configSrc), `os.Getenv("HUDU_CONFIG")`)
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "hudu",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	cli, err := ReadCLIManifest(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"HUDU_API_KEY"}, cli.AuthEnvVars)
+	assert.NotContains(t, cli.AuthEnvVars, "PRINTING_PRESS_CLIENT_PROFILE")
+
+	got := readMCPBManifest(t, dir)
+	_, hasBaseURL := got.Server.MCPConfig.Env["HUDU_BASE_URL"]
+	assert.False(t, hasBaseURL, "spec-defaulted BASE_URL must not be wired as ${user_config.*}")
+	_, hasUA := got.Server.MCPConfig.Env["HUDU_USER_AGENT"]
+	assert.False(t, hasUA, "USER_AGENT has a compile-time fallback and must not be declared")
+	assert.Equal(t, "${user_config.hudu_api_key}", got.Server.MCPConfig.Env["HUDU_API_KEY"])
+	_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+	assert.False(t, hasProfile, "tenant profile selector is not a credential the binary reads")
+	_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+	assert.False(t, hasConfig, "HUDU_CONFIG is a local file path, not an MCPB install prompt")
+	_, hasVerify := got.Server.MCPConfig.Env["PRINTING_PRESS_VERIFY"]
+	assert.False(t, hasVerify)
+
+	_, ok := got.UserConfig["hudu_base_url"]
+	assert.False(t, ok, "compile-time BaseURL default must omit the optional MCPB prompt")
+	assertNoOptionalUserConfigWithoutDefault(t, got)
+}
+
+func TestWriteManifestForGenerate_EmptyBaseURLStaysRequired(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:      "tenantapi",
+		Version:   "0.1.0",
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "x-api-key",
+			In:      "header",
+			EnvVars: []string{"TENANTAPI_API_KEY"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/tenantapi-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "tenantapi-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "tenantapi",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.tenantapi_base_url}", got.Server.MCPConfig.Env["TENANTAPI_BASE_URL"])
+	entry, ok := got.UserConfig["tenantapi_base_url"]
+	require.True(t, ok, "BASE_URL with no compile-time default must stay declared")
+	assert.True(t, entry.Required)
+	assert.False(t, entry.Sensitive)
+	assertNoOptionalUserConfigWithoutDefault(t, got)
+}
+
+// A suffix allowlist cannot name {shop}: SHOPIFY_SHOP has no
+// _BASE_URL-style ending, but the printed CLI still reads it before
+// the first request. The installer prompt has to collect it alongside
+// the credential the binary reads.
+func TestWriteManifestForGenerate_IncludesRequiredEndpointTemplateVar(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:                 "shopify",
+		Version:              "2026-04",
+		BaseURL:              "https://{shop}.myshopify.com/admin/api/2026-04",
+		EndpointTemplateVars: []string{"shop"},
+		Owner:                "test-owner",
+		OwnerName:            "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "X-Shopify-Access-Token",
+			EnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/shopify-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"orders": {
+				Description: "Orders",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/orders", Description: "List orders"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "shopify-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(dir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(configSrc), `cliutil.EnvOverride("SHOPIFY_SHOP")`,
+		"generated config.go must remain the {shop} env source this test is proving")
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "shopify",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+	assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+	_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+	assert.False(t, hasProfile, "tenant profile selector is not a credential the binary reads")
+
+	entry, ok := got.UserConfig["shopify_shop"]
+	require.True(t, ok, "generated MCPB manifest must prompt for SHOPIFY_SHOP")
+	assert.Equal(t, "SHOPIFY_SHOP", entry.Title)
+	assert.True(t, entry.Required)
+	assert.False(t, entry.Sensitive)
+	assert.Contains(t, entry.Description, "{shop}")
+}
+
+func TestWriteManifestForGenerate_CollidingEndpointOverrideAgreesWithGetenv(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:                 "shopify",
+		Version:              "2026-04",
+		BaseURL:              "https://{shop}.myshopify.com/admin/api/2026-04",
+		EndpointTemplateVars: []string{"shop"},
+		EndpointTemplateEnvOverrides: map[string]string{
+			"shop": "SHOPIFY_ACCESS_TOKEN",
+		},
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "X-Shopify-Access-Token",
+			EnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/shopify-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"orders": {
+				Description: "Orders",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/orders", Description: "List orders"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "shopify-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(dir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	shopGetenv := extractEndpointGetenv(t, string(configSrc), "_SHOP")
+	require.Equal(t, "SHOPIFY_SHOP", shopGetenv,
+		"rejected {shop} → ACCESS_TOKEN override must generate the default shop Getenv, not the credential name")
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "shopify",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	cli, err := ReadCLIManifest(dir)
+	require.NoError(t, err)
+	_, hasOverride := cli.EndpointTemplateEnvOverrides["shop"]
+	assert.False(t, hasOverride, "stored override must be dropped so a later manifest write cannot re-bind the credential name")
+
+	got := readMCPBManifest(t, dir)
+	require.Contains(t, got.Server.MCPConfig.Env, shopGetenv,
+		"MCPB env key must be the generated {shop} Getenv")
+	assert.Equal(t, "${user_config."+userConfigKey(shopGetenv)+"}", got.Server.MCPConfig.Env[shopGetenv])
+	assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+	tokenField, hasTokenField := got.UserConfig["shopify_access_token"]
+	require.True(t, hasTokenField, "installer must prompt for the credential the binary reads")
+	assert.True(t, tokenField.Sensitive)
+	_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+	assert.False(t, hasProfile)
+	shop, ok := got.UserConfig[userConfigKey(shopGetenv)]
+	require.True(t, ok)
+	assert.False(t, shop.Sensitive)
+}
+
+// A later MCPB refresh does not regenerate client source. If generate already
+// dropped a colliding {shop} → ACCESS_TOKEN override, the printed Getenv is
+// SHOPIFY_SHOP and the installer must follow it. If the existing tree still
+// Getenvs the credential name, rebinding to SHOPIFY_SHOP leaves the first
+// request unset. Keep the installer key paired with the scan-confirmed
+// Getenv and mask it so it does not sit unmasked beside the profile selector.
+func TestWriteMCPBManifest_LegacyCollidingGetenvKeepsInstallerAligned(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+	writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+}
+`)
+	writeManifest(t, dir, CLIManifest{
+		APIName:     "shopify",
+		DisplayName: "Shopify",
+		CLIName:     "shopify-pp-cli",
+		MCPBinary:   "shopify-pp-mcp",
+		MCPReady:    "full",
+		AuthType:    "api_key",
+		AuthEnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		AuthEnvVarSpecs: []spec.AuthEnvVar{{
+			Name: "SHOPIFY_ACCESS_TOKEN", Kind: spec.AuthEnvVarKindPerCall,
+			Required: true, Sensitive: true,
+		}},
+		EndpointTemplateVars:         []string{"shop"},
+		EndpointTemplateEnvOverrides: map[string]string{"shop": "SHOPIFY_ACCESS_TOKEN"},
+	})
+
+	require.NoError(t, WriteMCPBManifest(dir))
+	got := readMCPBManifest(t, dir)
+
+	require.Contains(t, got.Server.MCPConfig.Env, "SHOPIFY_ACCESS_TOKEN",
+		"manifest-only refresh must collect the Getenv the existing client still reads")
+	assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"])
+	_, hasShop := got.Server.MCPConfig.Env["SHOPIFY_SHOP"]
+	assert.False(t, hasShop, "must not silently rebind the installer to the default shop name")
+
+	_, hasProfile := got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"]
+	assert.False(t, hasProfile)
+
+	token, ok := got.UserConfig["shopify_access_token"]
+	require.True(t, ok, "legacy colliding Getenv must stay on the installer")
+	assert.Equal(t, "SHOPIFY_ACCESS_TOKEN", token.Title)
+	assert.True(t, token.Sensitive, "credential-named shop binding must stay masked beside the profile selector")
+	assert.True(t, token.Required)
+
+	require.NoError(t, WriteCLIManifest(dir, CLIManifest{
+		SchemaVersion:                CurrentCLIManifestSchemaVersion,
+		APIName:                      "shopify",
+		CLIName:                      "shopify-pp-cli",
+		MCPBinary:                    "shopify-pp-mcp",
+		MCPReady:                     "full",
+		AuthType:                     "api_key",
+		AuthEnvVars:                  []string{"SHOPIFY_ACCESS_TOKEN"},
+		EndpointTemplateVars:         []string{"shop"},
+		EndpointTemplateEnvOverrides: map[string]string{"shop": "SHOPIFY_ACCESS_TOKEN"},
+	}))
+	cli, err := ReadCLIManifest(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "SHOPIFY_ACCESS_TOKEN", cli.EndpointTemplateEnvOverrides["shop"],
+		"CLI manifest write must keep the scan-confirmed colliding override")
+}
+
+func TestAlignPrefixedEnvName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		envName string
+		apiName string
+		want    string
+	}{
+		{name: "stale default after hyphenated rename", envName: "SHOPIFY_SHOP", apiName: "shopify-alt", want: "SHOPIFY_ALT_SHOP"},
+		{name: "already current prefix", envName: "SHOPIFY_SHOP", apiName: "shopify", want: "SHOPIFY_SHOP"},
+		{name: "custom suffix under old prefix", envName: "SHOPIFY_STORE", apiName: "shopify-alt", want: "SHOPIFY_ALT_STORE"},
+		{name: "foreign override stays", envName: "ST_TENANT_ID", apiName: "servicetitan-alt", want: "ST_TENANT_ID"},
+		{name: "bare prefix", envName: "SHOPIFY", apiName: "shopify-alt", want: "SHOPIFY_ALT"},
+		{name: "empty name", envName: "", apiName: "shopify-alt", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, alignPrefixedEnvName(tt.envName, tt.apiName))
+		})
+	}
+}
+
+// Rename rewrites generated os.Getenv names that begin with the old CLI
+// prefix, but used to leave EndpointTemplateEnvOverrides on the old
+// name. The installer then collected SHOPIFY_SHOP while the client read
+// SHOPIFY_ALT_SHOP. This print-then-rename proof is the contract: the
+// MCPB env key must be the rewritten Getenv.
+func TestRenameCLI_PlatformProfileEndpointEnvMatchesRewrittenGetenv(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:                 "shopify",
+		Version:              "2026-04",
+		BaseURL:              "https://{shop}.myshopify.com/admin/api/2026-04",
+		EndpointTemplateVars: []string{"shop"},
+		EndpointTemplateEnvOverrides: map[string]string{
+			"shop": "SHOPIFY_SHOP",
+		},
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "X-Shopify-Access-Token",
+			EnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/shopify-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"orders": {
+				Description: "Orders",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/orders", Description: "List orders"},
+				},
+			},
+		},
+	}
+
+	root := t.TempDir()
+	cliDir := filepath.Join(root, "shopify-pp-cli")
+	require.NoError(t, generator.New(apiSpec, cliDir).Generate())
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "shopify",
+		OutputDir: cliDir,
+		Spec:      apiSpec,
+	}))
+
+	_, err := os.Stat(filepath.Join(cliDir, "internal", "platform", "profile.go"))
+	require.NoError(t, err, "fixture must be a platform-profile CLI so the rename hits the profile+endpoint bind path")
+
+	preConfig, err := os.ReadFile(filepath.Join(cliDir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(preConfig), `cliutil.EnvOverride("SHOPIFY_SHOP")`)
+
+	preManifest := readMCPBManifest(t, cliDir)
+	require.Contains(t, preManifest.Server.MCPConfig.Env, "SHOPIFY_SHOP")
+
+	_, err = RenameCLI(cliDir, "shopify-pp-cli", "shopify-alt-pp-cli", "shopify")
+	require.NoError(t, err)
+
+	newDir := filepath.Join(root, naming.LibraryDirName("shopify-alt-pp-cli"))
+	configSrc, err := os.ReadFile(filepath.Join(newDir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	rewritten := extractEndpointGetenv(t, string(configSrc), "_SHOP")
+	require.NotEqual(t, "SHOPIFY_SHOP", rewritten, "rename must rewrite the generated {shop} env read")
+	require.Contains(t, string(configSrc), `cliutil.EnvOverride("`+rewritten+`")`)
+	require.NotContains(t, string(configSrc), `cliutil.EnvOverride("SHOPIFY_SHOP")`)
+
+	got := readMCPBManifest(t, newDir)
+	assert.Equal(t, "${user_config."+userConfigKey(rewritten)+"}", got.Server.MCPConfig.Env[rewritten],
+		"MCPB manifest must collect the rewritten Getenv, not the pre-rename override")
+	_, stale := got.Server.MCPConfig.Env["SHOPIFY_SHOP"]
+	assert.False(t, stale, "stale SHOPIFY_SHOP must not remain on the installer prompt")
+	assert.Equal(t, "${user_config.shopify_access_token}", got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"],
+		"rename must keep the credential the binary reads")
+
+	cliData, err := os.ReadFile(filepath.Join(newDir, CLIManifestFilename))
+	require.NoError(t, err)
+	var cli CLIManifest
+	require.NoError(t, json.Unmarshal(cliData, &cli))
+	assert.Equal(t, rewritten, cli.EndpointTemplateEnvOverrides["shop"],
+		"stored override must move with the generated Getenv so a later manifest write stays paired")
+}
+
+func TestAlignEndpointTemplateEnvNamesScanConfirmed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rewrites stale override when generated client already moved", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() { _ = os.Getenv("SHOPIFY_ALT_SHOP") }
+`)
+		got := alignEndpointTemplateEnvNames(dir, CLIManifest{
+			APIName:                      "shopify-alt",
+			EndpointTemplateVars:         []string{"shop"},
+			EndpointTemplateEnvOverrides: map[string]string{"shop": "SHOPIFY_SHOP"},
+		})
+		assert.Equal(t, "SHOPIFY_ALT_SHOP", got.EndpointTemplateEnvOverrides["shop"])
+	})
+
+	t.Run("keeps vendor-short override the generated client still reads", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() { _ = os.Getenv("SHOPIFY_SHOP") }
+`)
+		original := CLIManifest{
+			APIName:                      "shopify-plus",
+			EndpointTemplateVars:         []string{"shop"},
+			EndpointTemplateEnvOverrides: map[string]string{"shop": "SHOPIFY_SHOP"},
+		}
+		got := alignEndpointTemplateEnvNames(dir, original)
+		assert.Equal(t, "SHOPIFY_SHOP", got.EndpointTemplateEnvOverrides["shop"])
+	})
+}
+
+func extractEndpointGetenv(t *testing.T, src, suffix string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?:os\.Getenv|cliutil\.EnvOverride)\("([^"]+` + regexp.QuoteMeta(suffix) + `)"\)`)
+	matches := re.FindAllStringSubmatch(src, -1)
+	require.NotEmpty(t, matches, "expected a Getenv/EnvOverride ending in %s", suffix)
+	require.Len(t, matches[0], 2)
+	return matches[0][1]
+}
+
+func assertNoOptionalUserConfigWithoutDefault(t *testing.T, got MCPBManifest) {
+	t.Helper()
+	for key, entry := range got.UserConfig {
+		envName := ""
+		for name, binding := range got.Server.MCPConfig.Env {
+			if binding == "${user_config."+key+"}" {
+				envName = name
+				break
+			}
+		}
+		if envName == "" {
+			continue
+		}
+		if !entry.Required && strings.TrimSpace(entry.Default) == "" {
+			t.Fatalf("user_config[%s] is optional without default but mcp_config.env binds %s", key, envName)
+		}
+	}
 }
 
 // Sanity check that MCPBVar json round-trips the new Sensitive+Required flags.

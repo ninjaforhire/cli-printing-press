@@ -70,6 +70,53 @@ func TestGenerateRegistersHealthResourceWhenHealthCommandInactive(t *testing.T) 
 	runGoCommand(t, outputDir, "build", "./internal/cli")
 }
 
+func TestGeneratePreservesWhoamiResourceWhenPlatformAdapterIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("identityapi")
+	apiSpec.Auth = spec.AuthConfig{Type: "bearer_token", EnvVars: []string{"IDENTITY_API_TOKEN"}}
+	apiSpec.Resources = map[string]spec.Resource{
+		"whoami": {
+			Description: "API identity endpoint",
+			Endpoints: map[string]spec.Endpoint{
+				"get": {Method: "GET", Path: "/whoami", Description: "Get API identity"},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "identityapi-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	rootSrc := readGeneratedFile(t, outputDir, "internal", "cli", "root.go")
+	assert.Contains(t, rootSrc, "rootCmd.AddCommand(newWhoamiPromotedCmd(flags))")
+	assert.NotContains(t, sortedKeys(gen.activeFrameworkCobraUseNames()), "whoami")
+
+	const runtimeTest = `package cli
+
+import "testing"
+
+func TestGeneratedAPIWhoamiWinsWhenPlatformAdapterRegisters(t *testing.T) {
+	previous := registeredPlatformSource
+	t.Cleanup(func() { registeredPlatformSource = previous })
+	registeredPlatformSource = &platformSourceRegistration{Source: "test-source", Adapter: conformanceIdentityAdapter{}}
+
+	root := RootCmd()
+	var matches int
+	for _, command := range root.Commands() {
+		if command.Name() == "whoami" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("root contains %d whoami commands; API resource must win", matches)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "whoami_collision_runtime_test.go"), []byte(runtimeTest), 0o644))
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "TestGeneratedAPIWhoamiWinsWhenPlatformAdapterRegisters")
+}
+
 func TestActiveFrameworkCobraUseNamesMatchesGeneratedRoot(t *testing.T) {
 	t.Parallel()
 
@@ -79,6 +126,9 @@ func TestActiveFrameworkCobraUseNamesMatchesGeneratedRoot(t *testing.T) {
 		Pattern:   `accessToken:"([^"]+)"`,
 	}
 	apiSpec.Share = spec.ShareConfig{Enabled: true, SnapshotTables: []string{"items"}}
+	// Post-flip: opt out so this test exercises the non-learn shape it asserts.
+	// (The root-parsing regex below cannot see how learn commands register.)
+	apiSpec.Learn.Disabled = true
 
 	outputDir := filepath.Join(t.TempDir(), "activecmds-pp-cli")
 	gen := New(apiSpec, outputDir)
@@ -112,6 +162,28 @@ func TestActiveFrameworkCobraUseNamesMatchesGeneratedRoot(t *testing.T) {
 	rootReserved := generatedRootReservedUseNames(t, outputDir)
 	assert.Equal(t, sortedKeys(rootReserved), sortedKeys(active),
 		"activeFrameworkCobraUseNames must stay aligned with generated root framework registrations")
+}
+
+func TestActiveFrameworkCobraUseNamesIncludesLearnCommands(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("learncmds")
+	apiSpec.Learn.Enabled = true
+	outputDir := filepath.Join(t.TempDir(), "learncmds-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	active := gen.activeFrameworkCobraUseNames()
+	for _, name := range []string{"recall", "teach", "learnings", "playbook", "teach-pattern", "teach-lookup", "teach-playbook"} {
+		_, ok := active[name]
+		assert.True(t, ok, "learn-enabled activeFrameworkCobraUseNames must include %q", name)
+	}
+
+	rootReserved := generatedRootReservedUseNames(t, outputDir)
+	for _, name := range []string{"recall", "teach", "learnings", "playbook", "teach-pattern", "teach-lookup", "teach-playbook"} {
+		_, ok := rootReserved[name]
+		assert.True(t, ok, "generated learn-enabled root must register reserved use %q", name)
+	}
 }
 
 func generatedRootReservedUseNames(t *testing.T, outputDir string) map[string]struct{} {

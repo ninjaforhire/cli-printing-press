@@ -52,6 +52,7 @@ type Scorecard struct {
 	OverallGrade                string                      `json:"overall_grade"`
 	GapReport                   []string                    `json:"gap_report"`
 	UnscoredDimensions          []string                    `json:"unscored_dimensions,omitempty"`
+	UnverifiedDimensions        []string                    `json:"unverified_dimensions,omitempty"`
 	NovelFeatureDepthMismatches []NovelFeatureDepthMismatch `json:"novel_feature_depth_mismatches,omitempty"`
 
 	verifyCalibrationFloor   int
@@ -94,7 +95,7 @@ type SteinerScore struct {
 }
 
 // Dimension identifiers used by recordOptionalScore, scorecardTierMax,
-// IsDimensionUnscored, and renderers (renderHumanScorecard,
+// IsDimensionUnscored, IsDimensionUnverified, and renderers (renderHumanScorecard,
 // writeScorecardMD). Any dimension that can land in
 // Scorecard.UnscoredDimensions has a constant here so a typo at any
 // call site fails the compile rather than silently returning false
@@ -110,6 +111,8 @@ const (
 	DimPathValidity          = "path_validity"
 	DimAuthProtocol          = "auth_protocol"
 	DimSyncCorrectness       = "sync_correctness"
+	DimTypeFidelity          = "type_fidelity"
+	DimDeadCode              = "dead_code"
 	DimLiveAPIVerification   = "live_api_verification"
 	// HTTP-API-shaped dimensions that do not apply to a BLE device CLI (no remote
 	// API, no sync->sql->search pipeline, no response cache). Marked N/A for
@@ -133,6 +136,12 @@ type CompScore struct {
 // RunScorecard evaluates generated CLI files and produces a scorecard.
 // If verifyReport is non-nil, verify results calibrate the final score.
 func RunScorecard(outputDir, pipelineDir, specPath string, verifyReport *VerifyReport) (*Scorecard, error) {
+	canonicalDir, err := ResolveTargetDir(outputDir)
+	if err != nil {
+		return nil, err
+	}
+	outputDir = canonicalDir
+
 	// Strip the CLI suffix because outputDir from fullrun (paths.WorkingCLIDir)
 	// and library checkouts both end in -pp-cli; APIName is the API slug,
 	// not the binary name, and lands in user-visible output (Markdown
@@ -222,6 +231,17 @@ func recordOptionalScore(sc *Scorecard, target *int, dimension string, score int
 	sc.UnscoredDimensions = append(sc.UnscoredDimensions, dimension)
 }
 
+func markUnverifiedDimension(sc *Scorecard, dimensions ...string) {
+	for _, dimension := range dimensions {
+		if !slices.Contains(sc.UnscoredDimensions, dimension) {
+			sc.UnscoredDimensions = append(sc.UnscoredDimensions, dimension)
+		}
+		if !slices.Contains(sc.UnverifiedDimensions, dimension) {
+			sc.UnverifiedDimensions = append(sc.UnverifiedDimensions, dimension)
+		}
+	}
+}
+
 func scoreSpecDimensions(sc *Scorecard, outputDir, specPath string) (*openAPISpecInfo, error) {
 	if isDeviceBackedCLIDir(outputDir) || looksLikeDeviceSpecFile(specPath) {
 		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimPathValidity, DimAuthProtocol)
@@ -233,8 +253,9 @@ func scoreSpecDimensions(sc *Scorecard, outputDir, specPath string) (*openAPISpe
 	}
 	specPath = scorecardSpecPath(outputDir, specPath)
 	if specPath == "" {
-		// No spec: mark spec-dependent dimensions as unscored.
-		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimPathValidity, DimAuthProtocol)
+		// No spec: these dimensions are applicable to an HTTP CLI, but the
+		// scorer has no source evidence with which to establish them.
+		markUnverifiedDimension(sc, DimPathValidity, DimAuthProtocol)
 		return nil, nil
 	}
 
@@ -243,10 +264,12 @@ func scoreSpecDimensions(sc *Scorecard, outputDir, specPath string) (*openAPISpe
 		return nil, err
 	}
 
-	if spec.IsSynthetic() {
-		// Hand-built commands intentionally go beyond the spec; path-validity
-		// is not applicable. Mark unscored so the tier-2 denominator excludes
-		// it rather than awarding a 10-point cushion the CLI didn't earn.
+	if spec.IsSynthetic() || spec.IsGraphQL {
+		// Hand-built commands intentionally go beyond the spec, and GraphQL
+		// CLIs expose semantic command paths over one POST endpoint. In both
+		// cases path-validity is not applicable. Mark unscored so the tier-2
+		// denominator excludes it rather than awarding a 10-point cushion the
+		// CLI didn't earn.
 		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimPathValidity)
 	} else {
 		pathValidity := evaluatePathValidity(outputDir, spec)
@@ -277,6 +300,8 @@ func scoreDomainDimensions(sc *Scorecard, outputDir string, spec *openAPISpecInf
 		// BLE device CLIs have no sync->sql->search data pipeline; the HTTP-shaped
 		// pipeline and sync checks don't apply. Mark N/A rather than scoring 0.
 		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimDataPipelineIntegrity, DimSyncCorrectness)
+	} else if !hasScorecardLocalStore(outputDir) {
+		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimDataPipelineIntegrity, DimSyncCorrectness)
 	} else {
 		sc.Steinberger.DataPipelineIntegrity = scoreDataPipelineIntegrity(outputDir)
 		if isLocalDatastoreCLIDir(outputDir) {
@@ -287,6 +312,8 @@ func scoreDomainDimensions(sc *Scorecard, outputDir string, spec *openAPISpecInf
 	}
 	if isDevice {
 		sc.Steinberger.TypeFidelity = scoreTypeFidelityDevice(outputDir)
+	} else if !hasScorecardLocalStore(outputDir) {
+		sc.UnscoredDimensions = append(sc.UnscoredDimensions, DimTypeFidelity)
 	} else {
 		sc.Steinberger.TypeFidelity = scoreTypeFidelity(outputDir, spec)
 	}
@@ -332,7 +359,7 @@ func finalizeScorecard(sc *Scorecard, outputDir, pipelineDir string, verifyRepor
 	applyScorecardCalibration(sc)
 
 	// Grade
-	sc.OverallGrade = computeGrade(sc.Steinberger.Percentage)
+	sc.OverallGrade = formatScorecardGrade(sc, computeGrade(sc.Steinberger.Percentage))
 
 	// Gap report for dimensions below 5
 	sc.GapReport = buildGapReport(sc.Steinberger, sc.UnscoredDimensions)
@@ -363,6 +390,37 @@ func writeScorecardArtifacts(sc *Scorecard, pipelineDir string) error {
 
 func (sc *Scorecard) IsDimensionUnscored(name string) bool {
 	return slices.Contains(sc.UnscoredDimensions, name)
+}
+
+func (sc *Scorecard) IsDimensionUnverified(name string) bool {
+	return slices.Contains(sc.UnverifiedDimensions, name)
+}
+
+var scorecardDimensionNames = []string{
+	"output_modes", "auth", "error_handling", "terminal_ux", "readme", "doctor",
+	"agent_native", "mcp_quality", DimMCPDescriptionQuality, DimMCPTokenEfficiency,
+	DimMCPRemoteTransport, DimMCPToolDesign, DimMCPSurfaceStrategy, DimLocalCache,
+	DimCacheFreshness, "breadth", DimVision, DimWorkflows, DimInsight, DimAgentWorkflow,
+	DimPathValidity, DimAuthProtocol, DimDataPipelineIntegrity, DimSyncCorrectness,
+	DimTypeFidelity, DimDeadCode, DimLiveAPIVerification,
+}
+
+func formatScorecardGrade(sc *Scorecard, grade string) string {
+	if sc == nil || len(sc.UnverifiedDimensions) == 0 {
+		return grade
+	}
+	applicable := 0
+	for _, dimension := range scorecardDimensionNames {
+		if sc.IsDimensionUnscored(dimension) && !sc.IsDimensionUnverified(dimension) {
+			continue
+		}
+		applicable++
+	}
+	return fmt.Sprintf("%s (%d of %d dimensions unverified: %s)",
+		grade,
+		len(sc.UnverifiedDimensions),
+		applicable,
+		strings.Join(sc.UnverifiedDimensions, ", "))
 }
 
 func scoreOutputModes(dir string) int {
@@ -652,7 +710,7 @@ func hasDoctorHTTPReachability(content string) bool {
 		strings.Contains(content, "http.NewRequest") {
 		return true
 	}
-	clientCallRe := regexp.MustCompile(`\b[A-Za-z_]\w*(?:Client|HTTPClient)?\.(?:Get|Head|Post|Put|Patch|Delete|Do)\s*\(`)
+	clientCallRe := regexp.MustCompile(`\b[A-Za-z_]\w*(?:Client|HTTPClient)?\.(?:Get(?:WithHeaders(?:NoCache)?(?:Values)?)?|Head|Post|Put|Patch|Delete|Do)\s*\(`)
 	inlineClientCallRe := regexp.MustCompile(`\(&http\.Client\s*\{[^}]*\}\)\.(?:Get|Head|Post|Put|Patch|Delete|Do)\s*\(`)
 	return clientCallRe.MatchString(content) || inlineClientCallRe.MatchString(content)
 }
@@ -1264,7 +1322,7 @@ func ApplyLiveCheckToScorecard(sc *Scorecard, live *LiveCheckResult) {
 	sc.Steinberger.Insight = *insightCap
 	recomputeScorecardTotals(sc)
 	applyScorecardCalibration(sc)
-	sc.OverallGrade = computeGrade(sc.Steinberger.Percentage)
+	sc.OverallGrade = formatScorecardGrade(sc, computeGrade(sc.Steinberger.Percentage))
 	sc.GapReport = buildGapReport(sc.Steinberger, sc.UnscoredDimensions)
 	appendNovelFeatureDepthGaps(sc)
 }
@@ -1358,7 +1416,7 @@ func recomputeScorecardTotals(sc *Scorecard) {
 		sc.Steinberger.LiveAPIVerification,
 	)
 
-	tier2Max := scorecardTierMax(sc, 60, DimLiveAPIVerification, DimPathValidity, DimAuthProtocol, DimSyncCorrectness, DimDataPipelineIntegrity)
+	tier2Max := scorecardTierMax(sc, 60, DimLiveAPIVerification, DimPathValidity, DimAuthProtocol, DimSyncCorrectness, DimDataPipelineIntegrity, DimTypeFidelity)
 	tier2Normalized := 0
 	if tier2Max > 0 {
 		tier2Normalized = (tier2Raw * 50) / tier2Max
@@ -1378,10 +1436,21 @@ func scorecardTierMax(sc *Scorecard, base int, optionalDimensions ...string) int
 	max := base
 	for _, name := range optionalDimensions {
 		if sc.IsDimensionUnscored(name) {
-			max -= 10
+			max -= scorecardDimensionMax(name)
 		}
 	}
 	return max
+}
+
+func scorecardDimensionMax(name string) int {
+	if name == DimTypeFidelity || name == DimDeadCode {
+		return 5
+	}
+	return 10
+}
+
+func hasScorecardLocalStore(dir string) bool {
+	return fileExists(filepath.Join(dir, "internal", "store", "store.go"))
 }
 
 func scoreBreadth(dir string) int {
@@ -1466,9 +1535,23 @@ func scoreVision(dir string) int {
 	if fileExists(filepath.Join(cliDir, "import.go")) {
 		tier1 += 0.5
 	}
-	// internal/learn/doc.go is the presence sentinel for the recall/teach loop (+0.5).
-	if fileExists(filepath.Join(dir, "internal", "learn", "doc.go")) {
-		tier1 += 0.5
+	// Learn-loop credit is static-behavioral, never presence-only. The old
+	// internal/learn/doc.go sentinel is retired: with the learn loop
+	// default-on, every printed CLI ships that file, so its presence proves
+	// nothing. Instead the half point splits into two quarter-point signals:
+	//   +0.25 when the learn command surface (teach + recall + learnings) is
+	//         actually registered on the root command, read via the same
+	//         reachable-command parse the rest of the scorer uses;
+	//   +0.25 when the emitted seed artifact carries non-empty entity lookup
+	//         seeds (the per-CLI lookups.SeedConfig map the generator stamps).
+	// Both are pure static content scans. Execution proof (verify matrix,
+	// learn stats runs) belongs to verify and the acceptance print — the
+	// scorecard never executes binaries.
+	if learnCommandSurfaceRegistered(cliDir) {
+		tier1 += 0.25
+	}
+	if learnEntitySeedsNonEmpty(dir) {
+		tier1 += 0.25
 	}
 	// Workflow or compound command files
 	hasWorkflowShape := false
@@ -1577,6 +1660,52 @@ func registeredCommandContent(cliDir string, registeredFiles map[string]bool) ma
 func hasCommandContentMatching(commandContent map[string]string, match func(string) bool) bool {
 	for _, content := range commandContent {
 		if match(content) {
+			return true
+		}
+	}
+	return false
+}
+
+// learnCommandSurfaceRegistered reports whether the learn loop's command
+// surface is reachable from the emitted root command: teach, recall, and
+// learnings must all appear as registered constructor calls in root.go
+// (rootCmd.AddCommand(newTeachCmd(...)) and friends). This reuses the same
+// AST-based registered-call parse the reachable-command scorer uses, so an
+// orphan teach.go that nothing registers earns no credit.
+func learnCommandSurfaceRegistered(cliDir string) bool {
+	rootContent := readFileContent(filepath.Join(cliDir, "root.go"))
+	if rootContent == "" {
+		return false
+	}
+	ctors := addCommandConstructorCalls(rootContent)
+	return ctors["newTeachCmd"] && ctors["newRecallCmd"] && ctors["newLearningsCmd"]
+}
+
+// learnSeedMapRe matches the emitted shape that can actually carry seed rows.
+var learnSeedMapRe = regexp.MustCompile(`map\s*\[\s*string\s*\]\s*\[\s*\](?:lookups\.)?SeedConfig`)
+
+// learnSeedDataRe matches a stamped entity-lookup seed row: a Canonical
+// field assigned a string literal ({Canonical: "SEA", ...}). The generic
+// lookups library only ever writes variable references (Canonical:
+// s.Canonical), so this shape is unique to per-CLI seed data.
+var learnSeedDataRe = regexp.MustCompile(`Canonical:\s*"`)
+
+// learnEntitySeedsNonEmpty reports whether the emitted tree carries
+// non-empty entity lookup seeds. The generator stamps the per-CLI seed map
+// into internal/cli/learn_init.go as a lookups.SeedConfig literal with at
+// least one Canonical entry; an empty learn block emits no such literal.
+// A hand-authored seed table under internal/learn/lookups counts the same
+// way. Pure static content scan — no binary ever runs.
+func learnEntitySeedsNonEmpty(dir string) bool {
+	for _, p := range []string{
+		filepath.Join(dir, "internal", "cli", "learn_init.go"),
+		filepath.Join(dir, "internal", "learn", "lookups", "seeds.go"),
+	} {
+		content := readFileContent(p)
+		if content == "" {
+			continue
+		}
+		if learnSeedMapRe.MatchString(content) && learnSeedDataRe.MatchString(content) {
 			return true
 		}
 	}
@@ -1784,11 +1913,28 @@ func addCommandConstructorCalls(content string) map[string]bool {
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel == nil || sel.Sel.Name != "AddCommand" {
+		helperCall := false
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if fun.Sel == nil || fun.Sel.Name != "AddCommand" {
+				return true
+			}
+		case *ast.Ident:
+			if fun.Name != "addNovelCommandIfAbsent" {
+				return true
+			}
+			helperCall = true
+		default:
 			return true
 		}
-		for _, arg := range call.Args {
+		args := call.Args
+		if helperCall {
+			if len(args) != 2 {
+				return true
+			}
+			args = args[1:]
+		}
+		for _, arg := range args {
 			if ctor := commandConstructorName(arg); ctor != "" {
 				ctors[ctor] = true
 			}
@@ -2127,6 +2273,7 @@ type openAPISpecInfo struct {
 	OAuthScopeRequirements []oauthScopeRequirement
 	PositionalParamCount   int
 	Kind                   string // see apispec.KindREST / apispec.KindSynthetic
+	IsGraphQL              bool
 }
 
 func (s *openAPISpecInfo) IsSynthetic() bool {
@@ -2181,6 +2328,7 @@ func loadOpenAPISpecData(data []byte, specPath string) (*openAPISpecInfo, error)
 
 	info := &openAPISpecInfo{
 		SecuritySchemes: make(map[string]openAPISecurityScheme),
+		IsGraphQL:       hasGraphQLEndpointExtension(raw),
 	}
 	if paths, ok := raw["paths"].(map[string]any); ok {
 		for path := range paths {
@@ -2309,6 +2457,47 @@ func loadOpenAPISpecData(data []byte, specPath string) (*openAPISpecInfo, error)
 	}
 
 	return info, nil
+}
+
+func hasGraphQLEndpointExtension(raw map[string]any) bool {
+	if hasNonEmptyStringExtension(raw, "x-graphql-endpoint") {
+		return true
+	}
+	if info, ok := raw["info"].(map[string]any); ok && hasNonEmptyStringExtension(info, "x-graphql-endpoint") {
+		return true
+	}
+	if paths, ok := raw["paths"].(map[string]any); ok {
+		for _, pathValue := range paths {
+			pathItem, ok := pathValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if hasNonEmptyStringExtension(pathItem, "x-graphql-endpoint") {
+				return true
+			}
+			for method, operationValue := range pathItem {
+				if !isHTTPMethod(method) {
+					continue
+				}
+				operation, ok := operationValue.(map[string]any)
+				if ok && hasNonEmptyStringExtension(operation, "x-graphql-endpoint") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func hasNonEmptyStringExtension(fields map[string]any, key string) bool {
+	if fields == nil {
+		return false
+	}
+	value, ok := fields[key]
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(asString(value)) != ""
 }
 
 func operationIDFromRaw(operation map[string]any) string {
@@ -2899,8 +3088,8 @@ func inferredAuthHeaderAssignmentPresent(clientContent string) bool {
 }
 
 var (
-	genericAPIKeyEnvCallRe             = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*os\.Getenv\("(?:[A-Z][A-Z0-9_]*_)?API_KEY"\)`)
-	directGenericAPIKeyEnvAssignmentRe = regexp.MustCompile(`\.\s*APIKey\s*=\s*os\.Getenv\("(?:[A-Z][A-Z0-9_]*_)?API_KEY"\)`)
+	genericAPIKeyEnvCallRe             = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(?:os\.Getenv|cliutil\.EnvOverride)\("(?:[A-Z][A-Z0-9_]*_)?API_KEY"\)`)
+	directGenericAPIKeyEnvAssignmentRe = regexp.MustCompile(`\.\s*APIKey\s*=\s*(?:os\.Getenv|cliutil\.EnvOverride)\("(?:[A-Z][A-Z0-9_]*_)?API_KEY"\)`)
 )
 
 func configReadsAPIKeyEnvForScheme(configContent string, scheme openAPISecurityScheme) bool {
@@ -3691,14 +3880,14 @@ func buildGapReport(s SteinerScore, unscored []string) []string {
 		{"data_pipeline_integrity", s.DataPipelineIntegrity},
 		{"sync_correctness", s.SyncCorrectness},
 		{"type_fidelity", s.TypeFidelity},
-		{"dead_code", s.DeadCode},
+		{DimDeadCode, s.DeadCode},
 	}
 	for _, d := range dimensions {
 		if _, skip := unscoredSet[d.name]; skip {
 			continue
 		}
 		max := 10
-		if d.name == "type_fidelity" || d.name == "dead_code" {
+		if d.name == DimTypeFidelity || d.name == DimDeadCode {
 			max = 5
 		}
 		if d.score < max/2 {
@@ -3791,6 +3980,9 @@ func writeScorecardMD(sc *Scorecard, pipelineDir string) error {
 	if len(sc.UnscoredDimensions) > 0 {
 		fmt.Fprintf(&b, "Unscored dimensions omitted from the total denominator: %s\n\n", strings.Join(sc.UnscoredDimensions, ", "))
 	}
+	if len(sc.UnverifiedDimensions) > 0 {
+		fmt.Fprintf(&b, "Unverified dimensions require evidence before ship: %s\n\n", strings.Join(sc.UnverifiedDimensions, ", "))
+	}
 
 	// Steinberger dimensions table
 	b.WriteString("## Quality Dimensions\n\n")
@@ -3838,6 +4030,10 @@ func writeScorecardMD(sc *Scorecard, pipelineDir string) error {
 		{"Dead Code", s.DeadCode},
 	}
 	for _, d := range typeDimensions {
+		if sc.IsDimensionUnscored(strings.ToLower(strings.ReplaceAll(d.name, " ", "_"))) {
+			fmt.Fprintf(&b, "| %s | N/A |\n", d.name)
+			continue
+		}
 		bar := strings.Repeat("#", d.score) + strings.Repeat(".", 5-d.score)
 		fmt.Fprintf(&b, "| %s | %d/5 %s |\n", d.name, d.score, bar)
 	}

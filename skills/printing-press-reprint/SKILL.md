@@ -16,6 +16,7 @@ allowed-tools:
   - Read
   - AskUserQuestion
   - Skill
+created_by: user
 ---
 
 # /printing-press-reprint
@@ -137,13 +138,29 @@ can lag even when `run_id` matches; this step closes that gap.
 
 The index ships in one of two shapes: the per-patch directory
 `.printing-press-patches/` (current) or the legacy single-array
-`.printing-press-patches.json` (older CLIs not yet normalized). Prefer the
-directory; fall back to the legacy file.
+`.printing-press-patches.json` (older CLIs not yet normalized). Always check
+both shapes when reachable. Prefer the directory when it contains patch files,
+but never let an absent legacy single-file index set `PATCH_COUNT=0` until the
+directory fallback has been read.
 
 ```bash
 PATCHES_DIR="$LIB_TARGET/.printing-press-patches"
 PATCHES_LEGACY="$LIB_TARGET/.printing-press-patches.json"
 if [[ -n "$LIB_PATH" ]]; then
+  # Fetch the legacy shape if present, but do not treat a 404 as proof that no
+  # patches exist. Current library entries may carry only the per-patch
+  # directory below.
+  tmp=$(mktemp)
+  if gh api -H "Accept: application/vnd.github.v3.raw" \
+       "repos/mvanhorn/printing-press-library/contents/$LIB_PATH/.printing-press-patches.json" \
+       > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$PATCHES_LEGACY"
+  else
+    rm -f "$tmp"
+  fi
+
+  # Fetch the current directory shape independently. This is the required
+  # fallback when `.printing-press-patches.json` is absent.
   listing=$(gh api "repos/mvanhorn/printing-press-library/contents/$LIB_PATH/.printing-press-patches" 2>/dev/null || true)
   if jq -e 'type == "array"' <<<"$listing" >/dev/null 2>&1; then
     mkdir -p "$PATCHES_DIR"
@@ -156,21 +173,17 @@ if [[ -n "$LIB_PATH" ]]; then
           rm -f "$tmp"
         fi
       done
-  else
-    tmp=$(mktemp)
-    if gh api -H "Accept: application/vnd.github.v3.raw" \
-         "repos/mvanhorn/printing-press-library/contents/$LIB_PATH/.printing-press-patches.json" \
-         > "$tmp" 2>/dev/null; then
-      mv "$tmp" "$PATCHES_LEGACY"
-    else
-      rm -f "$tmp"
-    fi
   fi
 fi
 
-# Count from whichever shape is present locally; PATCHES_SOURCE is what Phase D reads.
+# Count from the first non-empty shape locally; PATCHES_SOURCE is what Phase D reads.
 if [[ -d "$PATCHES_DIR" ]]; then
-  PATCH_COUNT=$(find "$PATCHES_DIR" -maxdepth 1 -name '*.json' ! -name '_meta.json' | wc -l | tr -d ' ')
+  DIR_PATCH_COUNT=$(find "$PATCHES_DIR" -maxdepth 1 -name '*.json' ! -name '_meta.json' | wc -l | tr -d ' ')
+else
+  DIR_PATCH_COUNT=0
+fi
+if [[ "$DIR_PATCH_COUNT" != "0" ]]; then
+  PATCH_COUNT="$DIR_PATCH_COUNT"
   PATCHES_SOURCE="$PATCHES_DIR"
 elif [[ -f "$PATCHES_LEGACY" ]]; then
   PATCH_COUNT=$(jq '(.patches // []) | length' "$PATCHES_LEGACY" 2>/dev/null || echo 0)
@@ -188,9 +201,10 @@ the hand-off.
 If `$PATCH_COUNT > 0`, surface a one-liner to the user before continuing:
 
 > Public `<api>` has `$PATCH_COUNT` recorded patch(es) against the prior
-> printed CLI. Will carry into the brief as a watch-list (informational,
-> not a re-apply mandate) so the fresh code doesn't silently regress
-> live-validated fixes.
+> printed CLI. Carry them into the brief as a watch-list. Regen and
+> publish-validate now read the records and fail closed if a recorded
+> file or declared call site / `pp:patch` marker is gone — do not treat
+> the index as a claim that the customization still shipped.
 
 Hold `$PATCHES_SOURCE` and `$PATCH_COUNT` for Phase D.
 
@@ -235,7 +249,7 @@ Ask via `AskUserQuestion`:
 
 1. **Reuse prior research** — keep the prior brief; the subagent re-scores
    prior novel features against current personas
-2. **Redo research** — re-run Phase 1 from scratch; the subagent still
+2. **Redo research** — re-run Phase 1 of `/printing-press` from scratch; the subagent still
    ingests prior novel features as Pass 2(d) input
 3. **Show me first** — display the prior brief's headline + novel-features
    list, then re-ask between options 1 and 2
@@ -280,7 +294,7 @@ pre-generation spec edit and skip dimensions that already score 10/10:
   - remote transport is below 10: offer `mcp.transport: [stdio, http]` or the
     OpenAPI `x-mcp.transport` equivalent before regeneration.
   - token efficiency, tool design, or surface strategy is below 10: offer the
-    Phase 2 MCP surface decision, including intents for clear multi-step
+    `/printing-press` Phase 2 MCP surface decision, including intents for clear multi-step
     workflows or the Cloudflare pattern for large surfaces.
 - `auth_protocol` below 10, or prior manifest evidence that the CLI used a
   slug-derived env var where the ecosystem has a canonical env var, can be
@@ -288,7 +302,7 @@ pre-generation spec edit and skip dimensions that already score 10/10:
   `auth.env_vars` or OpenAPI `x-auth-env-vars` guidance into the spec.
 - `data_pipeline_integrity` below 10 is only an enrichment opportunity when the
   prior CLI or research shows sync-eligible resources. In that case, point the
-  handoff at the relevant Phase 2 sync/cache enrichment decision rather than
+  handoff at the relevant `/printing-press` Phase 2 sync/cache enrichment decision rather than
   treating the score alone as proof that a local store should exist.
 
 Use `AskUserQuestion` for each concrete opportunity before the handoff. Phrase
@@ -317,9 +331,9 @@ section to execute. Do not duplicate the canonical enrichment text here.
 Invoke `/printing-press <api>` and bundle these into the prompt:
 
 1. **A header line** stating the user already chose to regenerate, so
-   Phase 0's library-check should select "Generate a fresh CLI" and not
+   `/printing-press` Phase 0's library-check should select "Generate a fresh CLI" and not
    re-prompt fresh-vs-improve.
-2. **Research mode** from Phase C (`reuse` or `redo`). Phase 0's existing
+2. **Research mode** from Phase C (`reuse` or `redo`). `/printing-press` Phase 0's existing
    reuse logic consumes this.
 3. **The user's freeform reprint reason**, verbatim, in a `User context`
    block. This propagates into the brief as `## User Vision` and becomes
@@ -373,8 +387,7 @@ Invoke `/printing-press <api>` and bundle these into the prompt:
 
 Do **not** pass a separate "this is a reprint" marker. The novel-features
 subagent runs unconditionally on every print and discovers prior research
-via its own discovery snippet (see
-`skills/printing-press/references/novel-features-subagent.md`). The paths
+via its own discovery snippet. The paths
 import populated in Phase A are exactly the paths it checks; Pass 2(d)
 fires whenever prior `research.json` exists.
 
@@ -390,9 +403,19 @@ promotion through `regen-merge --apply` so still-unique hand-authored novels
 survive the reprint and genuine `NOVEL-COLLISION` / missing-referent cases halt
 for review. This honors the prefer-`regen-merge` guidance under the
 **Hand-edits must be regen-mergeable.** section of
-`skills/printing-press/SKILL.md` (anchor `hand-edit-durability`). If a future
+`/printing-press` Phase 3. If a future
 edit to that phase changes the routing rule, update this paragraph in the same
 PR -- the reprint skill is the dominant entry point that fires it.
+
+Before the hand-off, compare regenerated manifest files against the tracked
+published tree. If `$LIB_TARGET/manifest.json` or
+`$LIB_TARGET/tools-manifest.json` exists, diff each file against the freshly
+generated counterpart under `$CLI_WORK_DIR` and surface non-empty diffs in the
+handoff prompt. Treat a diff as a reconciliation checkpoint, not as automatic
+overwrite approval: the operator must decide whether to preserve the tracked
+hand-edit, fold it into the spec/research inputs, or intentionally accept the
+regenerated value. Do not continue silently when tracked manifest fields,
+tool metadata, or descriptions would be dropped.
 
 Attribution also stays owned by `/printing-press`: the hand-off runs generation
 for the same API slug, and the generate/promote path must preserve the existing

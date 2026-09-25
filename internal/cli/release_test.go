@@ -79,23 +79,25 @@ func TestVersionConsistencyAcrossFiles(t *testing.T) {
 }
 
 func TestInternalSkillMinimumBinaryVersionsTrackMajor(t *testing.T) {
-	// Skill frontmatter `version` values are not release-managed. The
-	// executable compatibility contract is `min-binary-version`; keep the
-	// frontmatter and the duplicated setup-contract comment in sync.
+	// min-binary-version is the skill-requires-binary floor and tracks the
+	// major. Skill frontmatter `version` is the reverse contract (see
+	// TestPrintingPressSkillVersionMatchesBinaryFloor).
 	want := fmt.Sprintf("%d.0.0", majorVersion(t, version.Version))
-	paths := []string{
-		"../../skills/printing-press/SKILL.md",
-		"../../skills/printing-press-catalog/SKILL.md",
-		"../../skills/printing-press-polish/SKILL.md",
-		"../../skills/printing-press-publish/SKILL.md",
-		"../../skills/printing-press-score/SKILL.md",
+	paths := []struct {
+		frontmatter string
+		setup       string
+	}{
+		{"../../skills/printing-press/SKILL.md", "../../skills/printing-press/phases/01-preflight.md"},
+		{"../../skills/printing-press-polish/SKILL.md", "../../skills/printing-press-polish/SKILL.md"},
+		{"../../skills/printing-press-publish/SKILL.md", "../../skills/printing-press-publish/SKILL.md"},
+		{"../../skills/printing-press-score/SKILL.md", "../../skills/printing-press-score/SKILL.md"},
 	}
 
 	frontmatterRe := regexp.MustCompile(`(?m)^min-binary-version:\s*"?([^"\n]+)"?\s*$`)
 	commentRe := regexp.MustCompile(`(?m)^# min-binary-version:\s*([^\s]+)\s*$`)
-	for _, path := range paths {
-		t.Run(path, func(t *testing.T) {
-			data, err := os.ReadFile(path)
+	for _, paths := range paths {
+		t.Run(paths.frontmatter, func(t *testing.T) {
+			data, err := os.ReadFile(paths.frontmatter)
 			require.NoError(t, err)
 			content := string(data)
 
@@ -103,11 +105,36 @@ func TestInternalSkillMinimumBinaryVersionsTrackMajor(t *testing.T) {
 			require.Len(t, frontmatter, 2, "skill must declare min-binary-version frontmatter")
 			assert.Equal(t, want, frontmatter[1])
 
-			comment := commentRe.FindStringSubmatch(content)
+			setupData, err := os.ReadFile(paths.setup)
+			require.NoError(t, err)
+			comment := commentRe.FindStringSubmatch(string(setupData))
 			require.Len(t, comment, 2, "setup contract must duplicate min-binary-version")
 			assert.Equal(t, frontmatter[1], comment[1])
 		})
 	}
+}
+
+func TestPrintingPressSkillVersionMatchesBinaryFloor(t *testing.T) {
+	skillData, err := os.ReadFile("../../skills/printing-press/SKILL.md")
+	require.NoError(t, err)
+	setupData, err := os.ReadFile("../../skills/printing-press/phases/01-preflight.md")
+	require.NoError(t, err)
+
+	versionRe := regexp.MustCompile(`(?m)^version:\s*"?([^"\n]+)"?\s*$`)
+	commentRe := regexp.MustCompile(`(?m)^# skill-version:\s*([^\s]+)\s*$`)
+	assignRe := regexp.MustCompile(`(?m)^_this_skill_version=([^\s]+)\s*$`)
+
+	frontmatter := versionRe.FindStringSubmatch(string(skillData))
+	require.Len(t, frontmatter, 2, "printing-press skill must declare version frontmatter")
+	assert.Equal(t, MinSkillVersion, frontmatter[1])
+
+	comment := commentRe.FindStringSubmatch(string(setupData))
+	require.Len(t, comment, 2, "setup contract must duplicate skill-version")
+	assert.Equal(t, frontmatter[1], comment[1])
+
+	assign := assignRe.FindStringSubmatch(string(setupData))
+	require.Len(t, assign, 2, "setup contract must assign _this_skill_version")
+	assert.Equal(t, frontmatter[1], assign[1])
 }
 
 func TestMarketplaceJSONHasNoPluginVersion(t *testing.T) {

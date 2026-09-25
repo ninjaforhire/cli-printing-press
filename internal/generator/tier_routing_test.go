@@ -86,7 +86,7 @@ func TestTierRoutingEmitsTierAwareClientAndCommands(t *testing.T) {
 	require.Regexp(t, `\brequestTier\s+string\b`, clientSrc)
 	require.Regexp(t, `\blimiters\s+map\[string\]\*cliutil\.AdaptiveLimiter\b`, clientSrc)
 	require.Contains(t, clientSrc, "next.limiter = c.limiterForTier(tier)")
-	require.Regexp(t, `"paid":\s+cliutil\.NewAdaptiveLimiter\(rateLimit\)`, clientSrc)
+	require.Regexp(t, `"paid":\s+newRateLimiter\(rateLimit\)`, clientSrc)
 	require.Contains(t, clientSrc, `case "free":`)
 	require.Contains(t, clientSrc, `case "paid":`)
 	require.Contains(t, clientSrc, `return strings.TrimRight("https://paid.api.example.com", "/")`)
@@ -143,7 +143,7 @@ func TestTierRoutingEmitsTierAwareClientAndCommands(t *testing.T) {
 	cmd.Env = append(os.Environ(), "TIERED_ENTERPRISE_TOKEN=enterprise-secret")
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
-	require.Contains(t, string(output), "Authorization: ****cret")
+	require.Contains(t, string(output), "Authorization: ****")
 
 	codeSpec := minimalSpec("tiered-code")
 	codeSpec.TierRouting = apiSpec.TierRouting
@@ -161,8 +161,164 @@ func TestTierRoutingEmitsTierAwareClientAndCommands(t *testing.T) {
 	codeOrchSrc := readGeneratedFile(t, codeOutputDir, "internal", "mcp", "code_orch.go")
 	require.Regexp(t, `\bTier\s+string\b`, codeOrchSrc)
 	require.Regexp(t, `Tier:\s+"paid"`, codeOrchSrc)
-	require.Regexp(t, `"tier":\s+r\.ep\.Tier`, codeOrchSrc)
+	require.Regexp(t, `out\["tier"\]\s*=\s*ep\.Tier`, codeOrchSrc)
 	require.Contains(t, codeOrchSrc, `c = c.WithTier(ep.Tier)`)
+}
+
+func TestTierRoutingRedirectsStripCustomHeaderCrossHost(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("tier-redirect")
+	apiSpec.TierRouting = spec.TierRoutingConfig{
+		DefaultTier: "free",
+		Tiers: map[string]spec.TierConfig{
+			"free": {Auth: spec.AuthConfig{Type: "none"}},
+			"paid": {
+				Auth: spec.AuthConfig{
+					Type:    "api_key",
+					In:      "header",
+					Header:  "X-Tier-Key",
+					EnvVars: []string{"TIER_REDIRECT_PAID_KEY"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "tier-redirect-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	const clientTest = `package client
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"tier-redirect-pp-cli/internal/config"
+)
+
+func TestTierRedirectCustomHeaderStripping(t *testing.T) {
+	t.Setenv("PRINTING_PRESS_VERIFY", "1")
+	t.Setenv("TIER_REDIRECT_PAID_KEY", "paid-secret")
+
+	sameHostFinalHeader := ""
+	sameHost := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same-start":
+			http.Redirect(w, r, "/same-final", http.StatusFound)
+		case "/same-final":
+			sameHostFinalHeader = r.Header.Get("X-Tier-Key")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(` + "`{}`" + `))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer sameHost.Close()
+
+	cfg := &config.Config{BaseURL: sameHost.URL}
+	c := New(cfg, time.Second, 0).WithTier("paid")
+	c.NoCache = true
+	if _, err := c.Get(context.Background(), "/same-start", nil); err != nil {
+		t.Fatalf("same-host redirect request failed: %v", err)
+	}
+	if sameHostFinalHeader != "paid-secret" {
+		t.Fatalf("same-host redirect X-Tier-Key = %q, want paid-secret", sameHostFinalHeader)
+	}
+
+	crossHostFinalHeader := "not-called"
+	crossHostTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		crossHostFinalHeader = r.Header.Get("X-Tier-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(` + "`{}`" + `))
+	}))
+	defer crossHostTarget.Close()
+
+	crossHostStart := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, crossHostTarget.URL+"/cross-final", http.StatusFound)
+	}))
+	defer crossHostStart.Close()
+
+	cfg = &config.Config{BaseURL: crossHostStart.URL}
+	c = New(cfg, time.Second, 0).WithTier("paid")
+	c.NoCache = true
+	_, err := c.Get(context.Background(), "/cross-start", nil)
+	if !errors.Is(err, ErrRedirectPrivateDestination) {
+		t.Fatalf("off-origin loopback redirect = %v, want ErrRedirectPrivateDestination", err)
+	}
+	if crossHostFinalHeader != "not-called" {
+		t.Fatalf("off-origin loopback target was reached with X-Tier-Key = %q", crossHostFinalHeader)
+	}
+
+	// 192.0.2.1 is TEST-NET-1, a public literal CheckRedirect follows.
+	// Dial it back to the local server to observe the header on the wire.
+	const publicHost = "192.0.2.1"
+	publicHeader := "not-called"
+	publicReqHost := ""
+	publicTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		publicHeader = r.Header.Get("X-Tier-Key")
+		publicReqHost = r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer publicTarget.Close()
+
+	_, publicPort, err := net.SplitHostPort(publicTarget.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicURL := "http://" + publicHost + ":" + publicPort + "/cross-final"
+
+	publicStartHeader := ""
+	publicStart := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		publicStartHeader = r.Header.Get("X-Tier-Key")
+		http.Redirect(w, r, publicURL, http.StatusFound)
+	}))
+	defer publicStart.Close()
+
+	cfg = &config.Config{BaseURL: publicStart.URL}
+	c = New(cfg, time.Second, 0).WithTier("paid")
+	c.NoCache = true
+	base, ok := c.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport %T, want *http.Transport", c.HTTPClient.Transport)
+	}
+	tr := base.Clone()
+	tr.Proxy = nil
+	publicAddr := publicTarget.Listener.Addr().String()
+	dialer := &net.Dialer{}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr == nil && host == publicHost {
+			addr = publicAddr
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+	c.HTTPClient.Transport = tr
+
+	if _, err = c.Get(context.Background(), "/cross-start", nil); err != nil {
+		t.Fatalf("public cross-origin redirect request failed: %v", err)
+	}
+	if publicStartHeader != "paid-secret" {
+		t.Fatalf("public redirect first hop X-Tier-Key = %q, want paid-secret", publicStartHeader)
+	}
+	if publicReqHost != publicHost+":"+publicPort {
+		t.Fatalf("public redirect Host = %q, want %s:%s", publicReqHost, publicHost, publicPort)
+	}
+	if publicHeader == "not-called" {
+		t.Fatal("public cross-origin redirect was not followed")
+	}
+	if publicHeader != "" {
+		t.Fatalf("public cross-origin redirect leaked X-Tier-Key = %q", publicHeader)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "client", "tier_redirect_test.go"), []byte(clientTest), 0o644))
+	runGoCommandRequired(t, outputDir, "test", "./internal/client", "-run", "TestTierRedirectCustomHeaderStripping", "-count=1")
 }
 
 func readGeneratedFile(t *testing.T, root string, parts ...string) string {

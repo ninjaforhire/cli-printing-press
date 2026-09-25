@@ -19,6 +19,8 @@ func newScorecardCmd() *cobra.Command {
 	var asJSON bool
 	var liveCheck bool
 	var liveCheckTimeout time.Duration
+	var writeManifest string
+	var allowDestructive bool
 
 	cmd := &cobra.Command{
 		Use:   "scorecard",
@@ -38,6 +40,11 @@ func newScorecardCmd() *cobra.Command {
 			if dir == "" {
 				return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--dir is required")}
 			}
+			canonicalDir, err := pipeline.ResolveTargetDir(dir)
+			if err != nil {
+				return &ExitError{Code: ExitInputError, Err: err}
+			}
+			dir = canonicalDir
 
 			// Use a temp pipeline dir for the scorecard output
 			pipelineDir, err := os.MkdirTemp("", "scorecard-*")
@@ -46,7 +53,11 @@ func newScorecardCmd() *cobra.Command {
 			}
 			defer func() { _ = os.RemoveAll(pipelineDir) }()
 
-			sc, err := pipeline.RunScorecard(dir, pipelineDir, specPath, nil)
+			verifyReport, err := pipeline.LoadVerifyReportFromManifest(writeManifest)
+			if err != nil {
+				return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("loading verify evidence: %w", err)}
+			}
+			sc, err := pipeline.RunScorecard(dir, pipelineDir, specPath, verifyReport)
 			if err != nil {
 				return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("running scorecard: %w", err)}
 			}
@@ -54,11 +65,17 @@ func newScorecardCmd() *cobra.Command {
 			var live *pipeline.LiveCheckResult
 			if liveCheck {
 				live = pipeline.RunLiveCheck(pipeline.LiveCheckOptions{
-					CLIDir:      dir,
-					ResearchDir: researchDir,
-					Timeout:     liveCheckTimeout,
+					CLIDir:           dir,
+					ResearchDir:      researchDir,
+					Timeout:          liveCheckTimeout,
+					AllowDestructive: allowDestructive,
 				})
 				pipeline.ApplyLiveCheckToScorecard(sc, live)
+			}
+			if writeManifest != "" {
+				if _, err := pipeline.PersistScorecardToManifest(writeManifest, sc, researchDir); err != nil {
+					return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("writing scorecard to manifest: %w", err)}
+				}
 			}
 
 			if asJSON {
@@ -84,6 +101,7 @@ func newScorecardCmd() *cobra.Command {
 					fmt.Println()
 				}
 				if live.Unable {
+					fmt.Printf("  Status: unavailable\n")
 					fmt.Printf("  Unable to run: %s\n", live.Reason)
 				} else {
 					fmt.Printf("  Passed: %d/%d  (%d%% pass rate, %d skipped)\n", live.Passed, live.Evaluated(), int(live.PassRate*100+0.5), live.Skipped)
@@ -135,6 +153,8 @@ func newScorecardCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
 	cmd.Flags().BoolVar(&liveCheck, "live-check", false, "Sample novel-feature examples against real targets and cap Insight when flagships return broken output")
 	cmd.Flags().DurationVar(&liveCheckTimeout, "live-check-timeout", 10*time.Second, "Per-feature timeout for live check invocations")
+	cmd.Flags().StringVar(&writeManifest, "write-manifest", "", "Path to .printing-press.json to update with scorecard summary and built novel features")
+	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "Allow live-check to execute mutating generated and research-authored examples (default skips them)")
 
 	return cmd
 }
@@ -195,5 +215,8 @@ func renderHumanScorecard(w io.Writer, sc *pipeline.Scorecard) {
 	fmt.Fprintf(w, "\n  Total: %d/100 - Grade %s\n", s.Total, sc.OverallGrade)
 	if len(sc.UnscoredDimensions) > 0 {
 		fmt.Fprintf(w, "  Note: omitted from denominator: %s\n", strings.Join(sc.UnscoredDimensions, ", "))
+	}
+	if len(sc.UnverifiedDimensions) > 0 {
+		fmt.Fprintf(w, "  Hold: unverified dimensions: %s\n", strings.Join(sc.UnverifiedDimensions, ", "))
 	}
 }

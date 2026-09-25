@@ -20,9 +20,10 @@ import (
 
 func newAuthCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Manage authentication for Printing Press Oauth2",
-		RunE:  parentNoSubcommandRunE(flags),
+		Use:         "auth",
+		Short:       "Manage authentication for Printing Press Oauth2",
+		Annotations: map[string]string{"pp:parent-group": "true"},
+		RunE:        parentNoSubcommandRunE(flags),
 	}
 
 	cmd.AddCommand(newAuthSetupCmd(flags))
@@ -82,6 +83,7 @@ for CLIs and agents: no localhost callback server and no client secret.
 			if err != nil {
 				return configErr(err)
 			}
+			clientIDFromFlag := clientID != ""
 			if clientID == "" {
 				clientID = os.Getenv("DEVICE_CODE_CLIENT_ID")
 			}
@@ -101,7 +103,7 @@ for CLIs and agents: no localhost callback server and no client secret.
 				deviceAuthorizationURL = "https://login.device.example/oauth/device"
 			}
 			scopes := []string{"items.read"}
-			if scope := os.Getenv("PRINTING_PRESS_OAUTH2_OAUTH_SCOPE"); scope != "" {
+			if scope := cliutil.EnvOverride("PRINTING_PRESS_OAUTH2_OAUTH_SCOPE"); scope != "" {
 				scopes = strings.Fields(scope)
 			}
 
@@ -112,6 +114,9 @@ for CLIs and agents: no localhost callback server and no client secret.
 			}
 
 			w := cmd.OutOrStdout()
+			if flags.asJSON {
+				w = cmd.ErrOrStderr()
+			}
 			if device.Message != "" {
 				fmt.Fprintln(w, device.Message)
 			} else {
@@ -125,9 +130,10 @@ for CLIs and agents: no localhost callback server and no client secret.
 					fmt.Fprintf(w, "Code expires in %d seconds.\n", device.ExpiresIn)
 				}
 				state := pendingDeviceCodeState{
-					DeviceCode: device.DeviceCode,
-					ClientID:   clientID,
-					TokenURL:   tokenURL,
+					DeviceCode:       device.DeviceCode,
+					ClientID:         clientID,
+					ClientIDFromFlag: clientIDFromFlag,
+					TokenURL:         tokenURL,
 				}
 				if device.ExpiresIn > 0 {
 					state.ExpiresAt = time.Now().Add(time.Duration(device.ExpiresIn) * time.Second)
@@ -156,6 +162,7 @@ for CLIs and agents: no localhost callback server and no client secret.
 				expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 			}
 			cfg.AuthHeaderVal = ""
+			cfg.MarkCredentialsExplicit(clientIDFromFlag, false)
 			if err := cfg.SaveTokens(clientID, "", tok.AccessToken, tok.RefreshToken, expiry); err != nil {
 				return configErr(fmt.Errorf("saving tokens: %w", err))
 			}
@@ -217,6 +224,7 @@ func newAuthPollCmd(flags *rootFlags) *cobra.Command {
 				expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 			}
 			cfg.AuthHeaderVal = ""
+			cfg.MarkCredentialsExplicit(state.ClientIDFromFlag, false)
 			if err := cfg.SaveTokens(clientID, "", tok.AccessToken, tok.RefreshToken, expiry); err != nil {
 				return configErr(fmt.Errorf("saving tokens: %w", err))
 			}
@@ -278,10 +286,11 @@ func outputIsTerminal() bool {
 }
 
 type pendingDeviceCodeState struct {
-	DeviceCode string    `json:"device_code"`
-	ClientID   string    `json:"client_id"`
-	TokenURL   string    `json:"token_url"`
-	ExpiresAt  time.Time `json:"expires_at,omitempty"`
+	DeviceCode       string    `json:"device_code"`
+	ClientID         string    `json:"client_id"`
+	ClientIDFromFlag bool      `json:"client_id_from_flag,omitempty"`
+	TokenURL         string    `json:"token_url"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
 }
 
 func savePendingDeviceCode(cfg *config.Config, state pendingDeviceCodeState) error {
@@ -339,6 +348,8 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 			w := cmd.OutOrStdout()
 			header := cfg.AuthHeader()
 			authed := header != ""
+			refusals := cfg.CredentialRefusalSummaries()
+			credentialRefused := len(refusals) > 0
 			if flags.asJSON {
 				out := map[string]any{
 					"authenticated": authed,
@@ -346,13 +357,27 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 					"source":        cfg.AuthSource,
 					"config":        cfg.Path,
 				}
+				if credentialRefused {
+					out["credential_refused"] = true
+					out["credential_refusals"] = refusals
+				}
 				if printErr := printJSONFiltered(w, out, flags); printErr != nil {
 					return printErr
+				}
+				if !authed && credentialRefused {
+					return authErr(cfg.CredentialRefusalError())
 				}
 				if !authed {
 					return authErr(fmt.Errorf("no credentials configured"))
 				}
 				return nil
+			}
+			if !authed && credentialRefused {
+				fmt.Fprintln(w, red("Credentials present but refused"))
+				for _, refusal := range refusals {
+					fmt.Fprintf(w, "  %s\n", refusal)
+				}
+				return authErr(cfg.CredentialRefusalError())
 			}
 			if !authed {
 				fmt.Fprintln(w, red("Not authenticated"))
@@ -373,29 +398,53 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 
 func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:     "set-token <token>",
-		Short:   "Save an API token to the config file (override the OAuth flow)",
-		Example: "  printing-press-oauth2-pp-cli auth set-token <bearer-jwt>",
-		Args:    cobra.ExactArgs(1),
+		Use:   "set-token",
+		Short: "Save an API token to the credentials file (override the OAuth flow)",
+		Long: "Save an API token to the credentials file (override the OAuth flow).\n\n" +
+			"The token is read from stdin so it never appears in process arguments or shell history.",
+		Example: "  echo \"$TOKEN\" | printing-press-oauth2-pp-cli auth set-token\n  printing-press-oauth2-pp-cli auth set-token < token-file",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			token, err := readSecretFromStdin(cmd.InOrStdin())
+			if err != nil {
+				return authErr(err)
+			}
 			cfg, err := config.Load(flags.configPath)
 			if err != nil {
 				return configErr(err)
 			}
 			cfg.AuthHeaderVal = ""
-			if err := cfg.SaveTokens("", "", args[0], "", cfg.TokenExpiry); err != nil {
+			if err := cfg.SaveTokens("", "", token, "", cfg.TokenExpiry); err != nil {
 				return configErr(fmt.Errorf("saving token: %w", err))
 			}
+			savePath := credentialSavePath(cfg)
 			if flags.asJSON {
-				return printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+				out := map[string]any{
 					"saved":       true,
 					"config_path": cfg.Path,
-				}, flags)
+				}
+				if !cfg.AgentcookieManagedByExternalStore() {
+					out["credentials_path"] = savePath
+				}
+				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", cfg.Path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", savePath)
 			return nil
 		},
 	}
+}
+
+func credentialSavePath(cfg *config.Config) string {
+	if cfg != nil && cfg.AgentcookieManagedByExternalStore() {
+		return cfg.Path
+	}
+	if path, err := cliutil.CredentialsFilePath(); err == nil {
+		return path
+	}
+	if cfg != nil {
+		return cfg.Path
+	}
+	return ""
 }
 
 func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {

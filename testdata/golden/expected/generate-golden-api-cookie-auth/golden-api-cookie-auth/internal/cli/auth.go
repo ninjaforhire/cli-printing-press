@@ -26,9 +26,10 @@ import (
 
 func newAuthCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Manage authentication for Golden Api Cookie Auth",
-		RunE:  parentNoSubcommandRunE(flags),
+		Use:         "auth",
+		Short:       "Manage authentication for Golden Api Cookie Auth",
+		Annotations: map[string]string{"pp:parent-group": "true"},
+		RunE:        parentNoSubcommandRunE(flags),
 	}
 
 	cmd.AddCommand(newAuthLoginCmd(flags))
@@ -39,13 +40,48 @@ func newAuthCmd(flags *rootFlags) *cobra.Command {
 	return cmd
 }
 
+// Chrome release-channel display labels. All Google Chrome channels share one
+// macOS "Chrome Safe Storage" Keychain key, so these only select the data-dir
+// path and label prompts — they carry no decryption identity.
+const (
+	chromeChannelStable = "Chrome"
+	chromeChannelBeta   = "Chrome Beta"
+	chromeChannelDev    = "Chrome Dev"
+	chromeChannelCanary = "Chrome Canary"
+)
+
+// chromeChannelOrder is the channel preference order (most stable first); it
+// breaks ties when two channels' profiles are otherwise ranked equal.
+var chromeChannelOrder = []string{chromeChannelStable, chromeChannelBeta, chromeChannelDev, chromeChannelCanary}
+
+func channelRank(channel string) int {
+	for i, c := range chromeChannelOrder {
+		if c == channel {
+			return i
+		}
+	}
+	return len(chromeChannelOrder)
+}
+
 // chromeProfile holds info about a discovered Chrome profile.
 type chromeProfile struct {
+	Channel             string   // channel display name (e.g. "Chrome", "Chrome Beta")
+	DataDir             string   // channel user-data dir the profile lives under
 	Dir                 string   // directory name (e.g. "Default", "Profile 1")
 	DisplayName         string   // human-readable name from Preferences
 	CookieCount         int      // number of cookies matching the target domain
 	RequiredCookieCount int      // number of required credential cookies present
 	MissingCookies      []string // required credential cookies not present
+}
+
+// profileLocation is a channel-qualified profile identifier ("Chrome Beta/Default")
+// so same-named profiles from different Chrome channels stay distinguishable in
+// prompts and logs.
+func (p chromeProfile) profileLocation() string {
+	if p.Channel == "" {
+		return p.Dir
+	}
+	return p.Channel + "/" + p.Dir
 }
 
 func requiredAuthCookies() []string {
@@ -63,6 +99,7 @@ func requiredAuthCookies() []string {
 func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 	var browserFlag bool
 	var profileFlag string
+	var cookiesFile string
 
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -71,29 +108,34 @@ func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 
 Use --chrome to read cookies from Chrome for .cookie-auth.example.
 Use --browser as an alias for --chrome.
-Requires a cookie extraction tool (pycookiecheat, cookies, or cookie-scoop-cli).
+--chrome and --browser require a cookie extraction tool (pycookiecheat, cookies, or cookie-scoop-cli).
+Use --cookies-file to import Playwright storage-state JSON or a raw Cookie header file.
 
 If you have multiple Chrome profiles, pycookiecheat and cookie-scoop-cli can
 auto-detect which profile is logged in. Use --profile to select a specific
 profile by name when the installed backend supports it.`,
 		Example: `  golden-api-cookie-auth-pp-cli auth login --chrome
   golden-api-cookie-auth-pp-cli auth login --browser
+  golden-api-cookie-auth-pp-cli auth login --cookies-file storage-state.json
   golden-api-cookie-auth-pp-cli auth login --chrome --profile "Work"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !browserFlag {
-				fmt.Fprintln(cmd.OutOrStdout(), "Use --chrome or --browser to authenticate from your browser session:")
+			w := cmd.OutOrStdout()
+			domain := ".cookie-auth.example"
+			if !browserFlag && cookiesFile == "" {
+				fmt.Fprintln(w, "Use --chrome, --browser, or --cookies-file to authenticate from your browser session:")
 				fmt.Fprintf(cmd.OutOrStdout(), "  golden-api-cookie-auth-pp-cli auth login --chrome\n")
 				fmt.Fprintf(cmd.OutOrStdout(), "  golden-api-cookie-auth-pp-cli auth login --browser\n")
+				fmt.Fprintf(cmd.OutOrStdout(), "  golden-api-cookie-auth-pp-cli auth login --cookies-file storage-state.json\n")
 				return nil
+			}
+			if browserFlag && cookiesFile != "" {
+				return authErr(fmt.Errorf("choose either --chrome/--browser or --cookies-file, not both"))
 			}
 			// Check if already authenticated via env var
 			if v := os.Getenv("COOKIE_AUTH_SESSION"); v != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Already authenticated via %s env var.\n", "COOKIE_AUTH_SESSION")
 				return nil
 			}
-
-			w := cmd.OutOrStdout()
-			domain := ".cookie-auth.example"
 
 			// Step 0: Try press-auth, the dedicated cookie capture companion.
 			// press-auth spawns its own controlled Chrome window so users do
@@ -106,29 +148,41 @@ profile by name when the installed backend supports it.`,
 			// are already on disk.
 			var cookies string
 			fromPressAuth := false
-			if pressAuthPath, err := exec.LookPath("press-auth"); err == nil {
-				paCookies, paErr := tryPressAuth(pressAuthPath, domain)
-				if paErr == nil && paCookies != "" {
-					fmt.Fprintf(w, "Loaded cookies via press-auth for %s.\n", domain)
-					cookies = paCookies
-					fromPressAuth = true
-				} else if paErr != nil {
-					fmt.Fprintf(w, "press-auth returned an error: %v\n", paErr)
-					fmt.Fprintln(w, "Falling back to other extraction methods.")
-					fmt.Fprintln(w, "If you haven't logged in yet, run:")
-					fmt.Fprintf(w, "\n  press-auth login %s --login-url <login-url>\n\n", domain)
+			fromCookiesFile := false
+			if cookiesFile != "" {
+				imported, err := loadCookiesFromFile(cookiesFile, domain)
+				if err != nil {
+					return authErr(err)
+				}
+				cookies = imported.Header
+				fromCookiesFile = true
+				fmt.Fprintf(w, "Loaded cookies from %s for %s.\n", cookiesFile, domain)
+			}
+			if !fromCookiesFile {
+				if _, err := exec.LookPath("press-auth"); err == nil {
+					paCookies, paErr := tryPressAuth(domain)
+					if paErr == nil && paCookies != "" {
+						fmt.Fprintf(w, "Loaded cookies via press-auth for %s.\n", domain)
+						cookies = paCookies
+						fromPressAuth = true
+					} else if paErr != nil {
+						fmt.Fprintf(w, "press-auth returned an error: %v\n", paErr)
+						fmt.Fprintln(w, "Falling back to other extraction methods.")
+						fmt.Fprintln(w, "If you haven't logged in yet, run:")
+						fmt.Fprintf(w, "\n  press-auth login %s --login-url <login-url>\n\n", domain)
+					}
 				}
 			}
 
-			if !fromPressAuth {
+			if !fromPressAuth && !fromCookiesFile {
 				// Step 1: Detect cookie extraction tool
 				tool, err := detectCookieTool()
 				if err != nil {
 					fmt.Fprintln(w, red("No cookie extraction tool found."))
 					fmt.Fprintln(w, "")
 					if runtime.GOOS == "windows" {
-						fmt.Fprintln(w, "pycookiecheat does not support Windows. Read cookies from a live Chrome session instead:")
-						fmt.Fprintf(w, "\n  golden-api-cookie-auth-pp-cli auth login --browser\n\n")
+						fmt.Fprintln(w, "pycookiecheat does not support Windows. Import cookies from a file instead:")
+						fmt.Fprintf(w, "\n  golden-api-cookie-auth-pp-cli auth login --cookies-file <path>\n\n")
 						fmt.Fprintln(w, "Or install a cross-platform reader:")
 						fmt.Fprintln(w, "  cargo install cookie-scoop-cli     # Rust")
 					} else {
@@ -145,9 +199,9 @@ profile by name when the installed backend supports it.`,
 				}
 
 				// Step 2: Resolve which Chrome profile to use when the backend can honor it
-				profileDir := ""
+				var profile chromeProfile
 				if cookieToolSupportsProfiles(tool.name) {
-					profileDir, err = resolveChromeProfile(w, cmd.InOrStdin(), domain, profileFlag, requiredAuthCookies())
+					profile, err = resolveChromeProfile(w, cmd.InOrStdin(), domain, profileFlag, requiredAuthCookies())
 					if err != nil {
 						loginURL := "https://" + strings.TrimPrefix(domain, ".")
 						fmt.Fprintln(w, "")
@@ -161,14 +215,14 @@ profile by name when the installed backend supports it.`,
 					}
 				}
 
-				if profileDir != "" {
-					fmt.Fprintf(w, "Reading cookies from Chrome profile %q for %s...\n", profileDir, domain)
+				if profile.Dir != "" {
+					fmt.Fprintf(w, "Reading cookies from Chrome profile %q for %s...\n", profile.profileLocation(), domain)
 				} else {
 					fmt.Fprintf(w, "Reading cookies for %s...\n", domain)
 				}
 
 				// Step 3: Extract cookies from the resolved profile
-				cookies, err = extractCookies(tool, domain, profileDir)
+				cookies, err = extractCookies(tool, domain, profile)
 				if err != nil {
 					return authErr(fmt.Errorf("extracting cookies: %w", err))
 				}
@@ -177,6 +231,14 @@ profile by name when the installed backend supports it.`,
 					return authErr(fmt.Errorf("cookie tool returned no cookies for %s", domain))
 				}
 			} // end if !fromPressAuth
+
+			// Cookie extractors read Chrome's evolving on-disk schema. Refuse
+			// malformed output before it reaches TOML or net/http: stale tools can
+			// otherwise persist binary schema metadata as credentials and leave the
+			// CLI unable to parse its own config on the next invocation.
+			if err := validateExtractedCookieHeader(cookies); err != nil {
+				return authErr(err)
+			}
 			// Unfiltered, the persisted blob carries every cookie the target
 			// domain has set (CSRF, WAF, anti-bot fingerprints, etc.) into the
 			// Cookie header on every request, which routinely trips upstream
@@ -205,6 +267,7 @@ profile by name when the installed backend supports it.`,
 			if err != nil {
 				return configErr(err)
 			}
+			cfg.CredentialDomain = ".cookie-auth.example"
 
 			if err := cfg.SaveTokens("", "", cookies, "", time.Time{}); err != nil {
 				return configErr(fmt.Errorf("saving cookies: %w", err))
@@ -220,19 +283,20 @@ profile by name when the installed backend supports it.`,
 				}
 			}
 			if err := client.WriteCookieJarFromMap(domain, jarCookies); err != nil {
-				fmt.Fprintf(w, "warning: persisting cookie jar: %v (cookies still saved to config)\n", err)
+				fmt.Fprintf(w, "warning: persisting cookie jar: %v (credentials still saved)\n", err)
 			}
 
 			count := len(strings.Split(cookies, ";"))
 			fmt.Fprintf(w, "%s Found %d cookies for %s\n", green("OK"), count, domain)
-			fmt.Fprintf(w, "Session saved to %s\n", cfg.Path)
+			fmt.Fprintf(w, "Session saved to %s\n", credentialSavePath(cfg))
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&browserFlag, "chrome", false, "Read cookies from Chrome")
 	cmd.Flags().BoolVar(&browserFlag, "browser", false, "Alias for --chrome")
-	cmd.Flags().StringVar(&profileFlag, "profile", "", "Chrome profile name (e.g. \"Work\", \"Personal\")")
+	cmd.Flags().StringVar(&profileFlag, "profile", "", "Chrome profile name, or channel-qualified (e.g. \"Work\", \"Chrome Beta/Default\")")
+	cmd.Flags().StringVar(&cookiesFile, "cookies-file", "", "Import cookies from a Playwright storage-state JSON file or raw Cookie header file")
 	return cmd
 }
 func cookieToolSupportsProfiles(tool string) bool {
@@ -256,12 +320,21 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			w := cmd.OutOrStdout()
-			header := cfg.AuthHeader()
-			if header == "" {
+			credentialConfigured := cfg.CredentialConfigured()
+			refusals := cfg.CredentialRefusalSummaries()
+			credentialRefused := len(refusals) > 0
+			if !credentialConfigured {
 				if v := os.Getenv("COOKIE_AUTH_SESSION"); v != "" {
 					fmt.Fprintln(w, green("Authenticated"))
 					fmt.Fprintf(w, "  Source: %s env var\n", "COOKIE_AUTH_SESSION")
 					return nil
+				}
+				if credentialRefused {
+					fmt.Fprintln(w, red("Credentials present but refused"))
+					for _, refusal := range refusals {
+						fmt.Fprintf(w, "  %s\n", refusal)
+					}
+					return authErr(cfg.CredentialRefusalError())
 				}
 				fmt.Fprintln(w, red("Not authenticated"))
 				fmt.Fprintln(w, "")
@@ -292,27 +365,32 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 // silently land as the access token.
 func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:     "set-token <jwt>",
+		Use:     "set-token",
 		Short:   "Save a bearer JWT pasted from DevTools (escape hatch for in-memory tokens)",
-		Example: "  golden-api-cookie-auth-pp-cli auth set-token eyJhbGciOi...",
+		Example: "  echo \"$TOKEN\" | golden-api-cookie-auth-pp-cli auth set-token\n  golden-api-cookie-auth-pp-cli auth set-token < token-file",
 		Long: "Save a bearer JWT pasted from DevTools (escape hatch for in-memory tokens).\n\n" +
 			"Use this when `auth login --chrome` can't reach the access token — most\n" +
 			"commonly Auth0 SPA SDK deployments that keep the JWT in JS heap memory.\n" +
 			"Open DevTools → Network → any authenticated request → copy the\n" +
-			"`Authorization: Bearer ...` value and paste the JWT portion here.\n\n" +
-			"The token is validated for JWT shape (three base64url segments, length\n" +
-			"floor) so short tracking cookies don't get saved as credentials.",
-		Args: cobra.ExactArgs(1),
+			"`Authorization: Bearer ...` value and pipe the JWT portion on stdin.\n\n" +
+			"The token is read from stdin so it never appears in process arguments or\n" +
+			"shell history. It is validated for JWT shape (three base64url segments,\n" +
+			"length floor) so short tracking cookies don't get saved as credentials.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			token, err := readSecretFromStdin(cmd.InOrStdin())
+			if err != nil {
+				return authErr(err)
+			}
+
 			cfg, err := config.Load(flags.configPath)
 			if err != nil {
 				return configErr(err)
 			}
 
-			token := strings.TrimSpace(args[0])
 			token = strings.TrimPrefix(token, "Bearer ")
 			if !cliutil.LooksLikeJWT(token) {
-				return authErr(fmt.Errorf("argument is not JWT-shaped (three base64url segments, ≥150 chars total). " +
+				return authErr(fmt.Errorf("stdin is not JWT-shaped (three base64url segments, ≥150 chars total). " +
 					"This is the cookie-vs-JWT-shape gate — short tracking cookies like Cloudflare's __cf_bm " +
 					"share the segment shape but aren't credentials. Paste the `Authorization: Bearer ...` value " +
 					"from DevTools → Network, not a cookie jar"))
@@ -329,21 +407,40 @@ func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
 			// 401 on the next API call, same as the rest of the browser-auth
 			// flow. Matches ClearTokens / SaveBearerToken's zero-on-write
 			// invariant in config.go.tmpl.
+			cfg.CredentialDomain = ""
 			if err := cfg.SaveTokens("", "", token, "", time.Time{}); err != nil {
 				return configErr(fmt.Errorf("saving token: %w", err))
 			}
 
-			// JSON envelope: {saved, config_path}.
+			savePath := credentialSavePath(cfg)
+			// JSON envelope: {saved, config_path, credentials_path}.
 			if flags.asJSON {
-				return printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+				out := map[string]any{
 					"saved":       true,
 					"config_path": cfg.Path,
-				}, flags)
+				}
+				if !cfg.AgentcookieManagedByExternalStore() {
+					out["credentials_path"] = savePath
+				}
+				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", cfg.Path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", savePath)
 			return nil
 		},
 	}
+}
+
+func credentialSavePath(cfg *config.Config) string {
+	if cfg != nil && cfg.AgentcookieManagedByExternalStore() {
+		return cfg.Path
+	}
+	if path, err := cliutil.CredentialsFilePath(); err == nil {
+		return path
+	}
+	if cfg != nil {
+		return cfg.Path
+	}
+	return ""
 }
 
 func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
@@ -360,6 +457,9 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 			if err := cfg.ClearTokens(); err != nil {
 				return configErr(fmt.Errorf("clearing tokens: %w", err))
 			}
+			if err := client.ClearCookieJar(); err != nil {
+				return configErr(fmt.Errorf("clearing cookie jar: %w", err))
+			}
 			if os.Getenv("COOKIE_AUTH_SESSION") != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Config cleared. Note: %s env var is still set.\n", "COOKIE_AUTH_SESSION")
 				return nil
@@ -371,34 +471,95 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 }
 
 // --- Chrome profile discovery ---
-// chromeDataDir returns the Chrome user data directory for the current OS.
-func chromeDataDir() (string, error) {
+// chromeChannelDir pairs a Chrome release channel's display name with its
+// on-disk user-data directory.
+type chromeChannelDir struct {
+	Channel string
+	DataDir string
+}
+
+// chromeChannelDirs returns the user-data directories of every installed Google
+// Chrome release channel (stable, Beta, Dev, Canary), stable-first. Only
+// directories that exist on disk are returned, so a user who runs only Chrome
+// Beta still authenticates without a flag. All Google Chrome channels share one
+// macOS "Chrome Safe Storage" Keychain key, so only the data-dir path differs
+// per channel — cookie decryption needs no per-channel handling.
+func chromeChannelDirs() ([]chromeChannelDir, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
+	var candidates []chromeChannelDir
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "Google", "Chrome"), nil
+		base := filepath.Join(home, "Library", "Application Support", "Google")
+		candidates = []chromeChannelDir{
+			{chromeChannelStable, filepath.Join(base, "Chrome")},
+			{chromeChannelBeta, filepath.Join(base, "Chrome Beta")},
+			{chromeChannelDev, filepath.Join(base, "Chrome Dev")},
+			{chromeChannelCanary, filepath.Join(base, "Chrome Canary")},
+		}
 	case "linux":
-		return filepath.Join(home, ".config", "google-chrome"), nil
+		base := filepath.Join(home, ".config")
+		candidates = []chromeChannelDir{
+			{chromeChannelStable, filepath.Join(base, "google-chrome")},
+			{chromeChannelBeta, filepath.Join(base, "google-chrome-beta")},
+			{chromeChannelDev, filepath.Join(base, "google-chrome-unstable")},
+		}
 	case "windows":
 		localAppData := os.Getenv("LOCALAPPDATA")
 		if localAppData == "" {
 			localAppData = filepath.Join(home, "AppData", "Local")
 		}
-		return filepath.Join(localAppData, "Google", "Chrome", "User Data"), nil
+		base := filepath.Join(localAppData, "Google")
+		candidates = []chromeChannelDir{
+			{chromeChannelStable, filepath.Join(base, "Chrome", "User Data")},
+			{chromeChannelBeta, filepath.Join(base, "Chrome Beta", "User Data")},
+			{chromeChannelDev, filepath.Join(base, "Chrome Dev", "User Data")},
+			{chromeChannelCanary, filepath.Join(base, "Chrome SxS", "User Data")},
+		}
 	default:
-		return "", fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+		return nil, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}
+
+	existing := make([]chromeChannelDir, 0, len(candidates))
+	for _, c := range candidates {
+		if info, err := os.Stat(c.DataDir); err == nil && info.IsDir() {
+			existing = append(existing, c)
+		}
+	}
+	if len(existing) == 0 {
+		return nil, fmt.Errorf("no Chrome user data directory found")
+	}
+	return existing, nil
+}
+
+// chromeProfileDirNames returns the profile subdirectory names ("Default",
+// "Profile 1", ...) under a channel's data dir. A read error yields no names so
+// one unreadable channel never sinks discovery across the others.
+func chromeProfileDirNames(dataDir string) []string {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if name := entry.Name(); name == "Default" || strings.HasPrefix(name, "Profile ") {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // discoverChromeProfiles finds Chrome profiles and counts cookies matching the domain.
 // When requiredCookies is non-empty, profiles with those credential cookies rank
 // ahead of profiles that only have guest, analytics, or challenge cookies.
 func discoverChromeProfiles(domain string, requiredCookies []string) ([]chromeProfile, error) {
-	dataDir, err := chromeDataDir()
+	channelDirs, err := chromeChannelDirs()
 	if err != nil {
 		return nil, err
 	}
@@ -406,54 +567,45 @@ func discoverChromeProfiles(domain string, requiredCookies []string) ([]chromePr
 		return nil, fmt.Errorf("sqlite3 not found")
 	}
 
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read Chrome data directory: %w", err)
-	}
-
-	// Match domain for SQLite query — host_key uses leading dot (e.g. ".notion.so")
-	domainPattern := "%" + strings.TrimPrefix(domain, ".") + "%"
-
 	var profiles []chromeProfile
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if name != "Default" && !strings.HasPrefix(name, "Profile ") {
-			continue
-		}
+	for _, ch := range channelDirs {
+		for _, name := range chromeProfileDirNames(ch.DataDir) {
+			profilePath := filepath.Join(ch.DataDir, name)
+			cookiesDB := filepath.Join(profilePath, "Cookies")
+			if _, err := os.Stat(cookiesDB); err != nil {
+				continue
+			}
 
-		profilePath := filepath.Join(dataDir, name)
-		cookiesDB := filepath.Join(profilePath, "Cookies")
-		if _, err := os.Stat(cookiesDB); err != nil {
-			continue
+			displayName := readProfileDisplayName(filepath.Join(profilePath, "Preferences"))
+			if displayName == "" {
+				displayName = name
+			}
+
+			count, requiredCount, missing := inspectCookiesForDomain(cookiesDB, domain, requiredCookies)
+
+			profiles = append(profiles, chromeProfile{
+				Channel:             ch.Channel,
+				DataDir:             ch.DataDir,
+				Dir:                 name,
+				DisplayName:         displayName,
+				CookieCount:         count,
+				RequiredCookieCount: requiredCount,
+				MissingCookies:      missing,
+			})
 		}
-
-		displayName := readProfileDisplayName(filepath.Join(profilePath, "Preferences"))
-		if displayName == "" {
-			displayName = name
-		}
-
-		count, requiredCount, missing := inspectCookiesForDomain(cookiesDB, domainPattern, requiredCookies)
-
-		profiles = append(profiles, chromeProfile{
-			Dir:                 name,
-			DisplayName:         displayName,
-			CookieCount:         count,
-			RequiredCookieCount: requiredCount,
-			MissingCookies:      missing,
-		})
 	}
 
 	// Sort: profiles with credential cookies first, then by total cookie count,
-	// then by directory name for deterministic prompts.
+	// then by channel preference and directory name for deterministic prompts.
 	sort.Slice(profiles, func(i, j int) bool {
 		if profiles[i].RequiredCookieCount != profiles[j].RequiredCookieCount {
 			return profiles[i].RequiredCookieCount > profiles[j].RequiredCookieCount
 		}
 		if profiles[i].CookieCount != profiles[j].CookieCount {
 			return profiles[i].CookieCount > profiles[j].CookieCount
+		}
+		if ri, rj := channelRank(profiles[i].Channel), channelRank(profiles[j].Channel); ri != rj {
+			return ri < rj
 		}
 		return profiles[i].Dir < profiles[j].Dir
 	})
@@ -478,18 +630,18 @@ func readProfileDisplayName(prefsPath string) string {
 	return prefs.Profile.Name
 }
 
-// inspectCookiesForDomain copies the Cookies DB (plus WAL/SHM) to temp and counts matching rows.
-// Uses sqlite3 when available; host_key is plaintext so no decryption is needed.
-func inspectCookiesForDomain(cookiesDB, domainPattern string, requiredCookies []string) (count int, requiredCount int, missing []string) {
-	tmpFile, err := os.CreateTemp("", "cookies-probe-*.db")
+// inspectCookiesForDomain copies the Cookies DB (plus WAL/SHM) to temp and
+// counts rows whose host_key matches domain via cookieDomainMatches. SQL LIKE
+// on the full host misses parent-domain cookies (".example.com" vs "www.example.com").
+func inspectCookiesForDomain(cookiesDB, domain string, requiredCookies []string) (count int, requiredCount int, missing []string) {
+	// MkdirTemp is 0700. The copy is a verbatim cookie store, including WAL
+	// writes Chrome has not checkpointed, so it must not land in a shared /tmp file.
+	tmpDir, err := os.MkdirTemp("", "pp-cookie-probe-")
 	if err != nil {
 		return 0, 0, append([]string{}, requiredCookies...)
 	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
-	defer os.Remove(tmpPath + "-wal")
-	defer os.Remove(tmpPath + "-shm")
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, "cookies.db")
 
 	// Copy the database file plus WAL/SHM to avoid Chrome's WAL lock
 	// and to include uncommitted cookie writes that are still in the WAL.
@@ -499,48 +651,44 @@ func inspectCookiesForDomain(cookiesDB, domainPattern string, requiredCookies []
 	_ = copyFileIfExists(cookiesDB+"-wal", tmpPath+"-wal")
 	_ = copyFileIfExists(cookiesDB+"-shm", tmpPath+"-shm")
 
-	query := fmt.Sprintf("SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%s'", sqlQuoteLiteral(domainPattern))
-	out, err := exec.Command("sqlite3", tmpPath, query).Output()
+	out, err := exec.Command("sqlite3", "-separator", "\t", tmpPath, "SELECT host_key, name FROM cookies").Output()
 	if err != nil {
 		return 0, 0, append([]string{}, requiredCookies...)
 	}
 
-	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &count)
+	requiredSet := map[string]bool{}
+	for _, name := range requiredCookies {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			requiredSet[name] = true
+		}
+	}
+
+	present := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		hostKey, name, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		if !cookieDomainMatches(hostKey, domain) {
+			continue
+		}
+		count++
+		name = strings.TrimSpace(name)
+		if requiredSet[name] && !present[name] {
+			present[name] = true
+			requiredCount++
+		}
+	}
 
 	if len(requiredCookies) == 0 || count == 0 {
 		return count, 0, append([]string{}, requiredCookies...)
 	}
 
-	quotedNames := make([]string, 0, len(requiredCookies))
-	for _, name := range requiredCookies {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		quotedNames = append(quotedNames, "'"+sqlQuoteLiteral(name)+"'")
-	}
-	if len(quotedNames) == 0 {
-		return count, 0, nil
-	}
-
-	query = fmt.Sprintf(
-		"SELECT DISTINCT name FROM cookies WHERE host_key LIKE '%s' AND name IN (%s)",
-		sqlQuoteLiteral(domainPattern),
-		strings.Join(quotedNames, ","),
-	)
-	out, err = exec.Command("sqlite3", tmpPath, query).Output()
-	if err != nil {
-		return count, 0, append([]string{}, requiredCookies...)
-	}
-
-	present := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		name := strings.TrimSpace(line)
-		if name != "" && !present[name] {
-			present[name] = true
-			requiredCount++
-		}
-	}
 	for _, name := range requiredCookies {
 		name = strings.TrimSpace(name)
 		if name != "" && !present[name] {
@@ -548,10 +696,6 @@ func inspectCookiesForDomain(cookiesDB, domainPattern string, requiredCookies []
 		}
 	}
 	return count, requiredCount, missing
-}
-
-func sqlQuoteLiteral(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
 }
 
 // copyFileIfExists copies src to dst. Returns nil if src does not exist.
@@ -564,7 +708,7 @@ func copyFileIfExists(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -575,7 +719,7 @@ func copyFileIfExists(src, dst string) error {
 
 // resolveChromeProfile determines which Chrome profile to read cookies from.
 // Priority: --profile flag > auto-detect (single match) > interactive prompt.
-func resolveChromeProfile(w io.Writer, r io.Reader, domain, profileFlag string, requiredCookies []string) (string, error) {
+func resolveChromeProfile(w io.Writer, r io.Reader, domain, profileFlag string, requiredCookies []string) (chromeProfile, error) {
 	if profileFlag != "" {
 		return resolveProfileByName(profileFlag)
 	}
@@ -584,7 +728,7 @@ func resolveChromeProfile(w io.Writer, r io.Reader, domain, profileFlag string, 
 	if err != nil {
 		// Profile probing is optional; cookie extraction can still succeed without it.
 		fmt.Fprintf(w, "Could not inspect Chrome profiles (%v); continuing without auto-detection.\n", err)
-		return "", nil
+		return chromeProfile{}, nil
 	}
 
 	// Prefer profiles that have all required credential cookies. A profile with
@@ -613,7 +757,7 @@ func resolveChromeProfile(w io.Writer, r io.Reader, domain, profileFlag string, 
 	}
 
 	if len(withCookies) == 0 {
-		return "", fmt.Errorf("no Chrome profile has cookies for %s", domain)
+		return chromeProfile{}, fmt.Errorf("no Chrome profile has cookies for %s", domain)
 	}
 	return chooseChromeProfile(w, r, domain, withCookies, false)
 }
@@ -626,20 +770,20 @@ func printMissingCookieHint(w io.Writer, profiles []chromeProfile, requiredCooki
 		if p.CookieCount == 0 || len(p.MissingCookies) == 0 {
 			continue
 		}
-		fmt.Fprintf(w, "Chrome profile %s (%s) is missing required cookies: %s\n", p.DisplayName, p.Dir, strings.Join(p.MissingCookies, ", "))
+		fmt.Fprintf(w, "Chrome profile %s (%s) is missing required cookies: %s\n", p.DisplayName, p.profileLocation(), strings.Join(p.MissingCookies, ", "))
 		return
 	}
 }
 
-func chooseChromeProfile(w io.Writer, r io.Reader, domain string, profiles []chromeProfile, matchedRequired bool) (string, error) {
+func chooseChromeProfile(w io.Writer, r io.Reader, domain string, profiles []chromeProfile, matchedRequired bool) (chromeProfile, error) {
 	switch len(profiles) {
 	case 1:
 		if matchedRequired {
-			fmt.Fprintf(w, "Auto-detected Chrome profile: %s (%s, required cookies present)\n", profiles[0].DisplayName, profiles[0].Dir)
+			fmt.Fprintf(w, "Auto-detected Chrome profile: %s (%s, required cookies present)\n", profiles[0].DisplayName, profiles[0].profileLocation())
 		} else {
-			fmt.Fprintf(w, "Auto-detected Chrome profile: %s (%s)\n", profiles[0].DisplayName, profiles[0].Dir)
+			fmt.Fprintf(w, "Auto-detected Chrome profile: %s (%s)\n", profiles[0].DisplayName, profiles[0].profileLocation())
 		}
-		return profiles[0].Dir, nil
+		return profiles[0], nil
 	default:
 		// Multiple profiles have cookies.
 		// Non-interactive: pick the profile with the most cookies (already sorted).
@@ -648,20 +792,20 @@ func chooseChromeProfile(w io.Writer, r io.Reader, domain string, profiles []chr
 			// Non-interactive — auto-select the best profile (most cookies, first in sorted list)
 			selected := profiles[0]
 			if matchedRequired {
-				fmt.Fprintf(w, "Auto-selected Chrome profile: %s (%s, required cookies present, %d cookies)\n", selected.DisplayName, selected.Dir, selected.CookieCount)
+				fmt.Fprintf(w, "Auto-selected Chrome profile: %s (%s, required cookies present, %d cookies)\n", selected.DisplayName, selected.profileLocation(), selected.CookieCount)
 			} else {
-				fmt.Fprintf(w, "Auto-selected Chrome profile: %s (%s, %d cookies)\n", selected.DisplayName, selected.Dir, selected.CookieCount)
+				fmt.Fprintf(w, "Auto-selected Chrome profile: %s (%s, %d cookies)\n", selected.DisplayName, selected.profileLocation(), selected.CookieCount)
 			}
 			fmt.Fprintf(w, "Use --profile to select a different profile.\n")
-			return selected.Dir, nil
+			return selected, nil
 		}
 
 		fmt.Fprintf(w, "Multiple Chrome profiles have cookies for %s:\n", domain)
 		for i, p := range profiles {
 			if matchedRequired {
-				fmt.Fprintf(w, "  %d. %s (%s, required cookies present, %d cookies)\n", i+1, p.DisplayName, p.Dir, p.CookieCount)
+				fmt.Fprintf(w, "  %d. %s (%s, required cookies present, %d cookies)\n", i+1, p.DisplayName, p.profileLocation(), p.CookieCount)
 			} else {
-				fmt.Fprintf(w, "  %d. %s (%s, %d cookies)\n", i+1, p.DisplayName, p.Dir, p.CookieCount)
+				fmt.Fprintf(w, "  %d. %s (%s, %d cookies)\n", i+1, p.DisplayName, p.profileLocation(), p.CookieCount)
 			}
 		}
 		fmt.Fprintf(w, "Which profile? [1]: ")
@@ -678,39 +822,39 @@ func chooseChromeProfile(w io.Writer, r io.Reader, domain string, profiles []chr
 			choice = 1
 		}
 		selected := profiles[choice-1]
-		fmt.Fprintf(w, "Using profile: %s (%s)\n", selected.DisplayName, selected.Dir)
-		return selected.Dir, nil
+		fmt.Fprintf(w, "Using profile: %s (%s)\n", selected.DisplayName, selected.profileLocation())
+		return selected, nil
 	}
 }
 
-// resolveProfileByName finds a Chrome profile directory by its display name.
-func resolveProfileByName(name string) (string, error) {
-	dataDir, err := chromeDataDir()
+// resolveProfileByName finds a Chrome profile by its display or directory name,
+// searching every installed channel (stable first). The first match wins, so a
+// name present in multiple channels resolves to the stable one.
+func resolveProfileByName(name string) (chromeProfile, error) {
+	channelDirs, err := chromeChannelDirs()
 	if err != nil {
-		return "", err
-	}
-
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		return "", err
+		return chromeProfile{}, err
 	}
 
 	lowerName := strings.ToLower(name)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		dirName := entry.Name()
-		if dirName != "Default" && !strings.HasPrefix(dirName, "Profile ") {
-			continue
-		}
-		displayName := readProfileDisplayName(filepath.Join(dataDir, dirName, "Preferences"))
-		if strings.ToLower(displayName) == lowerName || strings.ToLower(dirName) == lowerName {
-			return dirName, nil
+	for _, ch := range channelDirs {
+		for _, dirName := range chromeProfileDirNames(ch.DataDir) {
+			displayName := readProfileDisplayName(filepath.Join(ch.DataDir, dirName, "Preferences"))
+			candidate := chromeProfile{Channel: ch.Channel, DataDir: ch.DataDir, Dir: dirName, DisplayName: displayName}
+			// Accept the channel-qualified form ("Chrome Beta/Default") too, so
+			// the identifier printed in prompts is a valid --profile value and a
+			// user with a Default profile in several channels can pick a
+			// non-stable one (bare "Default" matches stable first).
+			if strings.ToLower(displayName) == lowerName || strings.ToLower(dirName) == lowerName || strings.ToLower(candidate.profileLocation()) == lowerName {
+				if candidate.DisplayName == "" {
+					candidate.DisplayName = dirName
+				}
+				return candidate, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("Chrome profile %q not found", name)
+	return chromeProfile{}, fmt.Errorf("Chrome profile %q not found", name)
 }
 
 // --- Cookie extraction tools ---
@@ -746,11 +890,26 @@ type cookieTool struct {
 	pyArgs []string
 }
 
+// validateExtractedCookieHeader rejects malformed browser-extractor output
+// before it can be persisted or passed to net/http. In Chrome cookie database
+// schema 24+, stale extractors may leave the binary SHA-256(host_key) prefix
+// attached to each decrypted value. net/http rejects those bytes, and writing
+// invalid UTF-8 into TOML can make the CLI's config unreadable on its next run.
+func validateExtractedCookieHeader(header string) error {
+	if _, err := http.ParseCookie(header); err != nil {
+		return fmt.Errorf("cookie importer returned malformed Cookie header: %w; update the browser extractor (pycookiecheat 0.8.0 or newer) or use press-auth; refusing to save credentials", err)
+	}
+	return nil
+}
+
 // tryPressAuth shells out to `press-auth cookies <domain>` and returns the
 // resulting Cookie header value. Stderr from press-auth (if any) is surfaced
 // as the error message so callers can include the recovery hint.
-func tryPressAuth(pressAuthPath, domain string) (string, error) {
-	cmd := exec.Command(pressAuthPath, "cookies", domain)
+func tryPressAuth(domain string) (string, error) {
+	cmd, err := execNamed("press-auth", "cookies", domain)
+	if err != nil {
+		return "", err
+	}
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
@@ -771,14 +930,14 @@ func tryPressAuth(pressAuthPath, domain string) (string, error) {
 func detectCookieTool() (cookieTool, error) {
 	if runtime.GOOS != "windows" {
 		if bin, args, ok := resolvePythonBinary(); ok {
-			probeArgs := append(append([]string{}, args...), "-c", "import pycookiecheat")
-			if err := exec.Command(bin, probeArgs...).Run(); err == nil {
+			if _, err := runPythonFile(bin, args, "import pycookiecheat"); err == nil {
 				return cookieTool{name: "pycookiecheat", pyBin: bin, pyArgs: args}, nil
 			}
 		}
-		if path, err := exec.LookPath("pycookiecheat"); err == nil {
-			if err := exec.Command(path, "--help").Run(); err == nil {
-				return cookieTool{name: "pycookiecheat-cli", pyBin: path}, nil
+		if _, err := exec.LookPath("pycookiecheat"); err == nil {
+			cmd, cmdErr := execNamed("pycookiecheat", "--help")
+			if cmdErr == nil && cmd.Run() == nil {
+				return cookieTool{name: "pycookiecheat-cli", pyBin: "pycookiecheat"}, nil
 			}
 		}
 	}
@@ -789,63 +948,57 @@ func detectCookieTool() (cookieTool, error) {
 		return cookieTool{name: "cookie-scoop"}, nil
 	}
 	if runtime.GOOS == "windows" {
-		return cookieTool{}, fmt.Errorf("no cookie extraction tool found; pycookiecheat does not support Windows. Use `auth login --browser` (live Chrome via CDP) or install cookie-scoop-cli")
+		return cookieTool{}, fmt.Errorf("no cookie extraction tool found; pycookiecheat does not support Windows. Use `auth login --cookies-file` or install cookie-scoop-cli")
 	}
 	return cookieTool{}, fmt.Errorf("no cookie extraction tool found; install one: pip install pycookiecheat")
 }
 
 // extractCookies shells out to the detected tool and returns a Cookie header value string.
-// profileDir selects which Chrome profile to read from (e.g. "Default", "Profile 1").
-func extractCookies(tool cookieTool, domain, profileDir string) (string, error) {
+// profile selects which Chrome profile (and channel) to read from; a zero profile
+// lets the tool fall back to the stable channel's default cookie file.
+func extractCookies(tool cookieTool, domain string, profile chromeProfile) (string, error) {
 	switch tool.name {
 	case "pycookiecheat":
-		return extractViaPycookiecheat(tool, domain, profileDir)
+		return extractViaPycookiecheat(tool, domain, profile)
 	case "pycookiecheat-cli":
-		return extractViaPycookiecheatCLI(tool, domain, profileDir)
+		return extractViaPycookiecheatCLI(tool, domain, profile)
 	case "cookies":
 		return extractViaCookiesCLI(domain)
 	case "cookie-scoop":
-		return extractViaCookieScoop(domain, profileDir)
+		// cookie-scoop resolves the data dir itself and only knows the stable
+		// channel, so it cannot read a Beta/Dev/Canary profile. Fail loudly
+		// instead of silently reading the same-named stable profile.
+		if profile.Channel != "" && profile.Channel != chromeChannelStable {
+			return "", fmt.Errorf("cookie-scoop can only read the stable Chrome channel; install pycookiecheat to read the %s profile", profile.Channel)
+		}
+		return extractViaCookieScoop(domain, profile.Dir)
 	default:
 		return "", fmt.Errorf("unknown cookie tool: %s", tool.name)
 	}
 }
 
-func extractViaPycookiecheat(tool cookieTool, domain, profileDir string) (string, error) {
+func extractViaPycookiecheat(tool cookieTool, domain string, profile chromeProfile) (string, error) {
 	cleanDomain := strings.TrimPrefix(domain, ".")
 	cookiePath := ""
-	if profileDir != "" {
-		dataDir, err := chromeDataDir()
-		if err == nil {
-			cookiePath = filepath.Join(dataDir, profileDir, "Cookies")
-		}
+	if profile.Dir != "" && profile.DataDir != "" {
+		cookiePath = filepath.Join(profile.DataDir, profile.Dir, "Cookies")
 	}
 
-	var script string
+	// Static program on disk: URL and optional cookie path arrive via argv so a
+	// hostile Chrome profile name cannot close a Python string literal, and the
+	// program text is not a python -c process-table payload.
+	script := `import json, sys; from pycookiecheat import chrome_cookies; url = sys.argv[1]; print(json.dumps(chrome_cookies(url, cookie_file=sys.argv[2]) if len(sys.argv) > 2 else chrome_cookies(url)))`
+	scriptArgs := []string{"https://" + cleanDomain}
 	if cookiePath != "" {
-		// Use forward slashes so Python doesn't interpret backslashes as escapes on Windows
-		safePath := filepath.ToSlash(cookiePath)
-		script = fmt.Sprintf(
-			`import json; from pycookiecheat import chrome_cookies; print(json.dumps(chrome_cookies("https://%s", cookie_file="%s")))`,
-			cleanDomain, safePath,
-		)
-	} else {
-		script = fmt.Sprintf(
-			`import json; from pycookiecheat import chrome_cookies; print(json.dumps(chrome_cookies("https://%s")))`,
-			cleanDomain,
-		)
+		scriptArgs = append(scriptArgs, cookiePath)
 	}
-
-	var out bytes.Buffer
-	cmd := exec.Command(tool.pyBin, append(append([]string{}, tool.pyArgs...), "-c", script)...)
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	out, err := runPythonFile(tool.pyBin, tool.pyArgs, script, scriptArgs...)
+	if err != nil {
 		return "", fmt.Errorf("pycookiecheat failed: %w", err)
 	}
 
 	var cookies map[string]string
-	if err := json.Unmarshal(out.Bytes(), &cookies); err != nil {
+	if err := json.Unmarshal(out, &cookies); err != nil {
 		return "", fmt.Errorf("parsing pycookiecheat output: %w", err)
 	}
 
@@ -856,20 +1009,19 @@ func extractViaPycookiecheat(tool cookieTool, domain, profileDir string) (string
 	return strings.Join(parts, "; "), nil
 }
 
-func extractViaPycookiecheatCLI(tool cookieTool, domain, profileDir string) (string, error) {
+func extractViaPycookiecheatCLI(tool cookieTool, domain string, profile chromeProfile) (string, error) {
 	cleanDomain := strings.TrimPrefix(domain, ".")
 	var args []string
-	if profileDir != "" {
-		dataDir, err := chromeDataDir()
-		if err != nil {
-			return "", err
-		}
-		args = append(args, "-c", filepath.Join(dataDir, profileDir, "Cookies"))
+	if profile.Dir != "" && profile.DataDir != "" {
+		args = append(args, "-c", filepath.Join(profile.DataDir, profile.Dir, "Cookies"))
 	}
 	args = append(args, "https://"+cleanDomain)
 
+	cmd, err := execNamed(tool.pyBin, args...)
+	if err != nil {
+		return "", err
+	}
 	var out bytes.Buffer
-	cmd := exec.Command(tool.pyBin, args...)
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -901,6 +1053,101 @@ func extractViaCookiesCLI(domain string) (string, error) {
 	result := strings.TrimSpace(out.String())
 	result = strings.TrimPrefix(result, "Cookie: ")
 	return result, nil
+}
+
+type importedCookieFile struct {
+	Header  string
+	Cookies []*http.Cookie
+}
+
+func loadCookiesFromFile(path string, domain string) (importedCookieFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return importedCookieFile{}, fmt.Errorf("reading cookies file: %w", err)
+	}
+	var state struct {
+		Cookies []struct {
+			Name     string  `json:"name"`
+			Value    string  `json:"value"`
+			Domain   string  `json:"domain"`
+			Path     string  `json:"path"`
+			Expires  float64 `json:"expires"`
+			Secure   bool    `json:"secure"`
+			HTTPOnly bool    `json:"httpOnly"`
+		} `json:"cookies"`
+	}
+	if err := json.Unmarshal(data, &state); err == nil {
+		if len(state.Cookies) == 0 {
+			return importedCookieFile{}, fmt.Errorf("cookies file contains an empty cookies array")
+		}
+		parts := make([]string, 0, len(state.Cookies))
+		cookies := make([]*http.Cookie, 0, len(state.Cookies))
+		for _, c := range state.Cookies {
+			if !cookieDomainMatches(c.Domain, domain) {
+				continue
+			}
+			name := strings.TrimSpace(c.Name)
+			if name == "" {
+				continue
+			}
+			path := c.Path
+			if path == "" {
+				path = "/"
+			}
+			ck := &http.Cookie{
+				Name:     name,
+				Value:    c.Value,
+				Domain:   c.Domain,
+				Path:     path,
+				Secure:   c.Secure,
+				HttpOnly: c.HTTPOnly,
+			}
+			if c.Expires > 0 {
+				ck.Expires = time.Unix(int64(c.Expires), 0)
+			}
+			cookies = append(cookies, ck)
+			parts = append(parts, name+"="+c.Value)
+		}
+		if len(parts) == 0 {
+			return importedCookieFile{}, fmt.Errorf("cookies file contains no cookies for %s", domain)
+		}
+		return importedCookieFile{Header: strings.Join(parts, "; "), Cookies: cookies}, nil
+	}
+	header := trimCookieHeaderPrefix(string(data))
+	if header == "" {
+		return importedCookieFile{}, fmt.Errorf("cookies file is empty")
+	}
+	return importedCookieFile{Header: header, Cookies: parseCookieHeaderCookies(header)}, nil
+}
+
+func trimCookieHeaderPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= len("Cookie:") && strings.EqualFold(s[:len("Cookie:")], "Cookie:") {
+		return strings.TrimSpace(s[len("Cookie:"):])
+	}
+	return s
+}
+
+func parseCookieHeaderCookies(header string) []*http.Cookie {
+	parts := strings.Split(header, ";")
+	cookies := make([]*http.Cookie, 0, len(parts))
+	for _, part := range parts {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{Name: strings.TrimSpace(name), Value: strings.TrimSpace(value), Path: "/"})
+	}
+	return cookies
+}
+
+func cookieDomainMatches(cookieDomain string, targetDomain string) bool {
+	target := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(targetDomain)), ".")
+	if target == "" {
+		return true
+	}
+	candidate := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cookieDomain)), ".")
+	return candidate == target || strings.HasSuffix(candidate, "."+target) || (strings.Contains(candidate, ".") && strings.HasSuffix(target, "."+candidate))
 }
 
 // parseCookieString splits a "name1=value1; name2=value2" string into a map.
@@ -1140,4 +1387,72 @@ func evalDocumentCookieViaCDP(wsURL, domain string) (string, error) {
 		}
 		return result.Result.Value, nil
 	}
+}
+
+// execNamed runs an allowlisted program. The command name is a compile-time
+// literal in every branch; callers pass only arguments.
+func execNamed(name string, args ...string) (*exec.Cmd, error) {
+	switch name {
+	case "python3":
+		return exec.Command("python3", args...), nil
+	case "python":
+		return exec.Command("python", args...), nil
+	case "py":
+		return exec.Command("py", args...), nil
+	case "pycookiecheat":
+		return exec.Command("pycookiecheat", args...), nil
+	case "cookies":
+		return exec.Command("cookies", args...), nil
+	case "cookie-scoop":
+		return exec.Command("cookie-scoop", args...), nil
+	case "press-auth":
+		return exec.Command("press-auth", args...), nil
+	case "browser-use":
+		return exec.Command("browser-use", args...), nil
+	case "agent-browser":
+		return exec.Command("agent-browser", args...), nil
+	case "chrome.exe":
+		return exec.Command("chrome.exe", args...), nil
+	case "msedge.exe":
+		return exec.Command("msedge.exe", args...), nil
+	case "google-chrome":
+		return exec.Command("google-chrome", args...), nil
+	case "google-chrome-stable":
+		return exec.Command("google-chrome-stable", args...), nil
+	case "chromium":
+		return exec.Command("chromium", args...), nil
+	case "chromium-browser":
+		return exec.Command("chromium-browser", args...), nil
+	case "microsoft-edge":
+		return exec.Command("microsoft-edge", args...), nil
+	default:
+		return nil, fmt.Errorf("refusing to execute %q", name)
+	}
+}
+
+// runPythonFile writes script to a 0600 file in a 0700 temp dir and runs it.
+// The interpreter name stays on the allowlist. scriptArgs are data, never source.
+func runPythonFile(bin string, leading []string, script string, scriptArgs ...string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "pp-cookie-py-")
+	if err != nil {
+		return nil, fmt.Errorf("creating python helper dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	scriptPath := filepath.Join(dir, "helper.py")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		return nil, fmt.Errorf("writing python helper: %w", err)
+	}
+	args := append(append([]string{}, leading...), scriptPath)
+	args = append(args, scriptArgs...)
+	cmd, err := execNamed(bin, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }

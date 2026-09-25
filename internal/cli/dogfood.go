@@ -25,6 +25,7 @@ func newDogfoodCmd() *cobra.Command {
 	var authEnv string
 	var authTier string
 	var allowDestructive bool
+	var overwriteCommandMirror bool
 
 	cmd := &cobra.Command{
 		Use:   "dogfood",
@@ -35,12 +36,21 @@ func newDogfoodCmd() *cobra.Command {
 
   # Output as JSON for programmatic use
   cli-printing-press dogfood --dir ./generated/stripe-pp-cli --json`,
+		Annotations: map[string]string{
+			"pp:typed-exit-codes": "0",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			canonicalDir, err := pipeline.ResolveTargetDir(dir)
+			if err != nil {
+				return &ExitError{Code: ExitInputError, Err: err}
+			}
+			dir = canonicalDir
 			if live {
 				report, err := pipeline.RunLiveDogfood(pipeline.LiveDogfoodOptions{
 					CLIDir:              dir,
 					Level:               level,
 					Timeout:             timeout,
+					ResearchDir:         researchDir,
 					WriteAcceptancePath: writeAcceptance,
 					AuthEnv:             authEnv,
 					AuthTier:            authTier,
@@ -60,7 +70,7 @@ func newDogfoodCmd() *cobra.Command {
 				}
 				// Device CLIs report "unverified-device" (manual --live testing is
 				// their real gate); only a hard FAIL is a non-zero exit.
-				if report.Verdict == "FAIL" {
+				if report.Verdict == pipeline.DogfoodVerdictFail {
 					return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("live dogfood failed: %d/%d tests failed", report.Failed, report.MatrixSize)}
 				}
 				return nil
@@ -73,6 +83,9 @@ func newDogfoodCmd() *cobra.Command {
 			if trafficAnalysisPath != "" {
 				opts = append(opts, pipeline.WithTrafficAnalysis(trafficAnalysisPath))
 			}
+			if overwriteCommandMirror {
+				opts = append(opts, pipeline.WithOverwriteCommandMirror())
+			}
 			report, err := pipeline.RunDogfood(dir, specPath, opts...)
 			if err != nil {
 				return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("running dogfood: %w", err)}
@@ -81,10 +94,15 @@ func newDogfoodCmd() *cobra.Command {
 			if asJSON {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(report)
+				if err := enc.Encode(report); err != nil {
+					return err
+				}
+			} else {
+				printDogfoodReport(report)
 			}
-
-			printDogfoodReport(report)
+			if report.Verdict == pipeline.DogfoodVerdictFail {
+				return failClosedAfterReport("dogfood failed")
+			}
 			return nil
 		},
 	}
@@ -98,9 +116,10 @@ func newDogfoodCmd() *cobra.Command {
 	cmd.Flags().StringVar(&level, "level", "full", "Live dogfood depth: quick or full")
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "Timeout for each live dogfood test")
 	cmd.Flags().StringVar(&writeAcceptance, "write-acceptance", "", "Write phase5-acceptance.json to this path on every outcome (status:pass on success, status:fail with a failure_summary block on failure)")
-	cmd.Flags().StringVar(&authEnv, "auth-env", "", "Environment variable that proves an API credential was available for the acceptance marker")
+	cmd.Flags().StringVar(&authEnv, "auth-env", "", "Environment variable that proves an API credential was available for the acceptance marker. For oauth2_refresh, a refresh-token-shaped env var is copied into a shared sandbox credential file so rotation persists across subprocesses")
 	cmd.Flags().StringVar(&authTier, "auth-tier", "", "Credential tier for live dogfood; falls back to PP_AUTH_TIER and skips commands annotated pp:requires-tier on mismatch")
-	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "Re-enable testing of endpoints classified as destructive-at-auth. Default skips them to prevent runner-credential rotation.")
+	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "Re-enable destructive-at-auth endpoints and live mutating Example probes that do not advertise --dry-run. Default skips both.")
+	cmd.Flags().BoolVar(&overwriteCommandMirror, "overwrite-command-mirror", false, "Overwrite a differing command_mirror_capabilities block in internal/mcp/tools.go from research.json")
 	_ = cmd.MarkFlagRequired("dir")
 	return cmd
 }
@@ -112,7 +131,15 @@ func printLiveDogfoodReport(report *pipeline.LiveDogfoodReport) {
 	fmt.Printf("Level:      %s\n", report.Level)
 	fmt.Printf("Verdict:    %s%s\n", report.Verdict, liveDogfoodVerdictQualifier(report))
 	fmt.Printf("Commands:   %d\n", len(report.Commands))
-	fmt.Printf("Tests:      %d passed, %d failed, %d skipped\n", report.Passed, report.Failed, report.Skipped)
+	fmt.Printf("Tests:      %d passed, %d failed, %d skipped (%d unverified)\n", report.Passed, report.Failed, report.Skipped, report.Unverified)
+	fmt.Printf("Pass rate:  %.0f%% of %d evaluated checks\n", report.PassRate, report.MatrixSize)
+	if report.Verdict == "unverified-device" {
+		fmt.Println("Coverage:   UNVERIFIED - device CLI requires manual live testing")
+	} else if report.CoverageHollow {
+		fmt.Printf("Coverage:   HOLLOW - %d novel feature(s) never executed: %s\n", len(report.HollowFeatures), strings.Join(report.HollowFeatures, ", "))
+	} else {
+		fmt.Println("Coverage:   headline novel features executed")
+	}
 	fmt.Println()
 	for _, result := range report.Tests {
 		status := strings.ToUpper(string(result.Status))
@@ -301,10 +328,20 @@ func printDogfoodReport(report *pipeline.DogfoodReport) {
 	}
 	fmt.Println()
 
-	fmt.Printf("Verdict: %s\n", report.Verdict)
+	fmt.Printf("Verdict: %s%s\n", report.Verdict, dogfoodVerdictQualifier(report))
 	for _, issue := range report.Issues {
 		fmt.Printf("  - %s\n", issue)
 	}
+}
+
+func dogfoodVerdictQualifier(report *pipeline.DogfoodReport) string {
+	if report == nil || report.Verdict != "PASS" {
+		return ""
+	}
+	if report.SpecSource == pipeline.DogfoodSpecSourceNone || (report.PathCheck.Skipped && report.SpecPath == "") {
+		return " (path/auth checks skipped — no spec)"
+	}
+	return ""
 }
 
 func describeOAuthScopeRequirement(violation pipeline.OAuthScopeCoverageViolation) string {

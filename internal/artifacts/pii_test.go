@@ -29,6 +29,36 @@ func TestRedactPIIText_RedactsJSONPII(t *testing.T) {
 	require.Contains(t, got, `"status":"active"`)
 }
 
+func TestRedactPIIText_RedactsJSONCredentialsAndPII(t *testing.T) {
+	token := strings.Repeat("a", 40)
+	got := RedactPIIText(`{"token":"` + token + `","email":"a@b.com","status":"ok"}`)
+
+	require.NotContains(t, got, token)
+	require.NotContains(t, got, "a@b.com")
+	require.Contains(t, got, `"token":"<redacted>"`)
+	require.Contains(t, got, `"email":"<redacted>"`)
+	require.Contains(t, got, `"status":"ok"`)
+}
+
+func TestRedactPIIText_RedactsCredentialKeyVariantsAndJWTs(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImxpdmVAdXNlci5jb20ifQ.signature"
+	got := RedactPIIText(`{"authentication_token":"auth-secret","new_sso_auth_token":"` + jwt + `","id":42,"created_at":"2026-07-13T12:34:56Z","status":"active"}`)
+
+	require.NotContains(t, got, "auth-secret")
+	require.NotContains(t, got, jwt)
+	require.Contains(t, got, `"authentication_token":"<redacted>"`)
+	require.Contains(t, got, `"new_sso_auth_token":"<redacted>"`)
+	require.Contains(t, got, `"id":42`)
+	require.Contains(t, got, `"created_at":"2026-07-13T12:34:56Z"`)
+	require.Contains(t, got, `"status":"active"`)
+}
+
+func TestRedactPIIText_RedactsJWTOutsideCredentialField(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+
+	require.Equal(t, "bearer "+PIIRedactedSentinel, RedactPIIText("bearer "+jwt))
+}
+
 func TestRedactPIIText_LeavesStructuralJSONUnchanged(t *testing.T) {
 	input := `{"id":42,"status":"active"}`
 
@@ -43,6 +73,55 @@ func TestRedactPIIJSONKeys_RedactsWithoutPatternSweep(t *testing.T) {
 	require.Contains(t, got, `"name":"<redacted>"`)
 	require.Contains(t, got, "jane@example.com")
 	require.Contains(t, got, `"id":42`)
+}
+
+func TestRedactPIIJSONKeys_RedactsCredentialKeys(t *testing.T) {
+	for _, key := range []string{
+		"token",
+		"api_token",
+		"api-key",
+		"api key",
+		"apikey",
+		"access_token",
+		"auth_token",
+		"authentication_token",
+		"new_sso_auth_token",
+		"ssoToken",
+		"newSsoAuthToken",
+		"newSSOAuthToken",
+		"refresh_token",
+		"client_secret",
+		"secret",
+		"password",
+		"session",
+		"session_token",
+		"csrf",
+		"csrf_token",
+		"csrfToken",
+		"websocket_url",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got, changed := RedactPIIJSONKeys(`{"` + key + `":"credential-value","status":"ok"}`)
+
+			require.True(t, changed)
+			require.NotContains(t, got, "credential-value")
+			require.Contains(t, got, `"`+key+`":"<redacted>"`)
+			require.Contains(t, got, `"status":"ok"`)
+		})
+	}
+}
+
+func TestRedactPIIJSONKeys_LeavesCredentialCountersUnchanged(t *testing.T) {
+	for _, input := range []string{
+		`{"token_count":5,"status":"ok"}`,
+		`{"lesson_token":"chapter-3","status":"ok"}`,
+		`{"lessonToken":"chapter-3","status":"ok"}`,
+	} {
+		got, changed := RedactPIIJSONKeys(input)
+
+		require.False(t, changed)
+		require.Equal(t, input, got)
+	}
 }
 
 func TestRedactPIIJSONKeys_RedactsNDJSON(t *testing.T) {
@@ -205,8 +284,18 @@ func TestFindPII_Email(t *testing.T) {
 		{name: "reserved-test-tld", line: `"email": "printer@app.test"`, expectKinds: nil},
 		{name: "reserved-localhost-tld", line: `"email": "printer@app.localhost"`, expectKinds: nil},
 		{name: "reserved-invalid-tld", line: `"email": "printer@app.invalid"`, expectKinds: nil},
+		{name: "github-noreply", line: `git author 123456+octocat@users.noreply.github.com`, expectKinds: nil},
+		{name: "github-legacy-noreply", line: `git author octocat@users.noreply.github.com`, expectKinds: nil},
+		{name: "go-toolchain-module", line: `golang.org/toolchain@v0.0.1-go1.26.8.darwin-amd64`, expectKinds: nil},
+		{name: "go-toolchain-detected-span-without-context", line: `toolchain@v0.0.1-go1.26.8.darwin`, expectKinds: []string{PIIKindEmail}},
+		{name: "go-toolchain-missing-architecture", line: `golang.org/toolchain@v0.0.1-go1.26.8.darwin`, expectKinds: []string{PIIKindEmail}},
+		{name: "go-toolchain-wrong-prefix", line: `example.org/toolchain@v0.0.1-go1.26.8.darwin-amd64`, expectKinds: []string{PIIKindEmail}},
+		{name: "toolchain-real-email-still-flags", line: `toolchain@company.com`, expectKinds: []string{PIIKindEmail}},
+		{name: "toolchain-version-domain-other-user-still-flags", line: `person@v0.0.1-go1.26.8.darwin`, expectKinds: []string{PIIKindEmail}},
+		{name: "url-userinfo-placeholder", line: `Use https://login:password@api.vendor.example/v1 for Basic auth examples.`, expectKinds: nil},
 		{name: "no-tld", line: `"handle": "alice@example"`, expectKinds: nil},
 		{name: "missing-at", line: `"site": "example.com"`, expectKinds: nil},
+		{name: "real-email-still-flags", line: `"email": "customer@gmail.com"`, expectKinds: []string{PIIKindEmail}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -225,6 +314,7 @@ func TestFindPII_PhoneUS(t *testing.T) {
 		{name: "parens-space-dash", line: `"phone": "(415) 234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
 		{name: "all-dashes", line: `"phone": "415-234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
 		{name: "country-code", line: `"phone": "+1 415 234 5678"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "country-code-dashes", line: `"phone": "+1-415-234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
 		{name: "fictional-exchange-dashes", line: `"phone": "415-555-0123"`, expectKinds: nil},
 		{name: "fictional-exchange-parens", line: `"phone": "(212) 555-0100"`, expectKinds: nil},
 		{name: "fictional-exchange-country-code", line: `"phone": "+1 415 555 0199"`, expectKinds: nil},
@@ -237,6 +327,8 @@ func TestFindPII_PhoneUS(t *testing.T) {
 		{name: "no-product-upc-leading-zero", line: `"upc": "0190074442"`, expectKinds: nil},
 		{name: "no-coordinate-leading-one", line: `"lng": 106.0512973`, expectKinds: nil},
 		{name: "no-epoch-timestamp", line: `"updated_at": 1700000000`, expectKinds: nil},
+		{name: "no-dns-soa-serial", line: `"soa_serial": 2026062501`, expectKinds: nil},
+		{name: "no-bare-ten-digit-id", line: `"customer_id": "4152345678"`, expectKinds: nil},
 		// Boundary cases that prove the constraint is on the leading
 		// digit of each quadrant, not on the whole string.
 		{name: "no-area-code-leading-zero", line: `"phone": "015-555-0123"`, expectKinds: nil},
@@ -263,8 +355,8 @@ func TestFindPII_PhoneUS_GitHubContextIDSkips(t *testing.T) {
 		{name: "comment-id", line: `see comment id 3249672558`, expectKinds: nil},
 		{name: "issuecomment-anchor", line: `https://github.com/o/r/pull/12#issuecomment-3249672648`, expectKinds: nil},
 		{name: "comments-url-path", line: `https://github.com/o/r/issues/5/comments/3249672700`, expectKinds: nil},
-		{name: "bare-real-phone-no-github-token", line: `contact 4152345678`, expectKinds: []string{PIIKindPhoneUS}},
-		{name: "bare-commit-word-near-real-phone-still-flags", line: `we will commit then call 4152345678`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "bare-real-phone-no-github-token", line: `contact 4152345678`, expectKinds: nil},
+		{name: "bare-commit-word-near-real-phone-skips", line: `we will commit then call 4152345678`, expectKinds: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

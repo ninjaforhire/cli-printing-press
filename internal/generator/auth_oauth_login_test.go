@@ -39,10 +39,13 @@ func TestOAuthLoginTopLevelCommandAndCredentialFallback(t *testing.T) {
 	require.NoError(t, err)
 	auth := string(authSrc)
 	require.Contains(t, auth, "func runOAuthLogin(")
-	require.Contains(t, auth, "return runOAuthLogin(cmd, flags, clientID, clientSecret, port, redirectOverride)")
+	require.Contains(t, auth, "clientIDFromFlag := clientID != \"\"")
+	require.Contains(t, auth, "clientSecretFromFlag := clientSecret != \"\"")
+	require.Contains(t, auth, "return runOAuthLogin(cmd, flags, clientID, clientSecret, port, clientIDFromFlag, clientSecretFromFlag, redirectOverride)")
 	require.Contains(t, auth, `"redirect-uri"`)
 	require.Contains(t, auth, "func validateRedirectOverride(")
 	require.Contains(t, auth, "if err := validateRedirectOverride(redirectOverride); err != nil {")
+	require.Contains(t, auth, "cfg.MarkCredentialsExplicit(clientIDFromFlag, clientSecretFromFlag)")
 	require.Contains(t, auth, "clientID = cfg.ClientID")
 	require.Contains(t, auth, "clientSecret = cfg.ClientSecret")
 	require.Contains(t, auth, "promptOAuthCredential(cmd, reader, \"OAuth2 Client ID\")")
@@ -68,6 +71,19 @@ func TestOAuthLoginTopLevelCommandAndCredentialFallback(t *testing.T) {
 	noInputOut, err := exec.Command(binPath, "--config", configPath, "--no-input", "login").CombinedOutput()
 	require.Error(t, err, "top-level login --no-input should fail when no credentials are available")
 	require.Contains(t, string(noInputOut), "OAUTH_LOGIN_PROMPTS_CLIENT_ID")
+
+	dryRunOut, err := exec.Command(binPath, "--config", configPath, "--no-input", "--dry-run", "login").CombinedOutput()
+	require.NoError(t, err, "top-level login --dry-run should not require credentials: %s", string(dryRunOut))
+	require.JSONEq(t, `{"status":"dry_run","action":"auth login","would":"start OAuth2 authorization-code flow (PKCE without client secret), open browser, capture loopback callback"}`, string(dryRunOut))
+
+	require.NoError(t, os.WriteFile(configPath, []byte("client_id = \"saved-id\"\n"), 0o600))
+	configuredProbe := exec.Command(binPath, "--config", configPath, "--no-input", "--dry-run", "login")
+	configuredProbe.Env = append(os.Environ(), "PRINTING_PRESS_VERIFY=1")
+	configuredProbeOut, err := configuredProbe.CombinedOutput()
+	require.NoError(t, err, "configured OAuth login probe failed: %s", string(configuredProbeOut))
+	require.Contains(t, string(configuredProbeOut), "would launch: https://accounts.example.com/oauth/authorize?")
+	require.Contains(t, string(configuredProbeOut), "client_id=saved-id")
+	require.Contains(t, string(configuredProbeOut), "code_challenge_method=S256")
 
 	const runtimeTest = `package cli
 
@@ -234,6 +250,86 @@ func TestOAuthClientCredentialsUsesNestedAuthLoginHints(t *testing.T) {
 	require.Contains(t, auth, "Mint an OAuth2 bearer token via the client_credentials grant")
 	require.Contains(t, auth, `oauth-client-credentials-login-pp-cli auth login`)
 	require.NotContains(t, auth, `oauth-client-credentials-login-pp-cli login`)
+
+	const cliRuntimeTest = `package cli
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestMintClientCredentialsTokenUsesBasicAuthAndUserAgent(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "client-id" || pass != "client-secret" {
+			t.Fatalf("BasicAuth() = (%q, %q, %v), want client-id/client-secret/true", user, pass, ok)
+		}
+		if got := r.Header.Get("User-Agent"); calls == 1 && got != "oauth-client-credentials-login-pp-cli/0.1.0" {
+			t.Fatalf("default User-Agent = %q", got)
+		} else if calls == 2 && got != "custom-agent/2.0" {
+			t.Fatalf("override User-Agent = %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := r.Form.Get("grant_type"); got != "client_credentials" {
+			t.Fatalf("grant_type = %q", got)
+		}
+		if got := r.Form.Get("client_id"); got != "" {
+			t.Fatalf("client_id leaked into form body: %q", got)
+		}
+		if got := r.Form.Get("client_secret"); got != "" {
+			t.Fatalf("client_secret leaked into form body: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(` + "`{\"access_token\":\"minted\",\"expires_in\":3600}`" + `))
+	}))
+	defer server.Close()
+
+	tok, err := mintClientCredentialsToken(server.Client(), server.URL, "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("mintClientCredentialsToken() error = %v", err)
+	}
+	if tok.AccessToken != "minted" {
+		t.Fatalf("AccessToken = %q", tok.AccessToken)
+	}
+
+	t.Setenv("OAUTH_CLIENT_CREDENTIALS_LOGIN_USER_AGENT", "custom-agent/2.0")
+	if _, err := mintClientCredentialsToken(server.Client(), server.URL, "client-id", "client-secret"); err != nil {
+		t.Fatalf("mintClientCredentialsToken() with UA override error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestMintClientCredentialsTokenIncludesScopeOnlyWhenSet(t *testing.T) {
+	t.Setenv("OAUTH_CLIENT_CREDENTIALS_LOGIN_OAUTH_SCOPE", "read write")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := strings.Join(r.Form["scope"], ","); got != "read write" {
+			t.Fatalf("scope = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(` + "`{\"access_token\":\"scoped\"}`" + `))
+	}))
+	defer server.Close()
+	if _, err := mintClientCredentialsToken(server.Client(), server.URL, "client-id", "client-secret"); err != nil {
+		t.Fatalf("mintClientCredentialsToken() error = %v", err)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "client_credentials_mint_test.go"), []byte(cliRuntimeTest), 0o644))
+	runGoCommandRequired(t, outputDir, "test", "./internal/cli", "-run", "TestMintClientCredentialsToken", "-count=1")
 }
 
 func TestOAuthLoginTopLevelCommandForBearerTokenAuthCodeSpec(t *testing.T) {

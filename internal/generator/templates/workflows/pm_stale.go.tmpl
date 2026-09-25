@@ -97,28 +97,28 @@ func buildStaleTimestampPredicate() (whereClause, orderClause string, placeholde
 		len(whereParts)
 }
 
-func newStaleCmd(flags *rootFlags) *cobra.Command {
+func new{{.CommandConstructor}}Cmd(flags *rootFlags) *cobra.Command {
 	var days int
 	var team string
 	var dbPath string
 	var limit int
 
 	cmd := &cobra.Command{
-		Use:   "stale",
+		Use:   {{printf "%q" (index .CommandNames "stale")}},
 		Short: "Find items with no updates in N days",
 		Long: `Scan locally synced data for items that have not been updated within
 the specified number of days. Useful for identifying forgotten or blocked work.`,
 		Example: `  # Find items not updated in 30 days (default)
-  {{.Name}}-pp-cli stale
+  {{.Name}}-pp-cli {{index .CommandNames "stale"}}
 
   # Find items not updated in 14 days
-  {{.Name}}-pp-cli stale --days 14
+  {{.Name}}-pp-cli {{index .CommandNames "stale"}} --days 14
 
   # Filter by team
-  {{.Name}}-pp-cli stale --days 7 --team backend
+  {{.Name}}-pp-cli {{index .CommandNames "stale"}} --days 7 --team backend
 
   # Output as JSON
-  {{.Name}}-pp-cli stale --days 30 --json`,
+  {{.Name}}-pp-cli {{index .CommandNames "stale"}} --days 30 --json`,
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dbPath == "" {
@@ -127,11 +127,13 @@ the specified number of days. Useful for identifying forgotten or blocked work.`
 
 			db, err := store.OpenWithContext(cmd.Context(), dbPath)
 			if err != nil {
-				return fmt.Errorf("opening local database: %w\nRun '{{.Name}}-pp-cli sync' first.", err)
+				return fmt.Errorf("opening local database: %w\n{{if syncHintInvocation}}Run '{{goString (syncHintInvocation)}}' first.{{else}}Populate the local store through a custom store-backed command first.{{end}}", err)
 			}
 			defer db.Close()
 
+			{{- if .HasSync }}
 			maybeEmitSyncHints(cmd, db, "", flags.maxAge)
+			{{- end }}
 
 			cutoffTime := time.Now().AddDate(0, 0, -days)
 			cutoffStr := cutoffTime.Format(time.RFC3339)
@@ -227,15 +229,16 @@ the specified number of days. Useful for identifying forgotten or blocked work.`
 				})
 			}
 
-			if flags.asJSON {
+			if wantsMachineOutput(flags) {
+				if flags.csv || flags.plain || flags.quiet {
+					return printJSONFiltered(cmd.OutOrStdout(), items, flags)
+				}
 				result := map[string]any{
 					"total_count": totalCount,
 					"showing":     len(items),
 					"items":       items,
 				}
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(result)
+				return printJSONFiltered(cmd.OutOrStdout(), result, flags)
 			}
 
 			if len(items) == 0 {
@@ -263,7 +266,7 @@ the specified number of days. Useful for identifying forgotten or blocked work.`
 
 	cmd.Flags().IntVar(&days, "days", 30, "Number of days without update to consider stale")
 	cmd.Flags().StringVar(&team, "team", "", "Filter by team identifier")
-	cmd.Flags().StringVar(&dbPath, "db", "", "Database path (default: ~/.local/share/{{.Name}}-pp-cli/data.db)")
+	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database file path (default: resolved data directory data.db)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum items to show")
 
 	return cmd

@@ -8,7 +8,7 @@ This repo is **the machine** (generator, templates, binary, skills) that produce
 - **Don't change the machine for one CLI's edge case.** If a fix helps one API but breaks another, guard it with a clear conditional or leave it as a printed-CLI fix.
 - **Don't hardcode API/site names in reusable artifacts.** Skills, templates, generator code, prompts, and shared docs must use placeholders (`<api>`, `<site>`, "the target site") unless the text is explicitly an example or test fixture.
 - **Update dependent verifiers in the same change.** A new generator capability that affects scoring requires a scorer update; one that changes the MCP surface requires an audit update.
-When iterating on a printed CLI to discover issues, label findings as systemic (retro candidate) vs specific (printed-CLI fix).
+When iterating on a printed CLI to discover issues, classify findings as systemic (retro candidate) vs specific (printed-CLI fix).
 
 ### Anti-reimplementation
 A printed CLI wraps an API; it does not replace one. Novel-feature commands must call the real endpoint or read from the local store populated by sync.
@@ -19,6 +19,9 @@ A printed CLI wraps an API; it does not replace one. Novel-feature commands must
 - Carve-outs: commands that read from `internal/store`; commands that operate on the local SQLite file via `database/sql`; commands that call the API and then cache to the store; commands whose data is curated static content via `// pp:novel-static-reference`; commands that make a real hidden client call via `// pp:client-call`, but only when the hidden helper performs a real external API call. Do not use `// pp:client-call` for hardcoded payloads, local-only transforms, or fake endpoint stubs.
 Enforced by the absorb manifest's Kill Check (`skills/printing-press/references/absorb-scoring.md`) and dogfood's `reimplementation_check`, which flags handler files showing neither a client call nor a store access without an opt-out.
 
+### Printed chrome fingerprint
+When changing printed chrome-family identity (`chromeMajor`, `sec-ch-ua` GREASE brand, User-Agent in `chrome_profile.go.tmpl`, or `HelloChrome_*`): bump those literals together, and do not raise the advertised Chrome major above the `HelloChrome_Auto` alias in the printed `utls` version in `go.mod.tmpl`. Do not match live Chrome. Leave the existing Surf-era snapshot unless you are doing that coordinated bump. The impersonation-off browser-shaped UA in `client.go.tmpl` / `auth_browser.go.tmpl` is a separate frozen string; do not "align" it to `chromeMajor` or to current Chrome. See [`docs/solutions/conventions/printed-chrome-fingerprint-tracks-utls-parrot.md`](docs/solutions/conventions/printed-chrome-fingerprint-tracks-utls-parrot.md).
+
 ## Agent-Native Surface
 Every printed CLI exposes two surfaces: a CLI surface for humans and an MCP surface for agents. Any action a user can take should be reachable by an agent, but operator ergonomics belong on the human-facing CLI, not in an agent's tool catalog.
 
@@ -27,19 +30,22 @@ The runtime walker in `internal/mcp/cobratree/` mirrors the Cobra tree at server
 1. Commands annotated `cmd.Annotations["pp:endpoint"] = "<resource>.<endpoint>"` already have typed tools and are skipped to avoid duplicates.
 2. Framework commands listed in `cobratree/classify.go.tmpl`'s `frameworkCommands` set are skipped because a typed equivalent is better (`sql`, `search`, `context`) or the command is non-functional via MCP (`auth`, `completion`, `doctor`, `version`, `feedback`, `profile`, `which`, `help`).
 3. `cmd.Annotations["mcp:hidden"] = "true"` opts out a domain command that needs human-in-the-loop input.
+4. Commands annotated `cmd.Annotations["pp:api-resource"] = "true"` or `cmd.Annotations["pp:parent-group"] = "true"` are grouping parents whose only behavior is printing help; they are skipped so they do not register as runnable MCP tools. Endpoint leaves stay exposed.
 Store-population commands stay exposed: `sync`, `stale`, `orphans`, `reconcile`, `load`, `export`, `import`, `workflow`, `analytics`. `sql` and `search` return empty until `sync` populates the store. When in doubt, leave it exposed.
 
 ### Tool safety annotations
 MCP hosts use `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` to decide when to ask for permission. Missing annotations default to "could write or delete."
-- Endpoint mirrors: `GET` -> read-only + open-world, `DELETE` -> destructive + open-world, `POST`/`PUT`/`PATCH` -> open-world.
+- Endpoint mirrors: conventional REST `GET` -> read-only + open-world; RPC-over-GET without a read signal (or an explicit / name-token mutation) is not read-only. `DELETE` -> destructive + open-world, `POST`/`PUT`/`PATCH` -> open-world unless a read signal applies.
 - Built-in tools: `context`, `sql`, `search` are read-only and local-only.
-- Runtime walker shell-out tools get no annotations by default. Opt into read-only with `cmd.Annotations["mcp:read-only"] = "true"` for novel commands that only read from the API, the local store, or the CLI tree itself. Skip the annotation when the command can mutate external state (writes via API, store updates, git pushes) or write to user-visible files outside the local cache (commands accepting `--output <file>`, `--repo <dir>`, etc.).
+- Runtime walker shell-out tools get no annotations by default. Opt into read-only with `cmd.Annotations["mcp:read-only"] = "true"` for novel commands that only read from the API, the local store, or the CLI tree itself. Skip the annotation when the command can mutate external state (writes via API, store updates other than telemetry-class writes below, git pushes) or write to user-visible files outside the local cache (commands accepting `--output <file>`, `--repo <dir>`, etc.).
+- Telemetry-class local writes do not disqualify `mcp:read-only`: a best-effort local write that never fails the command and is never observable in domain output (recall's usage-event insert, journal appends) is telemetry, not a store update in the sense above. Keep `readOnlyHint: true` on such commands.
+- Annotate commands whose only writes land in the CLI's own local store (teach-style learn writes, playbook amendments) with `cmd.Annotations["mcp:local-write"] = "true"`: the walker emits `destructiveHint: false` + `openWorldHint: false` and leaves `readOnlyHint` unset. Do not apply it to commands that delete user-visible data (`learnings forget`, `learnings reject` keep honest destructive semantics).
 Wrong annotations are worse than missing ones. A false `readOnlyHint: true` on a mutating tool is a real bug; a missing annotation is just a permission prompt.
 
 ### Side-effect commands
-Hand-written novel commands that perform visible actions (open browser tabs, send notifications, dial out to OS handlers) follow a two-part rule:
+Hand-written novel commands that perform visible or physical actions (open browser tabs, send notifications, dial out to OS handlers, play audio, preheat hardware, boil water, write physical displays) follow this rule:
 1. Print by default; require explicit opt-in (`--launch`, `--send`, `--play`, etc.) to actually act.
-2. Short-circuit when `cliutil.IsVerifyEnv()` is true. The verifier sets `PRINTING_PRESS_VERIFY=1` in every mock-mode subprocess; this env-var check is the floor that catches any side-effect command the verifier's heuristic classifier misses.
+2. Refuse when `cliutil.IsAnyHarness()` is true, and emit structured JSON when `--json` or `--agent` is active. The helper covers `PRINTING_PRESS_VERIFY=1` and `PRINTING_PRESS_DOGFOOD=1`; commands reaching hardware a person can hear or see must refuse under every harness because curtailing makes the effect shorter, not absent.
 
 OAuth browser authorization flows must also avoid impossible machine-mode combinations. If `--json` or another machine-output mode suppresses the authorize URL and `--no-open` or equivalent disables browser launch, either emit a deliberate structured continuation protocol (`authorize_url`, state handle, expiry, next command) or fail fast with an actionable usage error. Do not wait for a callback that no user or machine can initiate. See `skills/printing-press/references/oauth2-pkce-cli-checklist.md`.
 
@@ -47,7 +53,7 @@ Generated endpoint-mirror commands also gate mutating HTTP verbs (DELETE/POST/PU
 
 
 ### Long-running commands under live-dogfood
-Hand-written novel commands whose happy path is an expensive network operation (full sync loops, content crawlers, bulk archive walks) MUST curtail work when `cliutil.IsDogfoodEnv()` returns true. The `cli-printing-press dogfood --live` runner sets `PRINTING_PRESS_DOGFOOD=1` in every subprocess under a flat 30s per-command timeout, so an uncapped happy path trips the timeout and flips the matrix verdict to FAIL. Unlike `IsVerifyEnv`, this does NOT mean "don't hit the network" — dogfood is a real-API matrix; use it to bound work (paginate once, fetch a bounded sample, honor a smaller `--limit` default), never to substitute mock data for real calls.
+Hand-written novel commands whose happy path is an expensive read/network operation (full sync loops, content crawlers, bulk archive walks) MUST curtail work when `cliutil.IsDogfoodEnv()` returns true. The `cli-printing-press dogfood --live` runner sets `PRINTING_PRESS_DOGFOOD=1` in every subprocess under a flat 30s per-command timeout, so an uncapped happy path trips the matrix verdict to FAIL. Unlike `IsAnyHarness`, this does NOT mean "don't hit the network" — dogfood is a real-API matrix for reads; use it to bound read work (paginate once, fetch a bounded sample, honor a smaller `--limit` default), never to substitute mock data for real calls.
 
 ### Generator-reserved namespaces
 `internal/cliutil/`, `internal/learn/`, and `internal/mcp/cobratree/` are generator-owned packages emitted into every printed CLI. Do not hand-author code in them and do not name agent-authored helpers that collide with their exports — regen will overwrite the work. Novel-feature code goes in command packages and may import from `cliutil` or `learn`.
@@ -69,9 +75,11 @@ Format with `go fmt ./...` before handing back work; use `gofmt -w path/to/file.
 Always use relative paths for build output. Never build to `/tmp` or another shared absolute path; use `./cli-printing-press`.
 
 ## Generator Output Stability
-Run `scripts/golden.sh verify` whenever a change may affect CLI command output, catalog rendering, browser-sniff or crowd-sniff output, generated specs or generated printed CLI files, templates under `internal/generator/templates/`, naming, endpoint derivation, auth emission, manifest generation, scorecard output, or pipeline artifacts.
+Run `scripts/golden.sh verify` whenever a change may affect CLI command output, browser-sniff or crowd-sniff output, generated specs or generated printed CLI files, templates under `internal/generator/templates/`, naming, endpoint derivation, auth emission, manifest generation, scorecard output, or pipeline artifacts.
 Never update goldens just to make a failing check pass. Run `scripts/golden.sh update` only when the behavior change is intentional, then inspect the diff and explain it in your final response. See [`docs/GOLDEN.md`](docs/GOLDEN.md) for the decision rubric, fixture conventions, and failure handling.
 When adding a new deterministic CLI behavior or generated artifact contract, explicitly decide whether the golden suite needs a new or expanded fixture. A passing `scripts/golden.sh verify` on existing cases does not prove coverage for new auth, pagination, MCP, manifest, naming, or similar deterministic generation behavior.
+For PRs targeting `main`, the same golden set Mergify waits on is Main CI's `full-golden` job, which runs `bash scripts/golden.sh verify`; the separate `Golden` workflow delegates `main`-targeted PRs to that job. A template/generator PR is incomplete until the fixture updates for that full set are committed. Do not open the PR or call it ready when only a cheaper `golden` signal is green and `full-golden` would fail.
+Do not open a PR that touches `internal/generator/templates/**` or parser-emitted contracts without the matching golden or generated-output fixture updates in the same commit set. Use `scripts/verify-generator-output.sh` for template/generator changes that can alter emitted Go, as described below.
 
 ### Generator fixes require generated-output proof
 When touching `internal/generator/**`, `internal/openapi/**`, generator templates, parser-derived fields, MCP descriptions, naming, auth emission, or SKILL.md skeletons, verify the generated CLI behavior, not only the Printing Press source or template text.
@@ -87,6 +95,31 @@ Required before handoff:
 - Prefer established generator idioms: `oneline` / `OneLineNormalize` / `printf "%q"` for emitted literals, and `text/template.IsTrue` or a shared helper when Go code mirrors template truthiness.
 
 If the "obvious" fix violates a parser, verifier, scorer, or printed-CLI invariant, stop and resolve the invariant conflict rather than shipping a narrow band-aid.
+
+#### Emitted code that touches the developer's home requires a field proof
+
+CI proves the emitted code compiles and passes on a clean Linux runner. It does not prove the code leaves a populated home directory alone. When the change touches emitted code that resolves user paths or credentials (`HOME` / `USERPROFILE` lookups, `internal/cliutil` path and credential helpers, emitted `*_test.go` helpers), prove it against a real print before handoff.
+
+Point the proof at a **decoy profile, never your own home**. The snapshot below detects an escape after it lands, so a run against live credentials destroys them and only then reports it.
+
+```bash
+DECOY=$(mktemp -d)
+mkdir -p "$DECOY"/.config "$DECOY"/.local/share "$DECOY"/.local/state
+echo sentinel > "$DECOY"/.config/sentinel   # an escape needs something to clobber
+export HOME="$DECOY" USERPROFILE="$DECOY" \
+       XDG_CONFIG_HOME="$DECOY/.config" XDG_DATA_HOME="$DECOY/.local/share" \
+       XDG_STATE_HOME="$DECOY/.local/state" XDG_CACHE_HOME="$DECOY/.cache"
+
+go build -o ./cli-printing-press ./cmd/cli-printing-press
+./cli-printing-press generate --spec ./testdata/stytch.yaml --output "$DECOY/print/stytch-pp-cli"
+find "$DECOY"/.config "$DECOY"/.local -type f | sort | xargs md5sum > "$DECOY/before.txt"
+(cd "$DECOY/print/stytch-pp-cli" && go test ./...)
+find "$DECOY"/.config "$DECOY"/.local -type f | sort | xargs md5sum | diff "$DECOY/before.txt" -
+```
+
+A byte-identical snapshot is the pass condition.
+
+Redirect **both** `HOME` and `USERPROFILE`, plus the `XDG_*` variables. On Windows the production resolver reads `USERPROFILE`, so redirecting only `HOME` leaves the real profile exposed, which is the exact shape of the escape this proof exists to catch.
 
 ## Cross-repo dependency: published-library sweep tool
 
@@ -105,8 +138,6 @@ The same lockstep applies to the learn-loop templates under `internal/generator/
 - `internal/spec/` - Internal YAML spec parser
 - `internal/openapi/` - OpenAPI 3.0+ parser
 - `internal/generator/` - Template engine + quality gates
-- `internal/catalog/` - Catalog schema validator
-- `catalog/` - API catalog entries (YAML) + Go embed package (`catalog.FS`). Adding a YAML file here requires rebuilding the binary
 - `skills/` - Claude Code skill definitions
 - `testdata/` - Test fixtures (internal + OpenAPI specs)
 - `docs/PIPELINE.md` - Portable contract for the 9-phase generation pipeline. Update it when `internal/pipeline/state.go` or `internal/pipeline/seeds.go` changes
@@ -114,11 +145,10 @@ The same lockstep applies to the learn-loop templates under `internal/generator/
 - `docs/SKILLS.md` - Skill authoring conventions: workflow parity, reference-file pattern, frontmatter fields
 - `docs/PATTERNS.md` - Cross-cutting design patterns
 - `docs/GOLDEN.md` - Golden harness decision rubric and fixture conventions
-- `CONCEPTS.md` (repo root) - Shared domain vocabulary: what the core nouns mean (the Printing Press, printed CLI, spec, brief, manuscript, library, catalog, verify, scorecard, etc.), kept code-free. Relevant when orienting to the codebase or discussing domain concepts
+- `CONCEPTS.md` (repo root) - Shared domain vocabulary: what the core nouns mean (the Printing Press, printed CLI, spec, brief, manuscript, library, verify, scorecard, etc.), kept code-free. Relevant when orienting to the codebase or discussing domain concepts
 - `docs/GLOSSARY.md` - Naming conventions, overloaded-term disambiguation defaults, and the implementation reference (packages, subcommands, on-disk files) behind the concepts in `CONCEPTS.md`
 - `docs/RELEASE.md` - release-please / goreleaser flow
 - `docs/ATTRIBUTION.md` - Creator + contributors model: resolver fallback, validation layers, legacy-field dual-write window
-- `docs/CATALOG.md` - Catalog validation rationale and wrapper-only entry shape
 - `docs/ARTIFACTS.md` - Local library, manuscripts, and public-library flow
 - `docs/DOCS.md` - Doc-authoring rules, including pointer-rot prevention
 - `docs/solutions/` - Documented solutions to past problems (bugs, design patterns, best practices, conventions), organized by category subdir with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.
@@ -128,7 +158,6 @@ Use canonical terms so intent stays unambiguous. In skills and user-facing outpu
 - "library" -> local library (`~/printing-press/library/<api-slug>/`) unless the public library is called out explicitly
 - "publish" -> the publish step (pipeline) unless the public-library workflow is called out explicitly
 - "manifest" -> `tools-manifest.json` unless another manifest is named explicitly
-- "catalog" -> embedded `catalog/` unless "public library catalog" is stated
 - "the CLI" -> a printed CLI, not the generator binary (say "cli-printing-press binary" for the latter)
 See [`CONCEPTS.md`](CONCEPTS.md) for what the domain nouns mean, and [`docs/GLOSSARY.md`](docs/GLOSSARY.md) for naming conventions, the disambiguation defaults above in full, and the implementation reference behind each concept.
 
@@ -150,21 +179,28 @@ If the issue already has an assignee, treat that as active ownership until you c
 
 If you stop, abandon, or hand off before opening a PR, unclaim: remove the assignment and comment so the next picker-upper knows it is free. No need to unclaim on success — a merged PR closes the issue.
 
+## Issue Taxonomy and Relationships
+
+For actionable GitHub implementation issues, including retro work-unit issues, apply exactly one `priority:P1|P2` label, exactly one real issue type (`bug` or `enhancement`), and exactly one primary `comp:<slug>` component label. `priority:P1` means the printed CLI is broken or unsafe; `priority:P2` means a real generalizing defect exists but the printed CLI still works. Do not keep P3 as a backlog rank: if an issue is not P1 or P2, Skip/Drop/route it and close rather than filing or preserving it as actionable implementation work. `source:retro` is optional provenance; legacy `retro` is accepted only while the provenance-label cutover is in progress and is never an issue type. Optional surface labels are a closed vocabulary: `surface:cli`, `surface:auth`, `surface:sync`, `surface:store`, `surface:mcp`, `surface:docs`, `surface:verify`, `surface:sniff`, and `surface:publish`; normally apply one, and never more than two, when evidence supports them. Components identify ownership; surfaces identify affected behavior.
+
+Routing outcomes `duplicate`, `invalid`, `wontfix`, and `question` are exempt from the actionable-field requirement. `documentation` and `good first issue` are overlays; they do not replace an actionable issue's priority, type, or primary component. PR queue labels are governed by the separate PR guidance below and are PR-only, outside the issue taxonomy.
+
+Keep retro work units as flat top-level issues. When a work unit declares a real prerequisite, represent it with GitHub's native `blocked-by`/`blocking` relationship; ordinary related-area or prior-retro references remain prose links in `Related issues` and must not be promoted to dependencies merely because they are adjacent. The `pp-fix-batch` queue derives readiness from an open, unassigned issue with the required priority and type labels (and its primary component for actionable work), not from provenance or routing labels; an unresolved native prerequisite remains a dependency, not a substitute label.
+
 ## Commit Style
 Format: `type(scope): description`. Both type and scope are required.
 
 **Allowed scopes:**
-- `cli` covers the Go binary, commands, flags, embedded catalog, and docs.
-- `catalog` covers embedded catalog entries, catalog specs, catalog fixtures, and catalog-only validation.
+- `cli` covers the Go binary, commands, flags, and docs.
 - `skills` covers skill definitions (`SKILL.md`), references, and setup contract.
 - `ci` covers workflows, release config, and goreleaser.
 - `main` is reserved for release-please generated release PRs targeting `main`.
 
 **Allowed types:** standard conventional-commits — `feat` `fix` `docs` `refactor` `chore` `test` `ci` `perf` `build` `style` `revert` (the set `pr-title.yml` enforces). Repo-specific nuance: `docs` also covers **template wording changes that don't alter generator behavior** (e.g. rewording an install line in `readme.md.tmpl` / `skill.md.tmpl`) — those are `docs`/`fix`, never `feat`.
 
-**Breaking changes** use `!` after the scope: `feat(cli)!: rename catalog command to registry`. The `!` triggers a major version bump through release-please, so reserve it for changes that *break a downstream contract* — a renamed/removed command, a renamed/removed flag, a removed manifest field, an incompatible config-file shape. **What isn't breaking:** template wording changes, README updates, and generator-output diffs that don't remove or rename a documented surface are `docs(...)` or `fix(...)` — not `feat(...)!`, even when every printed CLI's output changes on next regen. The release-versioning consequence of `!` is intentional; if you're unsure, ask before adding it.
+**Breaking changes** use `!` after the scope: `feat(cli)!: rename generate flag`. The `!` triggers a major version bump through release-please, so reserve it for changes that *break a downstream contract* — a renamed/removed command, a renamed/removed flag, a removed manifest field, an incompatible config-file shape. **What isn't breaking:** template wording changes, README updates, and generator-output diffs that don't remove or rename a documented surface are `docs(...)` or `fix(...)` — not `feat(...)!`, even when every printed CLI's output changes on next regen. The release-versioning consequence of `!` is intentional; if you're unsure, ask before adding it.
 
-**Examples:** `feat(cli): add --select flag to all read commands` · `feat(cli)!: rename catalog command to registry` · `docs(cli): clarify install instructions in generated README`
+**Examples:** `feat(cli): add --select flag to all read commands` · `feat(cli)!: rename generate flag` · `docs(cli): clarify install instructions in generated README`
 
 **Version bump rules:** `fix(scope):` -> patch; `feat(scope):` -> minor; `feat(scope)!:` or `BREAKING CHANGE:` -> major; `refactor(scope):` is included in the next release PR but does not trigger a bump alone; `docs:`, `chore:`, and `test:` do not trigger a bump alone and stay out of release notes by default.
 
@@ -178,9 +214,19 @@ Every commit and PR title must include one of the allowed scopes. GitHub squash-
 - If unsure whether a PR is exempt, keep the template.
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the human-facing contributor guide and AI / automation disclosure definitions.
 
+## PR intent: implementation, publish, or proposal
+A request to generate, fix, or implement means produce the requested artifact, not a docs-only, plan, proposal, or spec PR. Do not substitute one PR shape for another:
+- **Implementation PR** (this repo): code, skill, generator, template, CLI, or test changes that make the requested behavior real.
+- **Library publish PR** (`mvanhorn/printing-press-library`, via `/printing-press-publish`): a generated CLI tree, or the explicit blocked-API journal entry described below.
+- **Proposal / spec / plan PR**: docs-only description of intended future work.
+
+When implementation or generation is blocked, report the exact blocker and stop. Do not open a docs-only, plan, proposal, or spec PR here or in `printing-press-library` unless the user explicitly requested that shape, or explicitly authorizes that fallback after seeing the blocker. Plan documents stay local (see "Plan documents stay local" below).
+
 ## Automated code review with Greptile
 
 Every PR gets automated Greptile review alongside CI. Resolve every Greptile finding before calling a PR ready: P0 and P1 comments block merge, and P2 comments need either a fix or a concrete reply explaining why the deferral is intentional. Do not use the score alone as the gate.
+If a Greptile finding argues against a stated issue or PR contract, do not change the contract just to appease the finding; leave the intended behavior in place and reply with the concrete contract. For example, when a contract says URL-valued path params must reduce to the trailing segment so dependent fetches do not 404, do not "restore" URL components.
+After required CI is green or `ready-to-merge` is on the PR, do not push comment-only, formatting-only, or Greptile-appeasement commits. Those pushes reset required checks and dequeue Mergify; use concrete replies or review-thread resolution for non-blocking nits.
 
 Greptile feedback is not limited to GitHub review threads. It also edits top-level PR summary comments, and those summaries can contain actionable issue blocks, including `Comments Outside Diff`, even when the thread list has zero unresolved comments. Before saying a PR is ready, run the repo-owned review-state helper:
 
@@ -206,12 +252,10 @@ See [`docs/RELEASE.md`](docs/RELEASE.md) for the merge-the-release-PR flow.
 - Distinct from `min-binary-version`: that is the release-managed, skill-frontmatter compatibility floor (the hard "skill cannot run below this" baseline, tracking the major and moving only on a major bump). The currency floor is a freely-tunable freshness gate. Do not conflate them.
 - `TestSkillsEnforceCurrencyFloor` in [`internal/pipeline/contracts_test.go`](internal/pipeline/contracts_test.go) locks the file shape and both contracts' enforce-every-run gate and clamp.
 
-## Adding Catalog Entries
-When adding or editing `catalog/*.yaml`, first decide whether the entry belongs in the curated blueprint catalog — it is not a public-library index or a reprint shortcut. Add an entry only when it is a distinct, reusable pattern with a real workflow, a reachable maintained source, and a reproducible generation route (vendor spec, docs-derived in-repo spec, verified sniffed spec, or truthful wrapper-only backing). Do not add aspirational entries, dead wrappers, unproven private endpoints, personalized app flows without an auth model, duplicates of a covered pattern, or scrape ideas without live crawl evidence.
-- PRs touching `catalog/*.yaml` or `catalog/specs/**` must complete the PR template's `Catalog Justification` section; `validate-catalog.yml` rejects catalog PRs without it. Justify why the entry belongs in the embedded catalog (the blueprint pattern it adds, nearest entries checked) and document provenance — source URL(s), source type (`official`/`docs`/`sniffed`/`community`/wrapper-only), live smoke evidence, auth, scope — per the evidence checklist in [`docs/CATALOG.md`](docs/CATALOG.md). Refresh the PR body after final changes; no stale diff excerpts, secret names, endpoint counts, or outdated verification claims.
-- Required fields: `name`, `display_name`, `description`, `category`, and `tier`, plus `spec_url` and `spec_format` unless wrapper-only (`wrapper_libraries` set, `spec_url` omitted). A real `spec_url`/in-repo spec is what makes `cli-printing-press generate <name>` work; wrapper-only entries are discovery/backing notes.
-- The entry must pass `internal/catalog` validation; rebuild the binary after editing (`catalog.FS` is a Go embed). If catalog output intentionally changes, update `testdata/golden/expected/catalog-list/stdout.txt`.
-See [`docs/CATALOG.md`](docs/CATALOG.md) for the full field schema (`category`/`tier` enums, HTTPS rules, `bearer_refresh`, `auth_key_url`, `auth_instructions`, `auth_env_vars`, `base_url`), inclusion rubric, evidence checklist, and wrapper-only entry shape.
+## Skill-version floor
+The binary's `MinSkillVersion` (`internal/cli/skill_compat.go`) is the oldest printing-press skill frontmatter `version:` this binary will run with — the reverse of `min-binary-version`. When skill shape changes so a stale install would follow deleted commands, bump `MinSkillVersion`, the skill `version:` field, and the setup-contract `# skill-version:` / `_this_skill_version=` values together. Preflight hard-blocks with `[skill-stale]` (reinstall via `scripts/install.sh --skills-only`, then restart the session; no skip). `version --json` also warns on stderr when a well-known install path still has an older copy. `TestPrintingPressSkillVersionMatchesBinaryFloor` and `TestSkillsEnforceCurrencyFloor` lock the contract.
+
+See [`docs/SKILLS.md`](docs/SKILLS.md) for the frontmatter bump rule.
 
 ## Testing
 When you change code, check for a `_test.go` file in the same package. If one exists, read it; your change likely requires a test update. If tests fail after your change, investigate whether it is a bug in your code or a stale test; do not just delete the test.
@@ -219,7 +263,7 @@ Add tests for new non-trivial logic. Match the package's existing style (typical
 Run `go test ./...` before considering your work done.
 
 ## Quality Gates
-Generated CLIs must pass 8 gates: `go mod tidy`, `govulncheck`, `go vet`, `go build`, binary build, `--help`, `version`, and `doctor`.
+Generated CLIs must pass 9 gates: `go mod tidy`, generated `go test ./...`, `govulncheck`, `go vet`, `go build`, binary build, `--help`, `version`, and `doctor`.
 Run `govulncheck` in default mode only, scoped to the generated or publishing CLI module (`./...` from that CLI directory). Do not use `-show verbose` or a whole public-library scan as a blocking gate; blocking CI scans only added or changed CLI modules, leaving whole-library sweeps to scheduled/reporting workflows.
 - For CLIs with `auth.type` of `cookie` or `composed`, `press-auth` (`cmd/press-auth/`) is the canonical cookie capture path. The generated `auth login --chrome` prefers it; the legacy extraction chain (pycookiecheat / browser-use / etc.) is the fallback when press-auth isn't installed. See [`skills/printing-press/references/auth-companion.md`](skills/printing-press/references/auth-companion.md).
 
@@ -230,7 +274,7 @@ PRs touching `.github/workflows/**` are gated by Greptile rules in [`greptile.js
 Runs informationally on landing — promote to a required branch-protection check only after a one-week green window. Canonical incident background lives in the [published-library solutions doc](https://github.com/mvanhorn/printing-press-library/blob/main/docs/solutions/security/2026-05-supply-chain-hardening.md).
 
 ## Local Artifacts
-Generated artifacts live under `~/printing-press/`, not in this repo: `library/<api-slug>/`, `manuscripts/<api-slug>/`, and `.runstate/<scope>/`. The API slug is derived by the generator from the spec title (`cleanSpecName`), and the binary name is `<api-slug>-pp-cli`. Never hardcode an API slug when the generator can derive it. See [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) for local-vs-public flow and divergence rules.
+Generated artifacts live under `~/printing-press/`, not in this repo: `library/<api-slug>/`, `manuscripts/<api-slug>/`, and `.runstate/<scope>/`. Isolated generated-CLI `GOCACHE` is `~/.cache/printing-press/go-build` (safe to delete; validate and generator tests wipe it when it exceeds 2 GiB). An explicit `GOCACHE` is left untouched. The API slug is derived by the generator from the spec title (`cleanSpecName`), and the binary name is `<api-slug>-pp-cli`. Never hardcode an API slug when the generator can derive it. See [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) for local-vs-public flow and divergence rules.
 
 ## Plan documents stay local
 When writing a plan document for cli-printing-press work, do not `git add` files under `docs/plans/`. This repo is public; plans frequently describe in-progress, unreleased, or third-party-collaborator work that should not be world-readable. The `/docs/plans/` entry in `.gitignore` enforces this for new files. `TestPlansDirectoryGitignored` in [`internal/cli/release_test.go`](internal/cli/release_test.go) fails if the gitignore line is removed.
@@ -255,13 +299,14 @@ The skill enforces preflight checks invisible from this repo's CWD (printer sent
 This copies the skills to `~/.claude/skills/`.
 
 ## Skill Authoring
-When a machine change alters what an agent should do or what a command guarantees, update the relevant `SKILL.md` in the same change; do not leave the skill as a stale manual workaround for behavior the machine now owns.
-Detail in [`docs/SKILLS.md`](docs/SKILLS.md): workflow parity, the reference-file pattern, and the `context: fork` / `user-invocable` frontmatter fields.
+When a machine change alters what an agent should do or what a command guarantees, update the relevant `SKILL.md` router and its phase files under `skills/printing-press/phases/` in the same change; do not leave the skill as a stale manual workaround for behavior the machine now owns.
+Detail in [`docs/SKILLS.md`](docs/SKILLS.md): install targets, workflow parity, the thin-spine plus `phases/` / `references/` pattern, the skill `version:` / `MinSkillVersion` bump rule, and the `context: fork` / `user-invocable` frontmatter fields.
 
 ## Code & Comment Hygiene
 ### Write-time defaults
 - No speculative future-proofing in comments.
 - No dates, incidents, or ticket numbers in code comments.
+- Exception for dependency-pin / floor comments: `GO-YYYY-NNNN` advisory IDs and CVE IDs are allowed so the floor stays tied to a named advisory (precedent: `internal/generator/xnet_guard.go` citing `GO-2026-5942`). Still forbidden: GitHub issue/PR numbers, incident tickets, dates.
 - Code comments must be self-contained; do not make them load-bearing on in-repo skills, plans, or reference prose.
 - Do not restate the field or function name in its comment; document why, not what.
 - Categorical strings -> typed const at introduction.

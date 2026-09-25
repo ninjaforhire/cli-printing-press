@@ -52,6 +52,27 @@ func TestBrowserSniffCmdWritesSpecAndExplicitTrafficAnalysis(t *testing.T) {
 	assert.Contains(t, string(data), `"endpoint_clusters"`)
 }
 
+func TestBrowserSniffCmdEmptySamplesOutputDisablesSamples(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "spec.yaml")
+	analysisPath := filepath.Join(dir, "traffic-analysis.json")
+	cmd := newBrowserSniffCmd()
+	cmd.SetArgs([]string{
+		"--har", filepath.Join("..", "..", "testdata", "sniff", "sample-enriched.json"),
+		"--output", outputPath,
+		"--analysis-output", analysisPath,
+		"--samples-output=",
+	})
+
+	require.NoError(t, cmd.Execute())
+
+	require.FileExists(t, outputPath)
+	require.FileExists(t, analysisPath)
+	assert.NoDirExists(t, browsersniff.DefaultSamplesPath(outputPath))
+}
+
 func TestBrowserSniffCmdDerivesTrafficAnalysisPath(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +88,127 @@ func TestBrowserSniffCmdDerivesTrafficAnalysisPath(t *testing.T) {
 
 	require.FileExists(t, outputPath)
 	require.FileExists(t, filepath.Join(dir, "sample-spec-traffic-analysis.json"))
+}
+
+func TestBrowserSniffCmdRejectsEmptyCapture(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	capturePath := filepath.Join(dir, "empty.har")
+	require.NoError(t, os.WriteFile(capturePath, []byte(`{"log":{"pages":[],"entries":[]}}`), 0o600))
+
+	cmd := newBrowserSniffCmd()
+	cmd.SetArgs([]string{
+		"--har", capturePath,
+		"--output", filepath.Join(dir, "spec.yaml"),
+	})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contains no entries")
+	assert.NoFileExists(t, filepath.Join(dir, "spec.yaml"))
+}
+
+func TestBrowserSniffCmdWritesLowConfidencePathHints(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	capturePath := filepath.Join(dir, "capture.json")
+	outputPath := filepath.Join(dir, "spec.yaml")
+	analysisPath := filepath.Join(dir, "traffic-analysis.json")
+	capture := browsersniff.EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []browsersniff.EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/predict/FR/STN/DUB/2026-08-16",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"price":123}`,
+			},
+		},
+	}
+	data, err := json.Marshal(capture)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(capturePath, data, 0o600))
+
+	cmd := newBrowserSniffCmd()
+	cmd.SetArgs([]string{
+		"--har", capturePath,
+		"--output", outputPath,
+		"--analysis-output", analysisPath,
+	})
+
+	require.NoError(t, cmd.Execute())
+
+	specData, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(specData), "/predict/{segment_0}/{segment_1}/{segment_2}/{date}")
+
+	analysisData, err := os.ReadFile(analysisPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(analysisData), `"low_confidence_parameters"`)
+	assert.Contains(t, string(analysisData), `"segment": "FR"`)
+	assert.Contains(t, string(analysisData), `"segment": "2026-08-16"`)
+}
+
+func TestBrowserSniffCmdWarnsOnReservedDerivedResourceNames(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		wantWarning bool
+	}{
+		{name: "reserved search resource", path: "/search/item-1", wantWarning: true},
+		{name: "ordinary predict resource", path: "/predict/item-1", wantWarning: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			capturePath := filepath.Join(dir, "capture.json")
+			outputPath := filepath.Join(dir, "spec.yaml")
+			analysisPath := filepath.Join(dir, "traffic-analysis.json")
+			capture := browsersniff.EnrichedCapture{
+				TargetURL: "https://api.example.com",
+				Entries: []browsersniff.EnrichedEntry{
+					{
+						Method:              "GET",
+						URL:                 "https://api.example.com" + tt.path,
+						ResponseStatus:      200,
+						ResponseContentType: "application/json",
+						ResponseBody:        `{"id":"item-1"}`,
+					},
+					{
+						Method:              "GET",
+						URL:                 "https://api.example.com" + strings.ReplaceAll(tt.path, "item-1", "item-2"),
+						ResponseStatus:      200,
+						ResponseContentType: "application/json",
+						ResponseBody:        `{"id":"item-2"}`,
+					},
+				},
+			}
+			data, err := json.Marshal(capture)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(capturePath, data, 0o600))
+
+			cmd := newBrowserSniffCmd()
+			cmd.SetArgs([]string{
+				"--har", capturePath,
+				"--output", outputPath,
+				"--analysis-output", analysisPath,
+			})
+			require.NoError(t, cmd.Execute())
+
+			analysisData, err := os.ReadFile(analysisPath)
+			require.NoError(t, err)
+			if tt.wantWarning {
+				assert.Contains(t, string(analysisData), `"reserved_resource_name"`)
+				assert.Contains(t, string(analysisData), `resource name \"search\" may conflict with a reserved Printing Press command or template`)
+			} else {
+				assert.NotContains(t, string(analysisData), `"reserved_resource_name"`)
+			}
+		})
+	}
 }
 
 func TestBrowserSniffCmdPreserveHostsWritesBaseURLOverrides(t *testing.T) {
@@ -117,7 +259,7 @@ func TestPrintingPressSkillDocumentsPreserveHostsForComboHAR(t *testing.T) {
 	t.Parallel()
 
 	for _, path := range []string{
-		filepath.Join("..", "..", "skills", "printing-press", "SKILL.md"),
+		filepath.Join("..", "..", "skills", "printing-press", "phases", "03-resolve-and-reuse.md"),
 		filepath.Join("..", "..", "skills", "printing-press", "references", "browser-sniff-capture.md"),
 	} {
 		data, err := os.ReadFile(path)
@@ -127,6 +269,25 @@ func TestPrintingPressSkillDocumentsPreserveHostsForComboHAR(t *testing.T) {
 		assert.Contains(t, text, "two or more sources")
 		assert.Contains(t, text, "--preserve-hosts")
 	}
+}
+
+func TestPrintingPressSkillDocumentsHARQualityGates(t *testing.T) {
+	t.Parallel()
+
+	skillText := readPrintingPressSkill(t)
+	assert.Contains(t, skillText, `.log.entries | length > 0`)
+	assert.Contains(t, skillText, "Capture again (Recommended)")
+	assert.Contains(t, skillText, "Proceed with docs-only")
+	assert.Contains(t, skillText, "empty_response_shapes")
+	assert.Contains(t, skillText, `size_class: "empty"`)
+	assert.Contains(t, skillText, `response_shape: {}`)
+
+	referenceData, err := os.ReadFile(filepath.Join("..", "..", "skills", "printing-press", "references", "browser-sniff-capture.md"))
+	require.NoError(t, err)
+	referenceText := string(referenceData)
+	assert.Contains(t, referenceText, "Immediately inspect `$DISCOVERY_DIR/traffic-analysis.json` for response-body quality")
+	assert.Contains(t, referenceText, "direct-response-*.json")
+	assert.Contains(t, referenceText, "Do not invent type definitions from endpoint names alone")
 }
 
 func TestBrowserSniffCmdReportsTrafficAnalysisWriteFailure(t *testing.T) {
@@ -332,4 +493,20 @@ func TestCrowdSniffStillWorksAfterBrowserSniffRename(t *testing.T) {
 	require.NoError(t, root.Execute(), "crowd-sniff --help must still succeed after browser-sniff rename")
 	out := buf.String()
 	assert.Contains(t, out, "crowd-sniff", "crowd-sniff help output should reference the command name")
+}
+
+func TestBrowserSniffConfigPathUsesSlug(t *testing.T) {
+	// The config path must derive from the slug via browserSniffConfigPath,
+	// not the raw --name value. A name like "Exa Public API" previously
+	// produced ~/.config/Exa Public API-pp-cli/config.toml, which never
+	// matched the slug-derived runtime path.
+	cases := []struct{ name, wantPath string }{
+		{"Exa Public API", "~/.config/exa-public-api-pp-cli/config.toml"},
+		{"MyAPI", "~/.config/myapi-pp-cli/config.toml"},
+		{"Foo Bar", "~/.config/foo-bar-pp-cli/config.toml"},
+		{"!!!", ""}, // slugifies to empty — no degenerate path
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.wantPath, browserSniffConfigPath(tc.name), "config path for name %q", tc.name)
+	}
 }

@@ -55,12 +55,23 @@ type ReimplementationCheckResult struct {
 	// dogfood analytics can distinguish "real API through abstraction" from
 	// "curated static data."
 	ExemptedViaClientDirective int `json:"exempted_via_client_directive,omitempty"`
+	// ExemptedViaComputedDataSource is the number of commands that passed
+	// via // pp:data-source computed. These commands intentionally compute
+	// from embedded policy/math tables instead of calling an API or store.
+	ExemptedViaComputedDataSource int `json:"exempted_via_computed_data_source,omitempty"`
+	// ExemptedViaLocalDataSource is the number of commands that passed
+	// via // pp:data-source local without a store package signal. These
+	// commands intentionally read local files or other local-only state.
+	ExemptedViaLocalDataSource int `json:"exempted_via_local_data_source,omitempty"`
 	// Suspicious is the list of commands whose files show no client
 	// call and no store access - the candidate hand-rolled responses.
 	Suspicious []ReimplementationFinding `json:"suspicious,omitempty"`
 	// MissingDataSourceStrategy is the list of hand-written novel-feature
-	// commands that do not declare // pp:data-source <auto|local|live>.
+	// commands that do not declare // pp:data-source <auto|local|live|computed>.
 	MissingDataSourceStrategy []ReimplementationFinding `json:"missing_data_source_strategy,omitempty"`
+	// Direct auth environment reads miss credentials saved by auth login
+	// or auth set-token; endpoint commands use config.Load + AuthHeader().
+	AuthGetenv []ReimplementationFinding `json:"auth_getenv,omitempty"`
 	// Skipped is true when the check could not run (no research dir, no
 	// novel features, no matchable files).
 	Skipped bool `json:"skipped,omitempty"`
@@ -148,6 +159,8 @@ var (
 	// with optional whitespace variations. If the command's handler body
 	// is only this, no other signal is going to save it.
 	trivialBodyRe = regexp.MustCompile(`RunE:\s*func\s*\(\s*cmd\s*\*cobra\.Command\s*,\s*args\s*\[\]string\s*\)\s*error\s*\{\s*return\s+nil\s*\}`)
+
+	todoStubRe = regexp.MustCompile(`(?i)\bTODO:\s*implement\s+novel\s+feature\b`)
 )
 
 // checkReimplementation scans the files that implement built novel
@@ -210,6 +223,7 @@ func checkReimplementation(cliDir, researchDir string) ReimplementationCheckResu
 	}
 
 	result := ReimplementationCheckResult{}
+	authEnvVars := novelAuthEnvVars(cliDir)
 	storeHelpers := storeHelperNames(helperContent)
 	clientHelpers := clientHelperNames(helperContent)
 	for _, nf := range research.NovelFeatures {
@@ -231,6 +245,10 @@ func checkReimplementation(cliDir, researchDir string) ReimplementationCheckResu
 			finding.Command = nf.Command
 			result.MissingDataSourceStrategy = append(result.MissingDataSourceStrategy, finding)
 		}
+		if finding, ok := authGetenvFinding(files, fileContent, authEnvVars); ok {
+			finding.Command = nf.Command
+			result.AuthGetenv = append(result.AuthGetenv, finding)
+		}
 		finding, kind, ok := classifyReimplementation(leaf, files, fileContent, storeHelpers, clientHelpers)
 		switch kind {
 		case exemptStore:
@@ -241,6 +259,12 @@ func checkReimplementation(cliDir, researchDir string) ReimplementationCheckResu
 			continue
 		case exemptClientDirective:
 			result.ExemptedViaClientDirective++
+			continue
+		case exemptComputedDataSource:
+			result.ExemptedViaComputedDataSource++
+			continue
+		case exemptLocalDataSource:
+			result.ExemptedViaLocalDataSource++
 			continue
 		}
 		if !ok {
@@ -279,7 +303,10 @@ var novelStaticReferenceRe = regexp.MustCompile(`(?m)^\s*//\s*pp:novel-static-re
 // verify mechanically."
 var clientCallDirectiveRe = regexp.MustCompile(`(?m)^\s*//\s*pp:client-call\b`)
 
-var dataSourceDirectiveRe = regexp.MustCompile(`(?m)^\s*//\s*pp:data-source\s+([a-zA-Z_-]+)\b`)
+var (
+	explicitDataSourceDirectiveRe = regexp.MustCompile(`(?i)^//\s*pp:data-source\s+(\S+)`)
+	trailingDataSourceDirectiveRe = regexp.MustCompile(`(?i)[.!?:;]\s+pp:data-source\s+(\S+)(?:\s*[.!])?\s*$`)
+)
 
 // exemptionKind labels which carve-out vindicated a command, so the
 // caller can route the bump to the right counter on
@@ -294,6 +321,8 @@ const (
 	exemptStore
 	exemptAnnotation
 	exemptClientDirective
+	exemptComputedDataSource
+	exemptLocalDataSource
 )
 
 // classifyReimplementation returns the best classification across the
@@ -305,19 +334,33 @@ const (
 //  2. If any file carries the `// pp:client-call` marker, the command
 //     is exempted as a real API call hidden behind an abstraction.
 //     Return (_, exemptClientDirective, true).
-//  3. If any file shows a store signal, the command is exempted as a
+//  3. If any file declares // pp:data-source local and does not look
+//     like a TODO stub, the command is accepted as intentionally local.
+//  4. If any file declares // pp:data-source computed and does not look
+//     like a TODO stub, the command is exempted as intentional pure
+//     computation.
+//  5. If any file shows a store signal, the command is exempted as a
 //     local-SQLite feature. Return (_, exemptStore, true).
-//  4. If any file shows a client signal, the command is fine. Return
+//  6. If any file shows a client signal, the command is fine. Return
 //     (_, exemptNone, true).
-//  5. Otherwise the command is suspicious. Return a ReimplementationFinding
+//  7. Otherwise the command is suspicious. Return a ReimplementationFinding
 //     naming the primary file and a reason. Return (finding, exemptNone, false).
 //
-// The trivial-body regex is consulted only when rule 5 fires, to pick
+// The trivial-body regex is consulted only when rule 6 fires, to pick
 // between "empty stub" and "hand-rolled response" as the reason.
 func classifyReimplementation(leaf string, files []string, fileContent map[string]string, storeHelpers, clientHelpers map[string]bool) (ReimplementationFinding, exemptionKind, bool) {
 	hasClient := false
 	hasTrivialBody := false
+	hasTODOStub := false
 	primaryFile := files[0]
+	hasAnyTODOStub := false
+	for _, f := range files {
+		content, ok := fileContent[f]
+		if ok && todoStubRe.MatchString(content) {
+			hasAnyTODOStub = true
+			break
+		}
+	}
 	for _, f := range files {
 		content, ok := fileContent[f]
 		if !ok {
@@ -329,11 +372,17 @@ func classifyReimplementation(leaf string, files []string, fileContent map[strin
 		if clientCallDirectiveRe.MatchString(content) {
 			return ReimplementationFinding{File: f}, exemptClientDirective, true
 		}
+		if computedDataSource(content) && !hasAnyTODOStub {
+			return ReimplementationFinding{File: f}, exemptComputedDataSource, true
+		}
 		if hasStoreSignal(content) {
 			return ReimplementationFinding{File: f}, exemptStore, true
 		}
 		if callsStoreHelper(content, storeHelpers) {
 			return ReimplementationFinding{File: f}, exemptStore, true
+		}
+		if localDataSource(content) && !hasAnyTODOStub {
+			return ReimplementationFinding{File: f}, exemptLocalDataSource, true
 		}
 		commandScan := scanCommandHandler(content, leaf)
 		clientScanContent := content
@@ -351,12 +400,18 @@ func classifyReimplementation(leaf string, files []string, fileContent map[strin
 		if trivialBodyRe.MatchString(content) {
 			hasTrivialBody = true
 		}
+		if todoStubRe.MatchString(content) {
+			hasTODOStub = true
+			hasTrivialBody = true
+		}
 	}
 	if hasClient {
 		return ReimplementationFinding{File: primaryFile}, exemptNone, true
 	}
 	reason := "hand-rolled response: no API client call, no store access"
-	if hasTrivialBody {
+	if hasTODOStub {
+		reason = "TODO stub: no implementation"
+	} else if hasTrivialBody {
 		reason = "empty body: no implementation"
 	}
 	return ReimplementationFinding{File: primaryFile, Reason: reason}, exemptNone, false
@@ -369,30 +424,91 @@ func dataSourceStrategyFinding(files []string, fileContent map[string]string) (R
 		if !ok || isGeneratedPrintingPressFile(content) {
 			continue
 		}
-		m := dataSourceDirectiveRe.FindStringSubmatch(content)
-		if len(m) == 0 {
+		strategy, invalidReason := declaredDataSourceStrategy(content)
+		if invalidReason != "" {
+			return ReimplementationFinding{File: f, Reason: invalidReason}, true
+		}
+		if strategy == "" {
 			if firstMissing == "" {
 				firstMissing = f
 			}
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(m[1])) {
-		case "auto", "local", "live":
-			return ReimplementationFinding{}, false
-		default:
-			return ReimplementationFinding{
-				File:   f,
-				Reason: "invalid // pp:data-source annotation: must be auto, local, or live",
-			}, true
-		}
+		return ReimplementationFinding{}, false
 	}
 	if firstMissing != "" {
 		return ReimplementationFinding{
 			File:   firstMissing,
-			Reason: "missing // pp:data-source <auto|local|live> annotation",
+			Reason: "missing // pp:data-source <auto|local|live|computed> annotation",
 		}, true
 	}
 	return ReimplementationFinding{}, false
+}
+
+func computedDataSource(content string) bool {
+	strategy, invalidReason := declaredDataSourceStrategy(content)
+	return invalidReason == "" && strategy == "computed"
+}
+
+func localDataSource(content string) bool {
+	strategy, invalidReason := declaredDataSourceStrategy(content)
+	return invalidReason == "" && strategy == "local"
+}
+
+// declaredDataSourceStrategy reads only parsed Go line comments. A directive
+// may lead the comment or follow punctuation in a descriptive comment;
+// comment-shaped strings and prose mentions are not declarations. When a
+// scaffold's auto default remains beside one narrower declaration, the narrower
+// strategy wins.
+func declaredDataSourceStrategy(content string) (string, string) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "", content, parser.ParseComments)
+	if err != nil {
+		return "", ""
+	}
+
+	strategies := make(map[string]struct{})
+	for _, group := range parsed.Comments {
+		for _, comment := range group.List {
+			if !strings.HasPrefix(comment.Text, "//") {
+				continue
+			}
+
+			match := explicitDataSourceDirectiveRe.FindStringSubmatch(comment.Text)
+			if len(match) == 0 {
+				match = trailingDataSourceDirectiveRe.FindStringSubmatch(comment.Text)
+			}
+			if len(match) > 1 {
+				strategy := strings.ToLower(match[1])
+				if strings.HasSuffix(strategy, ".") || strings.HasSuffix(strategy, "!") {
+					strategy = strategy[:len(strategy)-1]
+				}
+				if !validDataSourceStrategy(strategy) {
+					return "", "invalid // pp:data-source annotation: must be auto, local, live, or computed"
+				}
+				strategies[strategy] = struct{}{}
+			}
+		}
+	}
+
+	if len(strategies) > 1 {
+		delete(strategies, "auto")
+	}
+	if len(strategies) > 1 {
+		return "", "conflicting // pp:data-source annotations: use exactly one of auto, local, live, or computed"
+	}
+	for strategy := range strategies {
+		return strategy, ""
+	}
+	return "", ""
+}
+
+func validDataSourceStrategy(strategy string) bool {
+	switch strategy {
+	case "auto", "local", "live", "computed":
+		return true
+	default:
+		return false
+	}
 }
 
 func isGeneratedPrintingPressFile(content string) bool {
@@ -534,7 +650,7 @@ func hasBlockClientSignal(body *ast.BlockStmt, imports map[string]clientImportKi
 		if !ok {
 			return true
 		}
-		if isPrimitiveClientCall(call.Fun) || isImportedClientCall(call.Fun, imports, allowAnySiblingSelector) {
+		if isPrimitiveClientCall(call.Fun) || isImportedClientCall(call.Fun, imports, allowAnySiblingSelector) || isSidecarExecCall(call) {
 			found = true
 			return false
 		}
@@ -554,6 +670,34 @@ func isPrimitiveClientCall(expr ast.Expr) bool {
 		return true
 	}
 	return outboundHTTPCallRe.MatchString(strings.Join(parts, ".") + "(")
+}
+
+func isSidecarExecCall(call *ast.CallExpr) bool {
+	parts := selectorParts(call.Fun)
+	if len(parts) != 2 || parts[0] != "exec" {
+		return false
+	}
+	binaryArg := 0
+	switch parts[1] {
+	case "Command":
+		binaryArg = 0
+	case "CommandContext":
+		binaryArg = 1
+	default:
+		return false
+	}
+	if len(call.Args) <= binaryArg {
+		return false
+	}
+	lit, ok := call.Args[binaryArg].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSpace(value), "-pp-mcp")
 }
 
 func isImportedClientCall(expr ast.Expr, imports map[string]clientImportKind, allowAnySiblingSelector bool) bool {
@@ -849,4 +993,157 @@ func lastPathSegment(path string) string {
 		return leaf
 	}
 	return path
+}
+
+func novelAuthEnvVars(cliDir string) []string {
+	manifest, err := ReadCLIManifest(cliDir)
+	if err != nil {
+		return nil
+	}
+	return manifest.AuthEnvVars
+}
+
+func authGetenvFinding(files []string, fileContent map[string]string, authEnvVars []string) (ReimplementationFinding, bool) {
+	if len(authEnvVars) == 0 {
+		return ReimplementationFinding{}, false
+	}
+	wanted := make(map[string]struct{}, len(authEnvVars))
+	for _, env := range authEnvVars {
+		if env != "" {
+			wanted[env] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return ReimplementationFinding{}, false
+	}
+	for _, file := range files {
+		env, ok := authGetenvCall(fileContent[file], wanted)
+		if !ok {
+			continue
+		}
+		return ReimplementationFinding{
+			File:   file,
+			Reason: `os.Getenv("` + env + `") bypasses credentials saved by auth login / set-token; use config.Load + AuthHeader() or novelAuthHeader(flags)`,
+		}, true
+	}
+	return ReimplementationFinding{}, false
+}
+
+func authGetenvCall(content string, wanted map[string]struct{}) (string, bool) {
+	file, err := parser.ParseFile(token.NewFileSet(), "", content, 0)
+	if err != nil {
+		return "", false
+	}
+	osNames, osDot := osPackageNames(file)
+	if len(osNames) == 0 && !osDot {
+		return "", false
+	}
+	consts := stringConstValues(file)
+	var found string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if !isOsGetenvCall(call.Fun, osNames, osDot) {
+			return true
+		}
+		name, ok := getenvArgString(call.Args[0], consts)
+		if !ok {
+			return true
+		}
+		if _, want := wanted[name]; want {
+			found = name
+			return false
+		}
+		return true
+	})
+	return found, found != ""
+}
+
+func osPackageNames(file *ast.File) (map[string]bool, bool) {
+	names := map[string]bool{}
+	dot := false
+	for _, spec := range file.Imports {
+		path := strings.Trim(spec.Path.Value, "`\"")
+		if path != "os" {
+			continue
+		}
+		if spec.Name == nil {
+			names["os"] = true
+			continue
+		}
+		switch spec.Name.Name {
+		case "_":
+		case ".":
+			dot = true
+		default:
+			names[spec.Name.Name] = true
+		}
+	}
+	return names, dot
+}
+
+func isOsGetenvCall(fun ast.Expr, osNames map[string]bool, osDot bool) bool {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		ident, ok := f.X.(*ast.Ident)
+		return ok && f.Sel != nil && f.Sel.Name == "Getenv" && osNames[ident.Name]
+	case *ast.Ident:
+		return osDot && f.Name == "Getenv"
+	default:
+		return false
+	}
+}
+
+func stringConstValues(file *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name == nil || name.Name == "_" || i >= len(vs.Values) {
+					continue
+				}
+				if s, ok := stringLiteral(vs.Values[i]); ok {
+					out[name.Name] = s
+				}
+			}
+		}
+	}
+	return out
+}
+
+func getenvArgString(arg ast.Expr, consts map[string]string) (string, bool) {
+	if s, ok := stringLiteral(arg); ok {
+		return s, true
+	}
+	ident, ok := arg.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	s, ok := consts[ident.Name]
+	return s, ok
+}
+
+func stringLiteral(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return s, true
 }

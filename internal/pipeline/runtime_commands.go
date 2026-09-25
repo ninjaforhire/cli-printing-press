@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,24 +115,49 @@ type discoveredCommand struct {
 	Annotations map[string]string
 }
 
-const happyArgsAnnotation = "pp:happy-args"
+const (
+	happyArgsAnnotation  = "pp:happy-args"
+	happyStdinAnnotation = "pp:happy-stdin"
+)
 
 type happyArgs struct {
 	positionals []string
 	flags       []string
 }
 
+func splitHappyArgs(value string) []string {
+	var tokens []string
+	var token strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' && i+1 < len(value) && value[i+1] == ';' {
+			token.WriteByte(';')
+			i++
+			continue
+		}
+		if value[i] == ';' {
+			tokens = append(tokens, token.String())
+			token.Reset()
+			continue
+		}
+		token.WriteByte(value[i])
+	}
+	return append(tokens, token.String())
+}
+
 func parseHappyArgsAnnotation(value string) happyArgs {
 	var parsed happyArgs
-	for rawToken := range strings.SplitSeq(value, ";") {
+	for _, rawToken := range splitHappyArgs(value) {
 		token := strings.TrimSpace(rawToken)
 		if token == "" {
 			continue
 		}
 		if strings.HasPrefix(token, "--") {
 			name, value, ok := strings.Cut(token, "=")
-			if !ok || strings.TrimSpace(name) == "--" {
+			if strings.TrimSpace(name) == "--" {
 				continue
+			}
+			if !ok {
+				value = "true"
 			}
 			parsed.flags = append(parsed.flags, strings.TrimSpace(name), strings.TrimSpace(value))
 			continue
@@ -141,10 +167,18 @@ func parseHappyArgsAnnotation(value string) happyArgs {
 			continue
 		}
 		label = strings.TrimSpace(label)
-		if !strings.HasPrefix(label, "<") || !strings.HasSuffix(label, ">") {
+		if label == "" || strings.HasPrefix(label, "-") {
 			continue
 		}
-		parsed.positionals = append(parsed.positionals, strings.TrimSpace(value))
+		if strings.ContainsAny(label, "<>") &&
+			(!strings.HasPrefix(label, "<") || !strings.HasSuffix(label, ">")) {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parsed.positionals = append(parsed.positionals, value)
 	}
 	return parsed
 }
@@ -211,6 +245,122 @@ func mergeHappyFlags(inferred, annotated []string) []string {
 		}
 	}
 	return merged
+}
+
+func appendRuntimeFlagArgs(args, flags []string) []string {
+	out := slices.Clone(args)
+	for i := 0; i+1 < len(flags); i += 2 {
+		flag, value := flags[i], flags[i+1]
+		if isNegativeNumericArg(value) || isBooleanFlagValue(value) {
+			out = append(out, flag+"="+value)
+			continue
+		}
+		out = append(out, flag, value)
+	}
+	return out
+}
+
+func isBooleanFlagValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "false":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNegativeNumericArg(value string) bool {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "-") || strings.HasPrefix(value, "--") {
+		return false
+	}
+	_, err := strconv.ParseFloat(value, 64)
+	return err == nil
+}
+
+var outputModeNames = map[string]struct{}{
+	"agent": {}, "csv": {}, "json": {}, "output": {}, "plain": {}, "quiet": {},
+}
+
+func explicitOutputModes(args []string) []string {
+	var modes []string
+	for i := range len(args) {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		nameValue := strings.TrimPrefix(arg, "--")
+		name, value, hasValue := strings.Cut(nameValue, "=")
+		name = strings.ToLower(name)
+		if _, ok := outputModeNames[name]; ok {
+			if hasValue && (strings.EqualFold(strings.TrimSpace(value), "false") || strings.TrimSpace(value) == "0") {
+				continue
+			}
+			modes = append(modes, name)
+			continue
+		}
+	}
+	return modes
+}
+
+func hasExplicitOutputMode(args []string) bool {
+	return len(explicitOutputModes(args)) > 0
+}
+
+func hasExplicitNonJSONOutputMode(args []string) bool {
+	for _, mode := range explicitOutputModes(args) {
+		if !isJSONCompatibleOutputMode(mode) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeNonJSONOutputModes(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return append(out, args[i:]...)
+		}
+		if !strings.HasPrefix(arg, "--") {
+			out = append(out, arg)
+			continue
+		}
+		nameValue := strings.TrimPrefix(arg, "--")
+		name, value, hasValue := strings.Cut(nameValue, "=")
+		name = strings.ToLower(name)
+		if _, ok := outputModeNames[name]; !ok || isJSONCompatibleOutputMode(name) ||
+			(hasValue && (strings.EqualFold(strings.TrimSpace(value), "false") || strings.TrimSpace(value) == "0")) {
+			out = append(out, arg)
+			continue
+		}
+		if !hasValue && i+1 < len(args) && (name == "output" || isBooleanValue(args[i+1])) && args[i+1] != "--" {
+			i++
+		}
+	}
+	return out
+}
+
+func isBooleanValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "false", "1", "0":
+		return true
+	default:
+		return false
+	}
+}
+
+func isJSONCompatibleOutputMode(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "agent", "json":
+		return true
+	default:
+		return false
+	}
 }
 
 // inferPositionalArgs runs `<binary> <cmd> --help`, parses the Usage line for
@@ -284,8 +434,10 @@ func resolvePositionalValue(name string, paramDefaults map[string]string) string
 var flagDescriptorRe = regexp.MustCompile(`\[\s*-+[^\]]*\]|\[[^\]]*=[^\]]*\]`)
 
 // positionalPlaceholderRe extracts <name> and [name] placeholders from the
-// scrubbed Usage suffix. Runs after flagDescriptorRe.
-var positionalPlaceholderRe = regexp.MustCompile(`[<\[]([a-zA-Z][\w-]*)[>\]]`)
+// scrubbed Usage suffix. Pipe alternatives such as <id|uuid> are one Cobra
+// positional; they resolve to the first id-shaped alternative when present.
+// Runs after flagDescriptorRe.
+var positionalPlaceholderRe = regexp.MustCompile(`[<\[]([a-zA-Z][\w-]*(?:\|[a-zA-Z][\w-]*)*)[>\]]`)
 
 // extractPositionalPlaceholders returns the placeholder names found in a
 // cobra Usage suffix (the part after `Usage:\n  cli-name cmd-name`).
@@ -302,13 +454,28 @@ func extractPositionalPlaceholders(usageSuffix string) []string {
 	}
 	var names []string
 	for _, match := range matches {
-		name := strings.ToLower(match[1])
+		name := chooseUsagePlaceholderName(match[1])
 		if name == "flags" || name == "command" {
 			continue
 		}
 		names = append(names, name)
 	}
 	return names
+}
+
+func chooseUsagePlaceholderName(raw string) string {
+	parts := strings.Split(raw, "|")
+	for _, part := range parts {
+		name := strings.ToLower(strings.TrimSpace(part))
+		if isIDShapePlaceholderName(name) {
+			return name
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(parts[0]))
+}
+
+func isIDShapePlaceholderName(name string) bool {
+	return name == "id" || (strings.HasSuffix(name, "id") && len(name) > 2)
 }
 
 func syntheticArgValue(name string) string {
@@ -494,6 +661,11 @@ func classifyCommandKind(cmd *discoveredCommand, spec *openAPISpec) {
 		return
 	case "tail":
 		cmd.Kind = "data-layer"
+		return
+	}
+
+	if commandMutates(cmd.Annotations, []string{cmd.Name}) {
+		cmd.Kind = "write"
 		return
 	}
 

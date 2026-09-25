@@ -83,7 +83,64 @@ if [ "$_press_repo" = "true" ]; then
 else
   PRINTING_PRESS_BIN="$(command -v cli-printing-press 2>/dev/null || true)"
 fi
+if ! command -v go >/dev/null 2>&1; then
+  echo ""
+  echo "[setup-error] Go toolchain not found."
+  echo ""
+  echo "This Printing Press flow runs Go-based build or validation commands."
+  echo "Install Go 1.26.6 or newer from https://go.dev/dl/, then verify with:"
+  echo "  go version"
+  echo "Then re-run this skill."
+  echo ""
+  return 1 2>/dev/null || exit 1
+fi
 echo "PRINTING_PRESS_BIN=$PRINTING_PRESS_BIN"
+
+_pp_semver_lt() {
+  if [ -z "${PP_SEMVER_A:-}" ] || [ -z "${PP_SEMVER_B:-}" ]; then
+    echo "[setup-error] semver comparison inputs are missing." >&2
+    return 2
+  fi
+  awk -v a="${PP_SEMVER_A:-}" -v b="${PP_SEMVER_B:-}" 'BEGIN {
+    split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) {
+      if ((x[i] + 0) < (y[i] + 0)) exit 0
+      if ((x[i] + 0) > (y[i] + 0)) exit 1
+    }
+    exit 1
+  }'
+}
+
+_pp_go_version_norm() {
+  printf '%s\n' "${PP_GO_VERSION_INPUT:-}" | sed -nE 's/.*go([0-9]+)\.([0-9]+)(\.([0-9]+))?.*/\1.\2.\4/p' | sed -E 's/\.$/.0/'
+}
+
+_pp_check_go_currency() {
+  _pp_go_installed="$(PP_GO_VERSION_INPUT="$(go env GOVERSION 2>/dev/null)" _pp_go_version_norm)"
+  _pp_go_required="$(PP_GO_VERSION_INPUT="$(go version "$PRINTING_PRESS_BIN" 2>/dev/null)" _pp_go_version_norm)"
+  PP_SEMVER_A="$_pp_go_installed"
+  PP_SEMVER_B="$_pp_go_required"
+  if [ -z "$_pp_go_installed" ] || [ -z "$_pp_go_required" ] || ! _pp_semver_lt; then
+    return 0
+  fi
+
+  echo ""
+  if [ "${GOTOOLCHAIN:-auto}" = "local" ]; then
+    echo "[setup-error] Go $_pp_go_required or newer is required by this cli-printing-press binary (installed: $_pp_go_installed)."
+    echo "GOTOOLCHAIN=local disables automatic toolchain downloads, so later Go quality gates would fail."
+    echo "Install Go $_pp_go_required or newer from https://go.dev/dl/, or unset GOTOOLCHAIN."
+    echo ""
+    return 1
+  fi
+
+  echo "[go-toolchain-old] Go $_pp_go_required or newer is required by this cli-printing-press binary (installed: $_pp_go_installed)."
+  echo "PRESS_GO_INSTALLED=$_pp_go_installed"
+  echo "PRESS_GO_REQUIRED=$_pp_go_required"
+  echo "Default GOTOOLCHAIN behavior may download the required toolchain during Go commands."
+  echo ""
+  return 0
+}
+_pp_check_go_currency || { return 1 2>/dev/null || exit 1; }
 
 PRESS_BASE="$(basename "$_scope_dir" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/-/g; s/^-+//; s/-+$//')"
 if [ -z "$PRESS_BASE" ]; then
@@ -97,6 +154,50 @@ PRESS_LIBRARY="$PRESS_HOME/library"
 PRESS_MANUSCRIPTS="$PRESS_HOME/manuscripts"
 PRESS_CURRENT="$PRESS_RUNSTATE/current"
 
+_pp_check_disk_space() {
+  _pp_disk_warn_kb="${PRINTING_PRESS_DISK_WARN_KB:-3145728}"
+  _pp_disk_fail_kb="${PRINTING_PRESS_DISK_FAIL_KB:-524288}"
+  case "$_pp_disk_warn_kb$_pp_disk_fail_kb" in
+    ""|*[!0-9]*) return 0 ;;
+  esac
+
+  _pp_disk_path="$PRESS_HOME"
+  while [ ! -e "$_pp_disk_path" ] && [ "$_pp_disk_path" != "/" ]; do
+    _pp_disk_path="$(dirname "$_pp_disk_path")"
+  done
+
+  _pp_disk_avail_kb="$(df -Pk "$_pp_disk_path" 2>/dev/null | awk 'BEGIN {
+    if ((getline header) <= 0 || (getline record) <= 0) exit
+    field_count = split(record, fields)
+    if (field_count >= 4) print fields[4]
+  }')"
+  case "$_pp_disk_avail_kb" in
+    ""|*[!0-9]*) return 0 ;;
+  esac
+
+  if [ "$_pp_disk_avail_kb" -lt "$_pp_disk_fail_kb" ]; then
+    echo ""
+    echo "[setup-error] Critically low disk space on the Printing Press workspace volume."
+    echo "PRESS_DISK_PATH=$_pp_disk_path"
+    echo "PRESS_DISK_AVAIL_KB=$_pp_disk_avail_kb"
+    echo "PRESS_DISK_FAIL_KB=$_pp_disk_fail_kb"
+    echo "Free disk space or set PRINTING_PRESS_HOME to a volume with more room, then re-run this skill."
+    echo ""
+    return 1
+  fi
+
+  if [ "$_pp_disk_avail_kb" -lt "$_pp_disk_warn_kb" ]; then
+    echo ""
+    echo "[low-disk] Printing Press workspace volume is low on free space."
+    echo "PRESS_DISK_PATH=$_pp_disk_path"
+    echo "PRESS_DISK_AVAIL_KB=$_pp_disk_avail_kb"
+    echo "PRESS_DISK_WARN_KB=$_pp_disk_warn_kb"
+    echo "This flow may need several GiB for generated files, Go build cache, module downloads, or repository clones."
+    echo ""
+  fi
+}
+_pp_check_disk_space || { return 1 2>/dev/null || exit 1; }
+
 mkdir -p "$PRESS_RUNSTATE" "$PRESS_LIBRARY" "$PRESS_MANUSCRIPTS" "$PRESS_CURRENT"
 
 # --- Currency-floor check (standalone, fail-open) ---
@@ -108,7 +209,11 @@ mkdir -p "$PRESS_RUNSTATE" "$PRESS_LIBRARY" "$PRESS_MANUSCRIPTS" "$PRESS_CURRENT
 # cost is not worth its own cache here.
 if [ "$_press_repo" != "true" ] && command -v curl >/dev/null 2>&1; then
   _semver_lt() {
-    awk -v a="$1" -v b="$2" 'BEGIN {
+    if [ -z "${PP_SEMVER_A:-}" ] || [ -z "${PP_SEMVER_B:-}" ]; then
+      echo "[setup-error] semver comparison inputs are missing." >&2
+      return 2
+    fi
+    awk -v a="${PP_SEMVER_A:-}" -v b="${PP_SEMVER_B:-}" 'BEGIN {
       split(a, x, "."); split(b, y, ".")
       for (i = 1; i <= 3; i++) {
         if ((x[i] + 0) < (y[i] + 0)) exit 0
@@ -120,15 +225,15 @@ if [ "$_press_repo" != "true" ] && command -v curl >/dev/null 2>&1; then
   _floor_installed=$("$PRINTING_PRESS_BIN" version --json 2>/dev/null | sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
   _floor_doc=$(curl -fsSL --max-time 5 \
     https://raw.githubusercontent.com/mvanhorn/cli-printing-press/main/supported-versions.txt 2>/dev/null || true)
-  _floor_min=$(printf '%s\n' "$_floor_doc" | awk -F= '/^min_supported=/{print $2; exit}')
+  _floor_min=$(printf '%s\n' "$_floor_doc" | sed -nE 's/^min_supported=//p' | head -n 1)
   _floor_reason=$(printf '%s\n' "$_floor_doc" | sed -nE 's/^reason=//p' | head -n 1)
   _floor_latest=""
   if command -v go >/dev/null 2>&1; then
-    _floor_latest=$(go list -m -json github.com/mvanhorn/cli-printing-press/v4@latest 2>/dev/null | awk '/"Version":/{v=$2; gsub(/[",]/,"",v); sub(/^v/,"",v); print v; exit}')
+    _floor_latest=$(go list -m -json github.com/mvanhorn/cli-printing-press/v4@latest 2>/dev/null | sed -nE 's/^[[:space:]]*"Version":[[:space:]]*"v?([^"]+)".*/\1/p' | head -n 1)
   fi
   if [ -n "$_floor_min" ] && [ -n "$_floor_installed" ] && [ -n "$_floor_latest" ] &&
-     _semver_lt "$_floor_installed" "$_floor_min" &&
-     ! _semver_lt "$_floor_latest" "$_floor_min"; then
+     PP_SEMVER_A="$_floor_installed" PP_SEMVER_B="$_floor_min" _semver_lt &&
+     ! PP_SEMVER_A="$_floor_latest" PP_SEMVER_B="$_floor_min" _semver_lt; then
     echo ""
     echo "[upgrade-required] printing-press v$_floor_min is the minimum supported version (you have v$_floor_installed)"
     echo "PRESS_REQUIRED_MIN=$_floor_min"
@@ -141,6 +246,8 @@ fi
 <!-- PRESS_SETUP_CONTRACT_END -->
 
 After running the setup contract, capture the `PRINTING_PRESS_BIN=<abs-path>` line from stdout. **Every subsequent `cli-printing-press ...` invocation in this skill must use that absolute path** (substitute the value, not the literal `$PRINTING_PRESS_BIN` token) — `export PATH` above only affects the single Bash tool call it runs in, so later calls open a fresh shell where bare `cli-printing-press` resolves against the user's default `PATH` and a stale global can shadow the local build.
+
+If setup emitted `[go-toolchain-old]` or `[low-disk]`, surface the advisory to the user and continue unless setup also emitted `[setup-error]`. `[go-toolchain-old]` means later Go commands may download the required toolchain or fail when downloads are blocked; `[low-disk]` means this run may need several GiB for generated files, Go build cache, module downloads, or repository clones.
 
 After capturing the binary path, check binary version compatibility. Read the `min-binary-version` field from this skill's YAML frontmatter. Run `<PRINTING_PRESS_BIN> version --json` and parse the version from the output. Compare it to `min-binary-version` using semver rules. If the installed binary is older than the minimum, stop immediately and tell the user: "cli-printing-press binary vX.Y.Z is older than the minimum required vA.B.C. Run `go install github.com/mvanhorn/cli-printing-press/v4/cmd/cli-printing-press@latest` to update."
 
@@ -208,7 +315,7 @@ Read `references/transcript-parsing.md` for the full procedure. Summary of what 
 
 4. **Auto-detect target CLI** — count occurrences of each `<slug>-pp-cli` in the signals, propose the most-touched CLI as the default. Confirm with `AskUserQuestion` (single CLI: simple yes/no; multiple close: pick from list). When the user passed an explicit `<cli-name-or-path>` argument, skip auto-detect.
 
-5. **Resolve target paths** — accept short name, full name, or absolute path (per R4). Look up the public-library category by walking `~/printing-press-library/library/*/` for a matching directory. The category is needed by U7's PR open phase and is captured here so it doesn't have to be re-derived.
+5. **Resolve target paths and publish status** — accept short name, full name, or absolute path (per R4). Normalize the input to the bare CLI slug, then resolve publish status by looking up that slug in the public library (`~/printing-press-library/library/*/<slug>` when a local clone exists, otherwise the same path via `gh api`). Do not infer publish status from the local working copy's git remotes, and do not treat a missing `$PRESS_LIBRARY/<slug>` working copy as unpublished. If the slug is found in the public library, record `target_category`, `published_status: published`, and route the run through the managed-clone upstream PR path. Only use `published_status: local-only` when the slug is absent from the public library. The category is needed by U7's PR open phase and is captured here so it doesn't have to be re-derived.
 
 Each finding emitted by 1a carries `provenance: transcript`. Output flows into Phase 2 as the structured finding list documented in `references/transcript-parsing.md`.
 
@@ -379,6 +486,7 @@ findings_suppressed:
   - id: F3
     reason: "Duplicate of PR #571 (merged 2026-05-13)"
 target_binary_check: { local: "1.0.0", published: "1.0.0", status: "current" }
+published_status: published
 ```
 
 ## Phase 3 — Scope Confirmation Checkpoint (User-in-Loop #1)
@@ -463,6 +571,7 @@ If Phase 2 suppressed every finding (everything was a duplicate), Phase 3 report
 Phase 3 emits to Phase 4:
 
 ```yaml
+published_status: published
 scope_tier: bugs+features            # or bugs|all|custom
 findings_active: [...]               # the user-confirmed subset
 findings_deferred_path: <path>       # where the deferred file landed
@@ -559,6 +668,7 @@ For each finding in dependency order:
        "internal/cli/drafts.go",
        "internal/cli/threads.go"
      ],
+     "call_sites": ["printRefreshTokenExpiry("],
      "validated_outcome": "publish validate passed; focused drafts and refresh-token checks pass",
      "findings_addressed": ["F1", "F2", "F5", "F7"]
    }
@@ -584,7 +694,7 @@ For each finding in dependency order:
    }
    ```
 
-   The `.printing-press-patches/<id>.json` patch file is mandatory for code-level customizations. Inline `// PATCH(...)` source comments are optional navigation aids; the public library verifier no longer enforces a marker/comment pairing. See `~/printing-press-library/AGENTS.md` for the authoritative spec.
+   The `.printing-press-patches/<id>.json` patch file is mandatory for code-level customizations. Inline `// PATCH(...)` source comments are optional navigation aids; the public library verifier no longer enforces a marker/comment pairing. See `~/printing-press-library/AGENTS.md` for the authoritative spec. When a customization's load-bearing call can vanish while the file still exists, declare it in `call_sites` or `markers` (or `marker`) and keep those needles in `files[]` so regen and `publish validate` fail closed if it disappears. `files[]` is required for every needle; leftover matches outside those files do not count.
 
    Use `deferred_to_upstream` only when the patch intentionally leaves a future supersession path: a public API endpoint is missing today, the command relies on an unofficial host or alternate auth source, a live response shape drifted from generator assumptions, or the fix would become unnecessary once the Printing Press learns the pattern. In those cases, search `mvanhorn/cli-printing-press` issues first; reuse a matching issue or open one before the library PR, then set `upstream_issue` to that URL. Do not leave a machine-level or API-publication dependency only in the PR body.
 
@@ -641,6 +751,29 @@ fi
 
 Missing or empty patch manifest → fix locally before continuing.
 
+### Step 6 — Documentation update checkpoint
+
+Before Phase 4 can emit a pass, inspect the confirmed findings and final diff
+for every new, renamed, or changed user-facing command, flag, workflow, runtime
+mode, or MCP-visible action. Each such change must ship documentation in the
+same public-library PR:
+
+- Add or update a cookbook recipe in both `SKILL.md` and `README.md`.
+- Add or update the matching Unique Features / Unique Capabilities entry so the
+  generated docs and agent-facing summary name the changed workflow.
+- Keep examples honest: commands, flags, positional args, and output snippets
+  must match the code that now exists in `$CLI_DIR`.
+- Run `python3 .github/scripts/verify-skill/verify_skill.py --dir "$CLI_DIR"`
+  from the public-library checkout when that path exists; otherwise run the
+  packaged verifier equivalent available in the checkout and record the command.
+
+If any required doc edit or verifier result is missing, stop with a blocking
+checklist. The blocking checklist names the command and the missing
+README/SKILL/Unique Features piece. Do not move to the PR-draft checkpoint until
+the checklist is empty. If the amend only fixes internals with no user-facing
+behavior change, record `documentation_checkpoint: no-user-facing-doc-change`
+in the Phase 4 output.
+
 ### Output
 
 Phase 4 emits to Phase 5:
@@ -655,6 +788,7 @@ test_status: PASS|FAIL
 dogfood_status: PASS|FAIL|N/A    # PASS|FAIL when MODE=dogfood (or "both"); always N/A when MODE=direct
 validate_iterations: <n>
 patch_entry_count: <n>
+documentation_checkpoint: PASS|no-user-facing-doc-change
 ```
 
 **`dogfood_status` per mode.** When `MODE=dogfood`, the value reflects the result of the dogfood validation step that consumed the transcript-derived findings (PASS if the run produced a clean fix, FAIL if it surfaced a regression). When `MODE=direct`, there is no transcript to dogfood against — set `dogfood_status=N/A`. When `MODE=both`, dogfood validation still runs against the transcript half of the findings; set PASS/FAIL accordingly. This default must be set at the latest by the end of Phase 4 so Phase 7's PR body and Phase 8's RESULT block never emit an empty value.
@@ -680,6 +814,7 @@ The scrub report is written to `$PRESS_MANUSCRIPTS/<slug>/<run-id>/scrub-report.
 ## Phase 6 — PR Draft Review Checkpoint (User-in-Loop #2)
 
 This is the second and final user checkpoint. Everything that follows is unattended (push + PR-open + labels + RESULT block). Show the user EVERYTHING that's about to ship before any `gh` command fires.
+Include the documentation checkpoint result from Phase 4 in this review so undocumented user-facing changes cannot slip into the PR.
 
 ### Assemble the draft
 
@@ -696,11 +831,12 @@ PR body sections (per origin R27):
 1. **Summary** — 1-3 sentences naming the user pain and the shape of the fix
 2. **Findings** — table with ID, category, type (bug/feature), rationale
 3. **Changes** — output of `git diff --stat upstream/main..HEAD`
-4. **Verification** — build/test/dogfood/validate status from Phase 4
+4. **Verification** — build/test/dogfood/validate status from Phase 4, plus the
+   documentation checkpoint result
 5. **Evidence** — full GitHub URLs to the per-run plan doc and the `.printing-press-patches/` directory at the PR's HEAD SHA (captured AFTER push so links don't 404)
 6. **Closes #N** footer when an issue match was found in Step 6 of `library-pr-plumbing.md`
 
-Labels: `comp:<api-slug>` always; `priority:P1` for bugs-only scope, `priority:P2` for bugs+features, `priority:P3` for all-tiers.
+Labels: propose `comp:<api-slug>` always; `priority:P1` for bugs-only scope, `priority:P2` for bugs+features, `priority:P3` for all-tiers. Before applying labels to the upstream library PR, query the target repository with `gh label list --repo mvanhorn/printing-press-library --json name --jq '.[].name'` and apply only labels that exist there. If a proposed label is absent, skip it and note the skip in the PR body or final run log; do not let a missing per-CLI or priority label fail the amend flow.
 
 ### Display before gh fires
 

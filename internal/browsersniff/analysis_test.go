@@ -199,6 +199,118 @@ func TestAnalyzeTraffic_PopulatesConfidenceAndFlagsOnClusters(t *testing.T) {
 	assert.Contains(t, cluster.NormalizationFlags, "single-status")
 }
 
+func TestAnalyzeTraffic_SurfacesLowConfidenceSingleSamplePathParameters(t *testing.T) {
+	t.Parallel()
+
+	capture := &EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/predict/FR/STN/DUB/2026-08-16",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"price":123}`,
+			},
+		},
+	}
+
+	analysis, err := AnalyzeTraffic(capture)
+	require.NoError(t, err)
+	require.Len(t, analysis.EndpointClusters, 1)
+
+	cluster := analysis.EndpointClusters[0]
+	assert.Equal(t, "/predict/{segment_0}/{segment_1}/{segment_2}/{date}", cluster.Path)
+	require.Len(t, cluster.LowConfidenceParameters, 4)
+	assert.Equal(t, LowConfidenceParameter{Name: "segment_0", Segment: "FR", Position: 1, Reason: "single-sample compact uppercase code path segment"}, cluster.LowConfidenceParameters[0])
+	assert.Equal(t, LowConfidenceParameter{Name: "date", Segment: "2026-08-16", Position: 4, Reason: "single-sample ISO date path segment"}, cluster.LowConfidenceParameters[3])
+}
+
+func TestAnalyzeTraffic_WarnsWhenAllEndpointClustersHaveEmptyResponseShapes(t *testing.T) {
+	t.Parallel()
+
+	capture := &EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/v1/items",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        "",
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/v1/items/123",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        "",
+			},
+		},
+	}
+
+	analysis, err := AnalyzeTraffic(capture)
+	require.NoError(t, err)
+
+	assert.Contains(t, warningTypes(analysis.Warnings), "empty_response_shapes")
+}
+
+func TestAnalyzeTraffic_DoesNotWarnEmptyResponseShapesWhenAnyClusterHasSchema(t *testing.T) {
+	t.Parallel()
+
+	capture := &EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/v1/items",
+				ResponseStatus:      200,
+				ResponseContentType: "application/json",
+				ResponseBody:        `{"id":1}`,
+			},
+			{
+				Method:              "GET",
+				URL:                 "https://api.example.com/v1/empty",
+				ResponseStatus:      204,
+				ResponseContentType: "application/json",
+				ResponseBody:        "",
+			},
+		},
+	}
+
+	analysis, err := AnalyzeTraffic(capture)
+	require.NoError(t, err)
+
+	assert.NotContains(t, warningTypes(analysis.Warnings), "empty_response_shapes")
+}
+
+func TestAnalyzeTraffic_DoesNotWarnEmptyResponseShapesForNoContentClusters(t *testing.T) {
+	t.Parallel()
+
+	capture := &EnrichedCapture{
+		TargetURL: "https://api.example.com",
+		Entries: []EnrichedEntry{
+			{
+				Method:         "DELETE",
+				URL:            "https://api.example.com/v1/items/123",
+				ResponseStatus: 204,
+				ResponseBody:   "",
+			},
+			{
+				Method:         "PUT",
+				URL:            "https://api.example.com/v1/items/456/archive",
+				ResponseStatus: 205,
+				ResponseBody:   "",
+			},
+		},
+	}
+
+	analysis, err := AnalyzeTraffic(capture)
+	require.NoError(t, err)
+
+	assert.NotContains(t, warningTypes(analysis.Warnings), "empty_response_shapes")
+}
+
 func TestAnalyzeTraffic_ClusterConfidenceRoundTripsThroughSidecar(t *testing.T) {
 	t.Parallel()
 
@@ -886,6 +998,13 @@ func TestApplyReachabilityDefaultsAddsBrowserClearanceCookieAuth(t *testing.T) {
 			Mode:       "browser_clearance_http",
 			Confidence: 0.9,
 		},
+		Auth: AuthAnalysis{
+			Candidates: []AuthCandidate{{
+				Type:        "cookie",
+				Confidence:  0.8,
+				CookieNames: []string{"ph_session", "csrf"},
+			}},
+		},
 	}
 
 	ApplyReachabilityDefaults(apiSpec, analysis)
@@ -894,10 +1013,38 @@ func TestApplyReachabilityDefaultsAddsBrowserClearanceCookieAuth(t *testing.T) {
 	assert.Equal(t, "cookie", apiSpec.Auth.Type)
 	assert.Equal(t, "Cookie", apiSpec.Auth.Header)
 	assert.Equal(t, ".producthunt.com", apiSpec.Auth.CookieDomain)
+	assert.Equal(t, []string{"csrf", "ph_session"}, apiSpec.Auth.Cookies)
 	assert.Equal(t, []string{"PRODUCTHUNT_COOKIES"}, apiSpec.Auth.EnvVars)
 	assert.True(t, apiSpec.Auth.RequiresBrowserSession)
 	assert.Equal(t, "/posts", apiSpec.Auth.BrowserSessionValidationPath)
 	assert.Equal(t, "GET", apiSpec.Auth.BrowserSessionValidationMethod)
+	require.NoError(t, apiSpec.Validate())
+}
+
+func TestApplyReachabilityDefaultsDoesNotInventCookieAuthWithoutNames(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:      "producthunt",
+		BaseURL:   "https://www.producthunt.com",
+		Auth:      spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{"posts": {Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/posts"}}}},
+	}
+	analysis := &TrafficAnalysis{
+		Summary: TrafficAnalysisSummary{
+			TargetURL: "https://www.producthunt.com",
+		},
+		Reachability: &ReachabilityAnalysis{
+			Mode:       "browser_clearance_http",
+			Confidence: 0.9,
+		},
+	}
+
+	ApplyReachabilityDefaults(apiSpec, analysis)
+
+	assert.Equal(t, "none", apiSpec.Auth.Type)
+	assert.Empty(t, apiSpec.Auth.Cookies)
+	require.NoError(t, apiSpec.Validate())
 }
 
 func TestApplyReachabilityDefaultsDoesNotRequireProofWithoutValidationPath(t *testing.T) {
@@ -921,6 +1068,13 @@ func TestApplyReachabilityDefaultsDoesNotRequireProofWithoutValidationPath(t *te
 		Reachability: &ReachabilityAnalysis{
 			Mode:       "browser_clearance_http",
 			Confidence: 0.9,
+		},
+		Auth: AuthAnalysis{
+			Candidates: []AuthCandidate{{
+				Type:        "cookie",
+				Confidence:  0.8,
+				CookieNames: []string{"ph_session"},
+			}},
 		},
 	}
 

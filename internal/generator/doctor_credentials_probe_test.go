@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,6 +105,10 @@ func TestGeneratedDoctor_UnverifiedMessageSuggestsReadCommand(t *testing.T) {
 		"the renderer must downgrade the unverified-state to INFO; without the case it falls through to the WARN catch-all")
 	assert.Contains(t, content, `indicator = yellow("INFO")`,
 		"the unverified case must paint yellow INFO, not red FAIL or yellow WARN")
+	assert.Contains(t, content, `report["auth"] = "refused: credential present but not loaded"`,
+		"doctor must distinguish a refused stored credential from genuine absence")
+	assert.Contains(t, content, `case strings.HasPrefix(s, "refused:"):`,
+		"doctor human renderer must classify refused credentials as FAIL")
 }
 
 // TestGeneratedDoctor_SuggestReadCommandHelperGatesOnEndpointAndArgs guards
@@ -118,6 +123,8 @@ func TestGeneratedDoctor_UnverifiedMessageSuggestsReadCommand(t *testing.T) {
 //     emitted for `get <id>`-style endpoint commands), because their runtime
 //     body prints help when args are empty, so the suggestion would not
 //     actually call the API.
+//   - Reject `pp:requires-input` (required non-positional flags), because
+//     those commands also print help and exit 0 in default mode.
 //   - Restrict to list/get verbs.
 //   - Probe the Args validator with [] as a final defense.
 func TestGeneratedDoctor_SuggestReadCommandHelperGatesOnEndpointAndArgs(t *testing.T) {
@@ -134,6 +141,10 @@ func TestGeneratedDoctor_SuggestReadCommandHelperGatesOnEndpointAndArgs(t *testi
 
 	assert.Contains(t, content, `if cmd.Annotations["pp:endpoint"] == ""`,
 		"helper must reject framework commands without a pp:endpoint annotation")
+	assert.Contains(t, content, `if cmd.Annotations[requiresInputAnnotation] != ""`,
+		"helper must reject commands whose generated RunE prints help on a bare invocation")
+	assert.Contains(t, content, `const requiresInputAnnotation = "pp:requires-input"`,
+		"required-flag rejection must use the same annotation the command templates emit")
 	assert.Contains(t, content, `strings.ContainsAny(cmd.Use, "<[")`,
 		"helper must reject endpoint commands whose Use advertises positional path params")
 	assert.Contains(t, content, `verb := strings.ToLower(strings.SplitN(cmd.Use, " ", 2)[0])`,
@@ -143,18 +154,17 @@ func TestGeneratedDoctor_SuggestReadCommandHelperGatesOnEndpointAndArgs(t *testi
 	assert.Contains(t, content, `cmd.Args(cmd, []string{}) == nil`,
 		"helper must probe the Args validator with an empty arg list as a final defense")
 
-	// Hidden-parent traversal: printed CLIs mark raw resource parents Hidden
-	// to keep --help curated, but their endpoint leaves stay runnable. The
-	// walk MUST recurse into hidden parents (otherwise the suggestion is ""
-	// in nearly every CLI), while isSuggestableReadLeaf MUST still reject a
-	// leaf that is itself hidden.
+	// Hidden-parent traversal: grouping commands can be hidden from help while
+	// their descendants remain directly runnable. The walk MUST recurse into
+	// hidden parents, while isSuggestableReadLeaf MUST still reject a leaf
+	// that is itself hidden.
 	assert.Contains(t, content, `if cmd == nil || cmd.Hidden || cmd.HasSubCommands() || !cmd.Runnable()`,
 		"isSuggestableReadLeaf must reject a leaf that is itself hidden")
 	assert.NotContains(t, content, `for _, child := range cmd.Commands() {
 			if child.Hidden {
 				continue
 			}`,
-		"the walk must recurse through hidden resource parents, not skip them — skipping makes the suggestion empty in nearly every CLI")
+		"the walk must recurse through hidden grouping commands")
 }
 
 // TestGeneratedDoctor_SuggestHelperOnlyEmittedWhenNeeded pins the template
@@ -217,4 +227,117 @@ func TestGeneratedDoctor_SuggestHelperOnlyEmittedWhenNeeded(t *testing.T) {
 type minimalDoctorSpec struct {
 	VerifyPath  string
 	VerifyQuery string
+}
+
+func TestGeneratedDoctor_SuggestReadCommandSkipsRequiredFlagList(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("reqflag-demo")
+	apiSpec.Resources = map[string]spec.Resource{
+		"accounts": {
+			Description: "Accounts",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:      "GET",
+					Path:        "/accounts",
+					Description: "List accounts for an organization",
+					Params:      []spec.Param{{Name: "organization_id", Type: "string", Required: true}},
+				},
+				"get": {
+					Method: "GET",
+					Path:   "/accounts/{account_id}",
+					Params: []spec.Param{{Name: "account_id", Type: "string", Required: true, Positional: true}},
+				},
+			},
+		},
+		"widgets": {
+			Description: "Widgets",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:      "GET",
+					Path:        "/widgets",
+					Description: "List widgets",
+				},
+				"get": {
+					Method: "GET",
+					Path:   "/widgets/{widget_id}",
+					Params: []spec.Param{{Name: "widget_id", Type: "string", Required: true, Positional: true}},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "reqflag-demo-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	accountsSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "accounts_list.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(accountsSrc), `"pp:requires-input": "true"`,
+		"list with a required non-positional flag must advertise pp:requires-input")
+
+	widgetsSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "widgets_list.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(widgetsSrc), `"pp:requires-input"`,
+		"a no-input list must remain suggestable")
+
+	const runtimeTest = `package cli
+
+import "testing"
+
+func TestSuggestReadCommandSkipsRequiredFlagList(t *testing.T) {
+	root := newRootCmd(&rootFlags{})
+	got := suggestReadCommand(root)
+	if got == "accounts list" {
+		t.Fatalf("suggested %q, which exits 0 without dialing the API", got)
+	}
+	if got != "widgets list" {
+		t.Fatalf("suggestReadCommand() = %q, want widgets list (runnable default-mode read)", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "doctor_suggest_runtime_test.go"), []byte(runtimeTest), 0o600))
+	requireGeneratedCompiles(t, outputDir)
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSuggestReadCommandSkipsRequiredFlagList$", "-count=1")
+}
+
+func TestGeneratedDoctor_SuggestReadCommandEmptyWhenEveryReadNeedsInput(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("reqflag-only")
+	apiSpec.Resources = map[string]spec.Resource{
+		"widgets": {
+			Description: "Widgets",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:      "GET",
+					Path:        "/widgets",
+					Description: "List widgets for an organization",
+					Params:      []spec.Param{{Name: "organization_id", Type: "string", Required: true}},
+				},
+				"get": {
+					Method: "GET",
+					Path:   "/widgets/{widget_id}",
+					Params: []spec.Param{{Name: "widget_id", Type: "string", Required: true, Positional: true}},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "reqflag-only-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	const runtimeTest = `package cli
+
+import "testing"
+
+func TestSuggestReadCommandEmptyWhenEveryReadNeedsInput(t *testing.T) {
+	root := newRootCmd(&rootFlags{})
+	if got := suggestReadCommand(root); got != "" {
+		t.Fatalf("suggestReadCommand() = %q, want empty so doctor does not claim a no-op path verifies the token", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "doctor_suggest_empty_runtime_test.go"), []byte(runtimeTest), 0o600))
+	requireGeneratedCompiles(t, outputDir)
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSuggestReadCommandEmptyWhenEveryReadNeedsInput$", "-count=1")
 }

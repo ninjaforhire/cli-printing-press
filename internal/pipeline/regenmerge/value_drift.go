@@ -6,6 +6,7 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 )
 
@@ -75,10 +76,17 @@ func detectValueDrift(pubPath, freshPath string) *ValueDrift {
 // a fresh token.FileSet and parser.ParseFile, and the AST is discarded after
 // rendering.
 func canonicalDeclTexts(filename string) map[string]string {
+	return declTextsFromFile(filename, nil)
+}
+
+func declTextsFromFile(filename string, rewrite func(*ast.File)) map[string]string {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filename, nil, parser.SkipObjectResolution)
 	if err != nil {
 		return nil
+	}
+	if rewrite != nil {
+		rewrite(file)
 	}
 
 	out := make(map[string]string, len(file.Decls))
@@ -90,6 +98,9 @@ func canonicalDeclTexts(filename string) map[string]string {
 			decl.Doc = nil
 			if decl.Body != nil {
 				decl.Body.List = stripAddCommandStmts(decl.Body.List)
+				if isCLIRootGo(filename) {
+					stripGeneratedHighlights(decl.Body)
+				}
 			}
 		case *ast.GenDecl:
 			name = genDeclName(decl)
@@ -142,19 +153,27 @@ func canonicalRender(fset *token.FileSet, node ast.Node) (string, error) {
 		return buf.String(), nil
 	}
 	formatted = bytes.TrimPrefix(formatted, []byte("package _\n"))
-	return string(bytes.TrimSpace(formatted)), nil
+	// Removing AST statements leaves their original token positions behind;
+	// gofmt retains those empty lines. Canonical comparison is explicitly
+	// whitespace-insensitive, so collapse them after formatting.
+	text := string(bytes.TrimSpace(formatted))
+	for strings.Contains(text, "\n\n") {
+		text = strings.ReplaceAll(text, "\n\n", "\n")
+	}
+	return text, nil
 }
 
-// stripAddCommandStmts removes top-level AddCommand call statements from a
-// function body's statement list. AddCommand call additions are handled by
-// the LostRegistrations re-injection path, not by drift detection — leaving
-// them in the comparison would route every templated host file with a
-// hand-added subcommand through TEMPLATED-VALUE-DRIFT (preserve pub) and
-// silently disable the re-injection path.
+// stripAddCommandStmts removes top-level AddCommand and
+// addNovelCommandIfAbsent call statements from a function body's statement
+// list. Those call additions are handled by the LostRegistrations
+// re-injection path, not by drift detection — leaving them in the comparison
+// would route every templated host file with a novel registration through
+// TEMPLATED-VALUE-DRIFT (preserve pub) and silently disable the re-injection
+// path.
 func stripAddCommandStmts(stmts []ast.Stmt) []ast.Stmt {
 	out := make([]ast.Stmt, 0, len(stmts))
 	for _, stmt := range stmts {
-		if isAddCommandASTStmt(stmt) {
+		if isAddCommandASTStmt(stmt) || isNovelCommandsHookASTStmt(stmt) || isPreferImplementedNovelCommandsASTStmt(stmt) || isClientHooksASTStmt(stmt) {
 			continue
 		}
 		out = append(out, stmt)
@@ -162,9 +181,132 @@ func stripAddCommandStmts(stmts []ast.Stmt) []ast.Stmt {
 	return out
 }
 
+// isNovelCommandsHookASTStmt recognizes the generated optional-extension hook.
+// The hook is structural generator evolution, not authored value drift; keeping
+// it in the comparison would make a cross-spec force regen retain the old root
+// and strand an otherwise preserved markerless command source without wiring.
+func isNovelCommandsHookASTStmt(stmt ast.Stmt) bool {
+	ifStmt, ok := stmt.(*ast.IfStmt)
+	if ok && ifStmt.Else == nil && len(ifStmt.Body.List) == 1 {
+		expr, ok := ifStmt.Body.List[0].(*ast.ExprStmt)
+		if ok {
+			call, ok := expr.X.(*ast.CallExpr)
+			if ok && isIdent(call.Fun, "novelCommands") {
+				return true
+			}
+		}
+	}
+	forStmt, ok := stmt.(*ast.RangeStmt)
+	if !ok || !isIdent(forStmt.X, "novelCommandHooks") || len(forStmt.Body.List) != 1 {
+		return false
+	}
+	expr, ok := forStmt.Body.List[0].(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	return ok && isIdent(call.Fun, "hook")
+}
+
+func isPreferImplementedNovelCommandsASTStmt(stmt ast.Stmt) bool {
+	expr, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	return ok && isIdent(call.Fun, "preferImplementedNovelCommands")
+}
+
+// isClientHooksASTStmt recognizes generated client-extension execution. Both
+// the legacy loop and ApplyClientHooks call are template evolution, not
+// authored value drift; otherwise a force regen would retain an older root
+// that has no way to run a preserved package extension on MCP.
+func isClientHooksASTStmt(stmt ast.Stmt) bool {
+	if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmt.Init != nil && len(ifStmt.Body.List) == 1 {
+		assign, ok := ifStmt.Init.(*ast.AssignStmt)
+		if ok && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && isIdent(assign.Lhs[0], "err") {
+			if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && isIdent(call.Fun, "ApplyClientHooks") {
+				return true
+			}
+		}
+	}
+
+	forStmt, ok := stmt.(*ast.RangeStmt)
+	if !ok || !isIdent(forStmt.X, "clientHooks") || len(forStmt.Body.List) != 1 {
+		return false
+	}
+	ifStmt, ok := forStmt.Body.List[0].(*ast.IfStmt)
+	if !ok || ifStmt.Init == nil || len(ifStmt.Body.List) != 1 {
+		return false
+	}
+	assign, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdent(assign.Lhs[0], "err") {
+		return false
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	return ok && isIdent(call.Fun, "hook")
+}
+
+func isIdent(expr ast.Expr, name string) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+const generatedHighlightsMarker = "Highlights (not in the official API docs):"
+
+// stripGeneratedHighlights blanks only the generated Highlights list inside
+// string literals so a research-only rewrite of that block does not look like
+// a hand-edit of root.go. Short and the rest of Long stay in the comparison
+// so same-spec customizations still classify as drift.
+func stripGeneratedHighlights(body *ast.BlockStmt) {
+	if body == nil {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		s, ok := unquoteStringLit(lit.Value)
+		if !ok || !strings.Contains(s, generatedHighlightsMarker) {
+			return true
+		}
+		lit.Value = quoteLike(lit.Value, blankHighlightsSection(s))
+		return true
+	})
+}
+
+func blankHighlightsSection(s string) string {
+	before, rest, ok := strings.Cut(s, generatedHighlightsMarker)
+	if !ok {
+		return s
+	}
+	_, after, found := strings.Cut(rest, "\n\n")
+	if found {
+		return before + generatedHighlightsMarker + "\n\n" + after
+	}
+	return before + generatedHighlightsMarker
+}
+
+func unquoteStringLit(raw string) (string, bool) {
+	if len(raw) >= 2 && raw[0] == '`' && raw[len(raw)-1] == '`' {
+		return raw[1 : len(raw)-1], true
+	}
+	s, err := strconv.Unquote(raw)
+	return s, err == nil
+}
+
+func quoteLike(original, s string) string {
+	if len(original) >= 2 && original[0] == '`' && !strings.Contains(s, "`") {
+		return "`" + s + "`"
+	}
+	return strconv.Quote(s)
+}
+
 // isAddCommandASTStmt reports whether stmt is an `<recv>.AddCommand(...)`
-// call statement. Operates on go/ast (apply.go has a dave/dst counterpart
-// for the rewriter that lives there).
+// or `addNovelCommandIfAbsent(<recv>, ...)` call statement. Operates on
+// go/ast (apply.go has a dave/dst counterpart for the rewriter that lives
+// there).
 func isAddCommandASTStmt(stmt ast.Stmt) bool {
 	es, ok := stmt.(*ast.ExprStmt)
 	if !ok {
@@ -174,11 +316,7 @@ func isAddCommandASTStmt(stmt ast.Stmt) bool {
 	if !ok {
 		return false
 	}
-	sel, ok := ce.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel == nil {
-		return false
-	}
-	return sel.Sel.Name == "AddCommand"
+	return isCommandRegistrationCall(ce)
 }
 
 // genDeclName returns a canonical key for a *ast.GenDecl. For single-spec

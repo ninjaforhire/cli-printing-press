@@ -36,8 +36,11 @@ func TestClientCheckRedirectReappliesAuth(t *testing.T) {
 			"CheckRedirect must call c.authHeader with the redirect request context so nonce-bound schemes get a fresh cancellable signature")
 		require.Contains(t, closure, `req.Header.Set("Authorization", h)`,
 			"bearer auth must re-set Authorization on redirect to refresh nonce-bound headers")
-		require.Contains(t, closure, "req.URL.Host == via[0].URL.Host",
-			"auth re-stamp must be gated on same-host so a cross-domain 3xx (open redirect or partner handoff) does not leak the credential — Go's automatic Authorization stripping has already run by the time CheckRedirect is called, and any header set here is sent verbatim")
+		requireRedirectOriginHelper(t, client)
+		require.Contains(t, closure, "if !redirectLeavesOrigin(req.URL, via)",
+			"auth re-stamp must use redirectLeavesOrigin so a host change or protocol downgrade does not leak the credential")
+		require.Contains(t, closure, "if redirectLeavesOrigin(req.URL, via)",
+			"the strip path must drop the credential on a host change or protocol downgrade")
 	})
 
 	t.Run("api_key in custom header re-sets that header, not Authorization", func(t *testing.T) {
@@ -55,8 +58,11 @@ func TestClientCheckRedirectReappliesAuth(t *testing.T) {
 			"api_key in custom header must re-set that header on redirect, not Authorization")
 		require.NotContains(t, closure, `req.Header.Set("Authorization", h)`,
 			"must not also stamp Authorization when the spec uses a custom header")
-		require.Contains(t, closure, "req.URL.Host == via[0].URL.Host",
-			"custom-header auth must also be same-host gated to avoid leaking credentials across domains")
+		requireRedirectOriginHelper(t, client)
+		require.Contains(t, closure, "if !redirectLeavesOrigin(req.URL, via)",
+			"custom-header auth must re-stamp only when redirectLeavesOrigin is false so a protocol downgrade cannot keep the header")
+		require.Contains(t, closure, "if redirectLeavesOrigin(req.URL, via)",
+			"custom-header strip must drop the credential on a host change or protocol downgrade")
 	})
 
 	t.Run("api_key in query parameter skips header re-set", func(t *testing.T) {
@@ -78,6 +84,28 @@ func TestClientCheckRedirectReappliesAuth(t *testing.T) {
 		require.NotContains(t, closure, "req.Header.Set(",
 			"query-param auth must not stamp any auth header on redirect")
 	})
+
+	t.Run("browser cookie auth uses jar redirect path", func(t *testing.T) {
+		t.Parallel()
+		apiSpec := minimalSpec("redirect-cookie")
+		apiSpec.Auth = spec.AuthConfig{
+			Type:         "cookie",
+			Header:       "Cookie",
+			In:           "cookie",
+			CookieDomain: ".example.com",
+			Cookies:      []string{"session_id", "csrf_token"},
+			EnvVars:      []string{"REDIRECT_COOKIE_SESSION"},
+		}
+		client := generateClientSource(t, apiSpec)
+		closure := checkRedirectClosureBody(t, client)
+
+		require.Contains(t, closure, "Cookie-auth redirects: Go's http.Client + http.CookieJar handle",
+			"browser cookie auth must use the jar redirect branch, not the named in:cookie branch")
+		require.NotContains(t, closure, `ck.Name != "Cookie"`,
+			"browser cookie auth must not treat the Cookie header name as a cookie name when stripping redirects")
+		require.NotContains(t, closure, `req.AddCookie(ck)`,
+			"browser cookie auth redirects must not re-add preserved real cookies to cross-host redirects")
+	})
 }
 
 // checkRedirectClosureBody extracts the body of the CheckRedirect closure
@@ -92,6 +120,26 @@ func checkRedirectClosureBody(t *testing.T, content string) string {
 	end := strings.Index(body, "\n\t}\n")
 	require.NotEqual(t, -1, end, "CheckRedirect closure must be properly closed")
 	return body[:end]
+}
+
+func requireRedirectOriginHelper(t *testing.T, client string) {
+	t.Helper()
+	require.Contains(t, client, "func redirectLeavesOrigin(next *url.URL, via []*http.Request) bool {")
+	require.Contains(t, client, "if next.Host != via[0].URL.Host")
+	require.Contains(t, client, `if next.Scheme == "https"`)
+	require.Contains(t, client, `hop.URL.Scheme == "https"`)
+	require.Contains(t, client, "redirectLeavesOrigin(req.URL, via)")
+	require.Contains(t, client, "func redirectDestinationRefused(next *url.URL, via []*http.Request) error {")
+	require.Contains(t, client, "redirectDestinationRefused(req.URL, via)")
+	require.Contains(t, client, "ErrRedirectUnsupportedScheme")
+	require.Contains(t, client, "ErrRedirectProtocolDowngrade")
+	require.Contains(t, client, "ErrRedirectPrivateDestination")
+	require.Contains(t, client, "does not resolve DNS")
+	require.NotContains(t, client, "Block protocol downgrade")
+	require.NotContains(t, client, "redirectLeavesOrigin(req.URL, via[0].URL, via[len(via)-1].URL)")
+	require.NotContains(t, client, "redirectLeavesOrigin(req.URL, via[len(via)-1].URL)")
+	require.NotContains(t, client, "shouldCopyHeaderOnRedirect")
+	require.NotContains(t, client, "#4291")
 }
 
 func generateClientSource(t *testing.T, apiSpec *spec.APISpec) string {

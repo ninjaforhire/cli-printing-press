@@ -1,0 +1,5 @@
+# Locks the chrome-h2 go.mod contract: utls plus the x/crypto floor.
+# Standard-HTTP generate cases never emit this block. quic-go is not
+# a chrome-h2 require.
+
+browser-http-transport/go.mod
