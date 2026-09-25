@@ -1,6 +1,6 @@
 name: kie
 display_name: KIE.ai
-description: AI generation gateway for 100+ models — image, video, music, and voice generation via a unified async task API (Sora, Kling, Veo, Runway, Midjourney, Flux, Hailuo, Suno, and more)
+description: AI generation gateway for 150+ market endpoints — image, video, music, speech, and utilities via a unified async task API (GPT Image 2.5, Nano Banana, Seedream, Kling, Seedance, Veo 3.1, Wan, MiniMax, Suno, ElevenLabs, and more)
 category: ai
 spec_url: https://raw.githubusercontent.com/ninjaforhire/cli-printing-press/main/catalog/specs/kie-spec.yaml
 spec_format: yaml
@@ -17,35 +17,24 @@ auth_instructions: "Create an account at kie.ai, go to API Keys, and copy your k
 auth_env_vars:
   - KIE_API_KEY
 notes: >
-  KIE.ai aggregates 100+ third-party generative AI models under one API key and
-  billing surface. All generation is async: every POST endpoint returns a taskId;
-  callers poll GET /jobs/recordInfo?taskId=<id> (or /veo/record-info for Veo)
-  until state reaches success or fail. resultJson in the status response is a
-  JSON-encoded string — callers must parse it to extract resultUrls.
+  KIE.ai aggregates 150+ documented market endpoints under one API key and billing
+  surface. All generation uses the unified async pipeline: POST /jobs/createTask
+  with an open-ended model slug and model-specific input, then poll GET
+  /jobs/recordInfo?taskId=<id> until state is success or fail. The status response
+  carries resultJson as a JSON-encoded string, and HTTP 200 can still carry an
+  application error in its inner code and msg envelope.
 
-  Two distinct body shapes: (1) unified /jobs/createTask nests params under an
-  "input" key alongside the model slug; (2) legacy direct surfaces (veo, midjourney,
-  flux, runway) use flat top-level bodies. The spec covers both shapes.
+  Check credits at GET /chat/credit. POST /common/download-url converts only
+  KIE-generated file URLs into temporary 20-minute download links. Base64, URL,
+  and stream uploads use the confirmed https://kieai.redpandaai.co host at
+  /api/file-base64-upload, /api/file-url-upload, and /api/file-stream-upload;
+  uploaded files are automatically deleted after 24 hours. Gemini Omni reusable
+  audio and character assets are created at /omni/audio/create and
+  /omni/character/create.
 
-  Veo 3 is the only surface using a dedicated poll endpoint (/veo/record-info)
-  with successFlag integer semantics instead of the state string used everywhere
-  else. File upload endpoints (base64, url) produce a downloadUrl for use as
-  image_url in image-to-video and image-to-image generation requests. UPLOAD
-  DOMAIN DIVERGENCE: the forge kie_provider.py production consumer posts
-  base64 uploads to a legacy domain (https://kieai.redpandaai.co/api/file-base64-upload)
-  rather than the /file-upload-api/upload-file-base-64 path on api.kie.ai
-  documented in the spec. Both appear in official KIE docs; the api.kie.ai
-  upload paths have not been independently confirmed live. If upload commands
-  404, fall back to the kieai.redpandaai.co legacy endpoint.
-
-  Rate limit: 20 generation requests per 10 seconds, 100+ concurrent tasks.
-  Credits are consumed per generation; check balance via GET /common/credits.
-
-  This spec covers the endpoints Forge (forge/execution/integrations/kie_provider.py)
-  actually invokes. The full /market/* model registry covers Sora 2, Kling 2.x/3.0,
-  Hailuo 2.3, Seedance 2, Wan 2.7, Grok Imagine, GPT Image 2, Ideogram v3, Topaz
-  upscale, and the Suno music suite — all submitted via /jobs/createTask with the
-  appropriate model slug. See https://docs.kie.ai/ for the full model index.
+  Rate limit: up to 20 new generation requests per 10 seconds, typically allowing
+  100+ concurrent running tasks. See https://docs.kie.ai/market/quickstart for
+  current models and each model's required input keys.
 known_alternatives:
   - name: kie-docs
     url: https://docs.kie.ai/
