@@ -1,0 +1,640 @@
+openapi: "3.0.3"
+info:
+  title: KIE.ai API
+  description: |
+    KIE.ai is a unified AI generation gateway for 150+ documented market endpoints
+    across image, video, speech, music, and utility workflows. Generation uses one
+    async pipeline: POST /jobs/createTask, receive data.taskId, then poll
+    GET /jobs/recordInfo until state is success or fail. A HTTP 200 response can
+    still contain a non-200 inner `code`; inspect both code and msg.
+
+    Key surfaces:
+    - /jobs/createTask + /jobs/recordInfo — unified market-model task pipeline
+    - /chat/credit — account credit balance
+    - /common/download-url — temporary downloadable links for KIE-generated files
+    - /api/file-*-upload on kieai.redpandaai.co — base64, URL, and stream uploads
+    - /omni/audio/create + /omni/character/create — Gemini Omni reusable assets
+  version: "1.0.0"
+  contact:
+    name: KIE.ai Docs
+    url: https://docs.kie.ai/
+  x-display-name: KIE.ai
+  x-website: https://kie.ai
+  x-spec-provenance:
+    source: docs
+    docs_url: https://docs.kie.ai/
+    notes: >
+      Hand-authored from per-endpoint OpenAPI blocks on docs.kie.ai, mined
+      2026-09-23, and validation-only live probes on 2026-09-23. KIE does not
+      publish a single vendor OpenAPI file.
+    confirmed_quirks:
+      - "All generation is async: POST /jobs/createTask returns data.taskId; callers poll GET /jobs/recordInfo?taskId=<id> until state is success or fail."
+      - "GET /jobs/recordInfo polls every task type, including Veo 3.1 and Suno, and returns resultJson as a JSON string rather than an object."
+      - "KIE can return HTTP 200 for an application error; inspect the inner code and msg envelope fields."
+      - "Rate limit: up to 20 new generation requests per 10 seconds, typically allowing 100+ concurrent running tasks, per account."
+      - "Credits are documented and live-verified at GET /chat/credit; GET /common/credits returns 404."
+      - "Uploads use the confirmed host https://kieai.redpandaai.co at /api/file-base64-upload, /api/file-url-upload, and /api/file-stream-upload."
+
+servers:
+  - url: https://api.kie.ai/api/v1
+    description: KIE.ai production API
+
+tags:
+  - name: tasks
+    description: Unified async task pipeline for marketplace model generation
+  - name: credits
+    description: Account credit balance
+  - name: upload
+    description: Temporary asset upload for generation inputs
+  - name: omni
+    description: Gemini Omni reusable audio and character assets
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        KIE API key as a Bearer token. Obtain from https://kie.ai/api-key.
+        Set the KIE_API_KEY environment variable; the generated CLI sends it
+        as `Authorization: Bearer <KIE_API_KEY>`.
+      x-auth-env-vars:
+        - KIE_API_KEY
+
+  schemas:
+    TaskId:
+      type: object
+      description: Standard KIE task-creation envelope.
+      properties:
+        code:
+          type: integer
+          description: Application status code; inspect even when HTTP status is 200.
+        msg:
+          type: string
+          description: Application status message.
+        data:
+          type: object
+          properties:
+            taskId:
+              type: string
+              description: Unique task identifier; pass to /jobs/recordInfo.
+          required: [taskId]
+      required: [code, msg, data]
+
+    TaskStatus:
+      type: object
+      description: |
+        Unified task status from GET /jobs/recordInfo. `resultJson` and `param`
+        are JSON-encoded strings; parse them before using their contents.
+      properties:
+        code:
+          type: integer
+          description: Application status code; inspect even when HTTP status is 200.
+        msg:
+          type: string
+          description: Application status message.
+        data:
+          type: object
+          properties:
+            taskId:
+              type: string
+              description: Unique identifier for this task.
+            model:
+              type: string
+              description: Model used for this task.
+            state:
+              type: string
+              enum: [waiting, queuing, generating, success, fail]
+              description: Current task lifecycle state.
+            param:
+              type: string
+              description: JSON string containing the original task-creation parameters.
+            resultJson:
+              type: string
+              description: JSON string containing generated URLs or resultObject; present on success.
+            failCode:
+              type: string
+              description: Error code when the task fails; empty string on success.
+            failMsg:
+              type: string
+              description: Error message when the task fails; empty string on success.
+            costTime:
+              type: integer
+              format: int64
+              description: Processing time in milliseconds when successful.
+            completeTime:
+              type: integer
+              format: int64
+              description: Completion Unix timestamp in milliseconds.
+            createTime:
+              type: integer
+              format: int64
+              description: Creation Unix timestamp in milliseconds.
+            updateTime:
+              type: integer
+              format: int64
+              description: Update Unix timestamp in milliseconds.
+            progress:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Generation progress when supplied by the model.
+            creditsConsumed:
+              type: number
+              description: Actual credits deducted during task execution.
+          required: [taskId, state]
+      required: [code, msg, data]
+
+    CreateTaskRequest:
+      type: object
+      description: Unified task creation body for KIE market models.
+      properties:
+        model:
+          type: string
+          example: kling-3.0/video
+          description: Open-ended KIE market model slug; new slugs can be added without a CLI update.
+        input:
+          type: object
+          description: Model-specific generation parameters.
+          additionalProperties: true
+        callBackUrl:
+          type: string
+          format: uri
+          description: Optional webhook URL to receive task completion callbacks.
+      required: [model, input]
+
+    CreditsResponse:
+      type: object
+      description: Account credit balance envelope.
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          type: number
+          format: float
+          description: Remaining credit balance; a live response returned 7767.63.
+      required: [code, msg, data]
+
+    DownloadURLRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: KIE-generated file URL to convert to a temporary downloadable link.
+      required: [url]
+
+    DownloadURLResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          type: string
+          format: uri
+          description: Downloadable URL valid for 20 minutes.
+      required: [code, msg, data]
+
+    UploadBase64Request:
+      type: object
+      properties:
+        base64Data:
+          type: string
+          description: Base64 content, with or without a data-URI prefix.
+        uploadPath:
+          type: string
+          description: Storage path without leading or trailing slashes.
+        fileName:
+          type: string
+          description: Optional destination file name including extension.
+      required: [base64Data, uploadPath]
+
+    UploadURLRequest:
+      type: object
+      properties:
+        fileUrl:
+          type: string
+          format: uri
+          description: Publicly accessible source file URL.
+        uploadPath:
+          type: string
+          description: Storage path without leading or trailing slashes.
+        fileName:
+          type: string
+          description: Optional destination file name including extension.
+      required: [fileUrl, uploadPath]
+
+    UploadStreamRequest:
+      type: object
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Local file to upload.
+        uploadPath:
+          type: string
+          description: Storage path without leading or trailing slashes.
+        fileName:
+          type: string
+          description: Optional destination file name including extension.
+      required: [file, uploadPath]
+
+    UploadResponse:
+      type: object
+      description: Upload result envelope. Uploaded files are temporary and automatically deleted after 24 hours.
+      properties:
+        success:
+          type: boolean
+          description: Whether the upload succeeded.
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          type: object
+          properties:
+            fileName:
+              type: string
+            filePath:
+              type: string
+            downloadUrl:
+              type: string
+              format: uri
+            fileSize:
+              type: integer
+              description: File size in bytes.
+            mimeType:
+              type: string
+            uploadedAt:
+              type: string
+              format: date-time
+          required: [fileName, filePath, downloadUrl, fileSize, mimeType, uploadedAt]
+      required: [success, code, msg, data]
+
+    OmniAudioRequest:
+      type: object
+      properties:
+        audio_id:
+          type: string
+          description: >
+            Preset voice ID: achernar, achird, algenib, algieba, alnilam, aoede,
+            autonoe, callirrhoe, charon, despina, enceladus, erinome, fenrir,
+            gacrux, iapetus, kore, laomedeia, leda, orus, puck, pulcherrima,
+            rasalgethi, sadachbia, sadaltager, schedar, sulafat, umbriel,
+            vindemiatrix, zephyr, zubenelgenubi.
+        name:
+          type: string
+          description: Voice name; maximum length 210 characters.
+        voice_description:
+          type: string
+          description: Optional timbre, style, speaking-rate, and emotion description; maximum length 20000 characters.
+        example_dialogue:
+          type: string
+          description: Optional example dialogue; maximum length 120 characters.
+      required: [audio_id, name]
+
+    OmniAudioResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          type: object
+          properties:
+            kieAudioId:
+              type: string
+            name:
+              type: string
+          required: [kieAudioId, name]
+      required: [code, msg, data]
+
+    OmniCharacterRequest:
+      type: object
+      properties:
+        descriptions:
+          type: string
+          description: Character appearance, identity, style, clothing, or personality description.
+        image_urls:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items:
+            type: string
+            format: uri
+          description: Public character reference image URLs; portrait is index 0 and optional body image is index 1.
+        audio_ids:
+          type: array
+          items:
+            type: string
+          description: Optional audio IDs created with /omni/audio/create.
+        character_name:
+          type: string
+          description: Optional character name.
+      required: [descriptions, image_urls]
+
+    OmniCharacterResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          type: object
+          properties:
+            characterId:
+              type: string
+            characterName:
+              type: string
+            imageUrl:
+              type: string
+              format: uri
+            bodyImageUrl:
+              type: string
+              format: uri
+          required: [characterId, characterName, imageUrl, bodyImageUrl]
+      required: [code, msg, data]
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        data:
+          nullable: true
+      required: [code, msg]
+
+security:
+  - bearerAuth: []
+
+paths:
+  /jobs/createTask:
+    post:
+      operationId: createTask
+      x-pp-resource: generation
+      summary: Create a generation task
+      description: |
+        Create a generation task for any KIE market model.
+
+        Poll GET /jobs/recordInfo?taskId=<id> for status and results.
+        Each model has different `input` keys; common keys include prompt, aspect_ratio,
+        resolution, duration, image_urls / image_input / first_frame_url. See
+        https://docs.kie.ai/market/quickstart for each model's required inputs.
+
+        Image generation (newest: GPT Image 2.5 Sunburst and Flare): gpt-image-2-5-sunburst-text-to-image, gpt-image-2-5-flare-text-to-image, gpt-image-2-text-to-image, grok-imagine-image-2-0/text-to-image, nano-banana-2, nano-banana-pro, nano-banana-2-lite, seedream/5-pro-text-to-image, seedream/5-lite-text-to-image, qwen3/pro-text-to-image, flux-2/pro-text-to-image, flux-2/flex-text-to-image, wan/2-7-image-pro, google/imagen4-ultra, ideogram/v3-text-to-image, z-image, flux1-kontext, 4o-image-api.
+        Image editing / image-to-image: gpt-image-2-5-sunburst-image-to-image, gpt-image-2-5-flare-image-to-image, gpt-image-2-image-to-image, seedream/5-pro-image-to-image, seedream/5-lite-image-to-image, grok-imagine-image-2-0/image-edit, grok-imagine-image-2-0/segment-edit, grok-imagine-image-2-0/segment-map, qwen3/pro-image-to-image, flux-2/pro-image-to-image, seedream/5-pro-layer-decomposition, ideogram/character, ideogram/v3-edit; nano-banana-2 and nano-banana-pro also accept image_input.
+        Image utilities: topaz/image-upscale, recraft/crisp-upscale, recraft/remove-background.
+        Video: google/gemini-omni-flash-1-1, gemini-omni-video, wan/3-0-video, wan/3-0-video-prime, minimax-h3/text-to-video, minimax-h3/image-to-video, minimax-h3/reference-to-video, bytedance/seedance-2-5, bytedance/seedance-2, bytedance/seedance-2-fast, bytedance/seedance-2-mini, happyhorse-1-1/text-to-video, happyhorse-1-1/image-to-video, happyhorse-1-1/reference-to-video, grok-imagine-video-1-5-preview, kling-3.0/video, kling-3.0-omni/text-to-video, kling-3.0-omni/image-to-video, kling-3.0-omni/reference-to-video, kling-3.0-omni/transformation, kling/v3-turbo-text-to-video, kling/v3-turbo-image-to-video, kling-3.0/motion-control, veo-3-1, veo/extend, veo/get-1080p-video, veo/get-4k-video, pixverse-v6/text-to-video, pixverse-v6/image-to-video, pixverse-v6/transition, pixverse-v6/extend, pixverse-v6/reference-to-video, runway, runway/extend-ai-video, runway/gen4-aleph, wan/2-7-videoedit, wan/2-7-r2v.
+        Video utilities, avatar, lip-sync: topaz/video-upscale, grok-imagine/upscale, omnihuman-1-5, kling/ai-avatar-pro, infinitalk/from-audio, volcengine/video-to-video-lip-sync, wan/2-2-animate-replace.
+        Speech and audio: google/gemini-3-1-flash-tts, google/gemini-2-5-pro-tts, elevenlabs/text-to-dialogue-v3, elevenlabs/text-to-speech-multilingual-v2, elevenlabs/text-to-speech-turbo-2-5, elevenlabs/audio-isolation.
+        Music (Suno, current input.model values: V6, V6_MINI, V6_WILD): ai-music-api/generate, ai-music-api/extend, ai-music-api/sounds, ai-music-api/separate-vocals, ai-music-api/generate-lyrics, ai-music-api/create-music-video, ai-music-api/generate-midi-from-audio, ai-music-api/convert-to-wav-format. V5_5 and older are discontinued.
+      tags: [tasks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+            examples:
+              kling_3_0_video:
+                summary: Kling 3.0 video
+                value:
+                  model: kling-3.0/video
+                  input:
+                    prompt: "A joyful MIGHTY Photo Booth moment at a sunset wedding, guests laugh and wave toward the camera"
+                    sound: false
+                    duration: "5"
+                    aspect_ratio: "16:9"
+                    mode: pro
+                    multi_shots: false
+                    multi_prompt: []
+              gpt_image_2_5_sunburst:
+                summary: GPT Image 2.5 Sunburst text-to-image
+                value:
+                  model: gpt-image-2-5-sunburst-text-to-image
+                  input:
+                    prompt: "Editorial photo of a polished MIGHTY Photo Booth setup with warm event lighting and happy guests"
+                    aspect_ratio: "3:2"
+                    resolution: "2K"
+              veo_3_1:
+                summary: Veo 3.1 text-to-video
+                value:
+                  model: veo-3-1
+                  input:
+                    prompt: "A cinematic reveal of a MIGHTY Photo Booth at a rooftop celebration, warm golden-hour light"
+                    aspect_ratio: "16:9"
+                    resolution: "720p"
+                    duration: 8
+      responses:
+        "200":
+          description: Task creation envelope; use data.taskId to poll for status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskId"
+        "429":
+          description: Rate limit exceeded (20 requests per 10 seconds).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/recordInfo:
+    get:
+      operationId: getTaskStatus
+      x-pp-resource: generation
+      summary: Poll generation task status
+      description: |
+        Get a task's status and results.
+
+        Poll every KIE task type, including Veo 3.1 and Suno. When state=success,
+        parse resultJson (a JSON string) to retrieve result URLs or resultObject.
+      tags: [tasks]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Task identifier returned by /jobs/createTask.
+      responses:
+        "200":
+          description: Task status envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /chat/credit:
+    get:
+      operationId: getCredits
+      x-pp-resource: credits
+      summary: Get account credit balance
+      description: |
+        Get the account credit balance.
+
+        Returns the remaining authenticated account credit balance as a float in data.
+      tags: [credits]
+      responses:
+        "200":
+          description: Current credit balance envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditsResponse"
+
+  /common/download-url:
+    post:
+      operationId: downloadURL
+      x-pp-resource: files
+      summary: Get a download URL for a generated file
+      description: |
+        Get a temporary download link for a KIE-generated file.
+
+        Only files generated by KIE services are supported; external URLs return a 422
+        validation error. Download links expire after 20 minutes.
+      tags: [tasks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DownloadURLRequest"
+      responses:
+        "200":
+          description: Temporary download-link envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadURLResponse"
+
+  /api/file-base64-upload:
+    servers:
+      - url: https://kieai.redpandaai.co
+        description: Confirmed KIE upload host
+    post:
+      operationId: uploadFileBase64
+      x-pp-resource: files
+      summary: Upload a file via base64
+      description: |
+        Upload a base64-encoded file to KIE temporary storage.
+
+        Uploaded files are temporary and will be automatically deleted after 24 hours; download or migrate important files promptly.
+      tags: [upload]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadBase64Request"
+      responses:
+        "200":
+          description: Upload result envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+
+  /api/file-url-upload:
+    servers:
+      - url: https://kieai.redpandaai.co
+        description: Confirmed KIE upload host
+    post:
+      operationId: uploadFileFromURL
+      x-pp-resource: files
+      summary: Upload a file from a public URL
+      description: |
+        Upload a file from a public URL to KIE temporary storage.
+
+        Uploaded files are temporary and will be automatically deleted after 24 hours; download or migrate important files promptly.
+      tags: [upload]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadURLRequest"
+      responses:
+        "200":
+          description: Upload result envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+
+  /api/file-stream-upload:
+    servers:
+      - url: https://kieai.redpandaai.co
+        description: Confirmed KIE upload host
+    post:
+      operationId: uploadFileStream
+      x-pp-resource: files
+      summary: Upload a file stream
+      description: |
+        Upload a local file to KIE temporary storage.
+
+        Uploaded files are temporary and will be automatically deleted after 24 hours; download or migrate important files promptly.
+      tags: [upload]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UploadStreamRequest"
+      responses:
+        "200":
+          description: Upload result envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+
+  /omni/audio/create:
+    post:
+      operationId: createOmniAudio
+      x-pp-resource: omni
+      summary: Create a Gemini Omni audio asset
+      description: Create a reusable Gemini Omni voice asset.
+      tags: [omni]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OmniAudioRequest"
+      responses:
+        "200":
+          description: Gemini Omni audio asset envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OmniAudioResponse"
+
+  /omni/character/create:
+    post:
+      operationId: createOmniCharacter
+      x-pp-resource: omni
+      summary: Create a Gemini Omni character asset
+      description: Create a reusable Gemini Omni character asset.
+      tags: [omni]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OmniCharacterRequest"
+      responses:
+        "200":
+          description: Gemini Omni character asset envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OmniCharacterResponse"

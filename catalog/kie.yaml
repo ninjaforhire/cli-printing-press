@@ -1,0 +1,41 @@
+name: kie
+display_name: KIE.ai
+description: AI generation gateway for 150+ market endpoints — image, video, music, speech, and utilities via a unified async task API (GPT Image 2.5, Nano Banana, Seedream, Kling, Seedance, Veo 3.1, Wan, MiniMax, Suno, ElevenLabs, and more)
+category: ai
+spec_url: https://raw.githubusercontent.com/ninjaforhire/cli-printing-press/main/catalog/specs/kie-spec.yaml
+spec_format: yaml
+openapi_version: "3.0"
+tier: community
+spec_source: docs
+auth_required: true
+client_pattern: rest
+http_transport: standard
+base_url: https://api.kie.ai/api/v1
+homepage: https://docs.kie.ai/
+auth_key_url: https://kie.ai/api-key
+auth_instructions: "Create an account at kie.ai, go to API Keys, and copy your key. Set KIE_API_KEY in your environment."
+auth_env_vars:
+  - KIE_API_KEY
+notes: >
+  KIE.ai aggregates 150+ documented market endpoints under one API key and billing
+  surface. All generation uses the unified async pipeline: POST /jobs/createTask
+  with an open-ended model slug and model-specific input, then poll GET
+  /jobs/recordInfo?taskId=<id> until state is success or fail. The status response
+  carries resultJson as a JSON-encoded string, and HTTP 200 can still carry an
+  application error in its inner code and msg envelope.
+
+  Check credits at GET /chat/credit. POST /common/download-url converts only
+  KIE-generated file URLs into temporary 20-minute download links. Base64, URL,
+  and stream uploads use the confirmed https://kieai.redpandaai.co host at
+  /api/file-base64-upload, /api/file-url-upload, and /api/file-stream-upload;
+  uploaded files are automatically deleted after 24 hours. Gemini Omni reusable
+  audio and character assets are created at /omni/audio/create and
+  /omni/character/create.
+
+  Rate limit: up to 20 new generation requests per 10 seconds, typically allowing
+  100+ concurrent running tasks. See https://docs.kie.ai/market/quickstart for
+  current models and each model's required input keys.
+known_alternatives:
+  - name: kie-docs
+    url: https://docs.kie.ai/
+    language: docs
